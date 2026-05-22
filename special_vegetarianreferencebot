@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# remfan1994 comments:
+# I made this for personal use, thought I should publish it, see github.com/remfan1994/ttychatter for the robust, ncurses/bash+python and bash-only AI chat client
+set -euo pipefail
+
+MODEL="${OPENROUTER_MODEL:-openrouter/free}"
+API_URL="https://openrouter.ai/api/v1/chat/completions"
+
+[ -n "${OPENROUTER_API_KEY:-}" ] || {
+echo "error: set OPENROUTER_API_KEY first" >&2
+exit 1
+}
+
+[ "$#" -eq 2 ] || {
+echo 'usage: foodingredients --lookup "ingredient"'
+echo ' foodingredients --inquiry "question"'
+exit 1
+}
+
+mode="$1"
+query="$2"
+if [ "$mode" = "--lookup" ]; then
+system_prompt="Classify individual food ingredients for vegan and vegetarian concern. Be conservative. Do not guess manufacturer sourcing. If the source varies, say source-varies. Output concise plaintext."
+user_prompt="Ingredient lookup: $query"
+elif [ "$mode" = "--inquiry" ]; then
+system_prompt="Answer vegan/vegetarian ingredient sourcing questions. Focus on ingredient origin and likely manufacturing source, not certification. Where uncertain, estimate probability of animal harm based on industry norms and product context. No disclaimers or manufacturer-contact advice unless requested."
+user_prompt="Product/context inquiry: $query"
+else
+echo 'usage: foodingredients --lookup "ingredient"'
+echo ' foodingredients --inquiry "question"'
+exit 1
+fi
+
+payload="$(jq -n --arg model "$MODEL" --arg system "$system_prompt" --arg user "$user_prompt" '{model:$model,stream:false,messages:[{role:"system",content:$system},{role:"user",content:$user}]}')"
+
+curl -4 -sS --http1.1 \
+          --connect-timeout 10 \
+            --max-time 60 \
+              "$API_URL" \
+                -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+                  -H "Content-Type: application/json" \
+                    --data-binary "$payload" \
+                    | jq -r '.choices[0].message.content // .error.message // .'
