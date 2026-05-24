@@ -1,0 +1,10 @@
+# ttychatter.python changelog
+
+## 3.3
+
+### Changed
+- Renamed flat-layout executable to `ttychatter.python`.
+- Paths adjusted toward ttychatter OpenRouter naming.
+
+### Notes
+- Full OpenRouter behavior is led by `ttychatter.ncurses` in this pass.

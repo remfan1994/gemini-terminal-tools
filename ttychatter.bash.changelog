@@ -1,0 +1,7 @@
+# ttychatter.bash changelog
+
+## 0.6.0-bash-only
+
+### Changed
+- Renamed flat-layout executable to `ttychatter.bash`.
+- Paths adjusted toward ttychatter OpenRouter naming.

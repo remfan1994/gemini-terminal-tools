@@ -1,0 +1,1627 @@
+#!/usr/bin/env bash
+
+# ==========================================================
+# ttychatter.python
+# ----------------------------------------------------------
+# Bash + Python 3 helper terminal Gemini AI interface.
+#
+# VERSION
+#   3.2
+#
+# DESIGN ROLE
+#   This Bash edition is the lightweight, line-oriented version of
+#   ttychatter. It stays scriptable and readable while keeping
+#   capability parity with the ncurses edition where the feature makes sense
+#   in a command-line interface.
+#
+# NEW IN 2.6
+#   - Cached Gemini model list support
+#   - --update-models
+#   - --models uses cache when available
+#   - --models --all
+#   - Metadata-based model filtering
+#   - Config-style option commands: --config, --set, --unset
+#   - --forget-api-key
+#   - --rename-session OLD NEW
+#   - --show-memory / --edit-memory / --clear-memory
+#   - --editor-prompt
+#   - --attach FILE for prompt attachments
+#   - Direct --models filter/sort flags
+#   - Google Gemini help links in built-in help
+#   - --credits
+#
+# OPTIONS PARITY NOTE
+#   The ncurses version has a w3m-style options form. Bash cannot sensibly
+#   provide that UI, so it exposes equivalent line-oriented commands:
+#       --config
+#       --set KEY VALUE
+#       --unset KEY
+#
+# MODEL METADATA NOTE
+#   Google model names can change. This script uses listModels metadata such as
+#   supportedGenerationMethods, inputTokenLimit, and outputTokenLimit to help
+#   users choose models without guessing future model names.
+#
+# INPUT MODEL
+#   Interactive chat keeps the Ctrl+D send workflow. Type/paste input, then
+#   press Ctrl+D to submit it.
+#
+# RUNTIME COMMAND MODE
+#   If an input begins with a colon, such as :help or :rename notes, the
+#   client treats it as a local command instead of sending it to Gemini.
+#   This gives the Bash interface an IRC/ex-style command mode so users can
+#   manage sessions, models, memory, attachments, config, and editor workflow
+#   without quitting the running chat.
+# ==========================================================
+
+
+# ==========================================================
+# MAINTAINER COMMENTARY: WHY THIS FILE EXISTS
+# ----------------------------------------------------------
+# This is the Bash interface that intentionally uses Python 3 helper snippets.
+# It is not the same thing as the bash-only edition.  The point of this edition
+# is practical reliability: Bash orchestrates the workflow, while Python 3 does
+# the parts that shell is historically bad at, especially JSON generation,
+# JSON parsing, URL/path handling, attachment extraction, and log/context
+# parsing.  This keeps the interface scriptable and terminal-native without
+# forcing maintainers to maintain unsafe sed/awk JSON hacks for every edge case.
+#
+# Future maintainers should view this file as the "full shell client" track.
+# It should stay line-oriented and avoid ncurses-style UI ambitions, but it may
+# still provide serious capabilities: sessions, model cache/filtering, context
+# memory, attachment extraction, model testing, and config management.
+#
+# Whenever a feature is added here, ask three questions:
+#   1. Does it still make sense as a command-line action rather than a screen?
+#   2. Does the bash-only edition need a reduced-dependency equivalent?
+#   3. Does the ncurses implementation need equivalent behavior in its UI?
+#
+# This commentary is intentionally long because the project is intended to be
+# forked, repaired, and carried forward by people who were not present for the
+# original design conversations.
+# ==========================================================
+
+set -o pipefail
+
+PROGRAM="ttychatter.python"
+VERSION="3.3"
+
+CONFIG_DIR="$HOME/.config/ttychatter/openrouter"
+CONFIG_FILE="$CONFIG_DIR/config"
+MODEL_CACHE_FILE="$CONFIG_DIR/models-cache.json"
+CONFIG_READ_FILE="$CONFIG_FILE"
+
+SESSION_DIR="$HOME/.local/share/ttychatter/openrouter/sessions"
+ATTACHMENT_DIR=""
+ATTACHMENT_DIR_CONFIGURED=0
+
+FALLBACK_MODEL="gemini-2.5-flash"
+MODEL=""
+CONTEXT_TURNS=12
+CONTEXT_TURNS_EXPLICIT=0
+MODEL_TEST_PROMPT="Please reply with a short sentence confirming this model is available for text generation."
+STARTUP_NOTICE=1
+PROJECT_LEAD_NAME="remfan1994"
+PROJECT_LEAD_NOTICE="I strongly encourage everyone to get cruetly-free VEGETARIAN food and remember the 'bloodguilt' curse from the Bible.  -Project Lead, remfan1994"
+
+MODEL_FILTER_GENERATE_CONTENT=1
+MODEL_FILTER_REQUIRE_TOKENS=0
+MODEL_FILTER_HIDE_PREVIEW=0
+MODEL_MIN_INPUT_TOKENS=0
+MODEL_MIN_OUTPUT_TOKENS=0
+MODEL_SORT_ORDER="name"
+
+MAX_ATTACHMENT_BYTES=1048576
+EDITOR_CMD=""
+
+USER_NAME="$(whoami)"
+CONTEXT_BUFFER=()
+SUMMARY=""
+ATTACH_FILES=()
+
+ACTION="chat"
+SAVE=0
+SHOW_ALL_MODELS=0
+SESSION_NAME=""
+RESUME=0
+TEST_MODEL=""
+SET_KEY=""
+SET_VALUE=""
+UNSET_KEY=""
+RENAME_OLD=""
+RENAME_NEW=""
+MEMORY_SESSION=""
+EDITOR_PROMPT=0
+RUNTIME_SEND_OVERRIDE=""
+
+# ==========================================================
+# SMALL UTILITY FUNCTIONS
+# ==========================================================
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function timestamp
+# Central timestamp helper used in prompts, logs, and visible status output.
+# Keep the format stable because log parsers depend on it.
+# ----------------------------------------------------------
+timestamp() { date +"%H:%M:%S"; }
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function trim
+# Whitespace normalizer for config parsing. The config format is simple on
+# purpose so all project editions can share it.
+# ----------------------------------------------------------
+trim() { printf '%s' "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'; }
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function expand_path
+# Uses Python 3 because path expansion needs to be predictable across
+# shells. This is one of the places where the python3 edition deliberately
+# buys reliability.
+# ----------------------------------------------------------
+expand_path() {
+  python3 -c 'import os, sys; print(os.path.abspath(os.path.expandvars(os.path.expanduser(sys.argv[1]))))' "$1"
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function normalize_model_id
+# Allows both models/name and name forms. Google may return names with a
+# models/ prefix while users often configure the shorter form.
+# ----------------------------------------------------------
+normalize_model_id() {
+  case "$1" in
+    models/*) printf '%s\n' "${1#models/}" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function quote_url_component
+# quote_url_component is a named maintenance unit. Keep behavior stable,
+# check call sites before changing it, and update man pages/help/comments
+# when behavior changes.
+# ----------------------------------------------------------
+quote_url_component() {
+  python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function api_key_query
+# api_key_query is a named maintenance unit. Keep behavior stable, check
+# call sites before changing it, and update man pages/help/comments when
+# behavior changes.
+# ----------------------------------------------------------
+api_key_query() {
+  python3 -c 'import sys, urllib.parse; print(urllib.parse.urlencode({"key": sys.argv[1]}))' "$GEMINI_API_KEY"
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function models_query
+# models_query is a named maintenance unit. Keep behavior stable, check call
+# sites before changing it, and update man pages/help/comments when behavior
+# changes.
+# ----------------------------------------------------------
+models_query() {
+  python3 -c 'import sys, urllib.parse; print(urllib.parse.urlencode({"key": sys.argv[1], "pageSize": "100"}))' "$GEMINI_API_KEY"
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function effective_model
+# effective_model is a named maintenance unit. Keep behavior stable, check
+# call sites before changing it, and update man pages/help/comments when
+# behavior changes.
+# ----------------------------------------------------------
+effective_model() {
+  if [ -n "$MODEL" ]; then normalize_model_id "$MODEL"; else printf '%s\n' "$FALLBACK_MODEL"; fi
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function model_label
+# model_label is a named maintenance unit. Keep behavior stable, check call
+# sites before changing it, and update man pages/help/comments when behavior
+# changes.
+# ----------------------------------------------------------
+model_label() {
+  if [ -n "$MODEL" ]; then
+    printf '%s\n' "$(normalize_model_id "$MODEL")"
+  else
+    printf '%s (fallback; no MODEL configured)\n' "$FALLBACK_MODEL"
+  fi
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function sanitize_session_name
+# sanitize_session_name is a named maintenance unit. Keep behavior stable,
+# check call sites before changing it, and update man pages/help/comments
+# when behavior changes.
+# ----------------------------------------------------------
+sanitize_session_name() {
+  python3 -c '
+import re, sys
+name = sys.argv[1].strip()
+name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._-")
+print(name or "session")
+' "$1"
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function positive_int_or_default
+# positive_int_or_default is a named maintenance unit. Keep behavior stable,
+# check call sites before changing it, and update man pages/help/comments
+# when behavior changes.
+# ----------------------------------------------------------
+positive_int_or_default() {
+  local value="$1" fallback="$2"
+  case "$value" in
+    ""|*[!0-9]*) printf '%s\n' "$fallback" ;;
+    *) if [ "$value" -lt 0 ]; then printf '%s\n' "$fallback"; else printf '%s\n' "$value"; fi ;;
+  esac
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function truthy
+# truthy is a named maintenance unit. Keep behavior stable, check call sites
+# before changing it, and update man pages/help/comments when behavior
+# changes.
+# ----------------------------------------------------------
+truthy() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    1|yes|y|true|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function clear_screen
+# clear_screen is a named maintenance unit. Keep behavior stable, check call
+# sites before changing it, and update man pages/help/comments when behavior
+# changes.
+# ----------------------------------------------------------
+clear_screen() { if [ -t 1 ]; then printf '\033[H\033[J'; fi; }
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function editor_command
+# editor_command is a named maintenance unit. Keep behavior stable, check
+# call sites before changing it, and update man pages/help/comments when
+# behavior changes.
+# ----------------------------------------------------------
+editor_command() {
+  if [ -n "$EDITOR_CMD" ]; then printf '%s\n' "$EDITOR_CMD"
+  elif [ -n "${VISUAL:-}" ]; then printf '%s\n' "$VISUAL"
+  elif [ -n "${EDITOR:-}" ]; then printf '%s\n' "$EDITOR"
+  elif command -v nano >/dev/null 2>&1; then printf '%s\n' "nano"
+  else printf '%s\n' "vi"; fi
+}
+
+# ==========================================================
+# CONFIG FILE SUPPORT
+# ==========================================================
+
+if [ -f "$CONFIG_READ_FILE" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="$(trim "$line")"
+    case "$line" in ""|\#*) continue ;; esac
+    case "$line" in *=*) key="$(trim "${line%%=*}")"; value="$(trim "${line#*=}")" ;; *) continue ;; esac
+
+    case "$key" in
+      MODEL) MODEL="$(normalize_model_id "$value")" ;;
+      CONTEXT_TURNS) CONTEXT_TURNS="$value"; CONTEXT_TURNS_EXPLICIT=1 ;;
+      HISTORY_LIMIT) if [ "$CONTEXT_TURNS_EXPLICIT" -eq 0 ]; then CONTEXT_TURNS="$value"; fi ;;
+      GEMINI_API_KEY) GEMINI_API_KEY="${GEMINI_API_KEY:-$value}" ;;
+      SESSION_DIR) SESSION_DIR="$(expand_path "$value")" ;;
+      ATTACHMENT_DIR) ATTACHMENT_DIR="$(expand_path "$value")"; ATTACHMENT_DIR_CONFIGURED=1 ;;
+      MODEL_TEST_PROMPT) [ -n "$value" ] && MODEL_TEST_PROMPT="$value" ;;
+      STARTUP_NOTICE) STARTUP_NOTICE="$value" ;;
+      MODEL_FILTER_GENERATE_CONTENT) MODEL_FILTER_GENERATE_CONTENT="$value" ;;
+      MODEL_FILTER_REQUIRE_TOKENS) MODEL_FILTER_REQUIRE_TOKENS="$value" ;;
+      MODEL_FILTER_HIDE_PREVIEW) MODEL_FILTER_HIDE_PREVIEW="$value" ;;
+      MODEL_MIN_INPUT_TOKENS) MODEL_MIN_INPUT_TOKENS="$value" ;;
+      MODEL_MIN_OUTPUT_TOKENS) MODEL_MIN_OUTPUT_TOKENS="$value" ;;
+      MODEL_SORT_ORDER) MODEL_SORT_ORDER="$value" ;;
+      MAX_ATTACHMENT_BYTES) MAX_ATTACHMENT_BYTES="$value" ;;
+      EDITOR) EDITOR_CMD="$value" ;;
+    esac
+  done < "$CONFIG_READ_FILE"
+fi
+
+CONTEXT_TURNS="$(positive_int_or_default "$CONTEXT_TURNS" 12)"
+MODEL_MIN_INPUT_TOKENS="$(positive_int_or_default "$MODEL_MIN_INPUT_TOKENS" 0)"
+MODEL_MIN_OUTPUT_TOKENS="$(positive_int_or_default "$MODEL_MIN_OUTPUT_TOKENS" 0)"
+MAX_ATTACHMENT_BYTES="$(positive_int_or_default "$MAX_ATTACHMENT_BYTES" 1048576)"
+
+if [ "$ATTACHMENT_DIR_CONFIGURED" -eq 0 ]; then ATTACHMENT_DIR="$SESSION_DIR/attachments"; fi
+
+mkdir -p "$CONFIG_DIR" "$SESSION_DIR" "$ATTACHMENT_DIR"
+
+# ==========================================================
+# CONFIG WRITING / OPTIONS PARITY
+# ==========================================================
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function set_config_value
+# Writes one config key without destroying unrelated settings. Never use
+# this implicitly for secrets; saving should follow explicit user action.
+# ----------------------------------------------------------
+set_config_value() {
+  local key="$1" value="$2" tmp
+  mkdir -p "$CONFIG_DIR"
+  tmp="$(mktemp "${CONFIG_FILE}.tmp.XXXXXX")"
+  if [ -f "$CONFIG_FILE" ]; then
+    awk -v k="$key" -v v="$value" 'BEGIN{done=0} $0 ~ "^" k "=" {print k "=" v; done=1; next} {print} END{if(!done) print k "=" v}' "$CONFIG_FILE" > "$tmp"
+  else
+    printf '%s=%s\n' "$key" "$value" > "$tmp"
+  fi
+  mv "$tmp" "$CONFIG_FILE"
+  chmod 600 "$CONFIG_FILE" 2>/dev/null || true
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function remove_config_key
+# remove_config_key is a named maintenance unit. Keep behavior stable, check
+# call sites before changing it, and update man pages/help/comments when
+# behavior changes.
+# ----------------------------------------------------------
+remove_config_key() {
+  local key="$1" tmp
+  [ -f "$CONFIG_FILE" ] || return 0
+  tmp="$(mktemp "${CONFIG_FILE}.tmp.XXXXXX")"
+  awk -v k="$key" '$0 !~ "^" k "=" { print }' "$CONFIG_FILE" > "$tmp"
+  mv "$tmp" "$CONFIG_FILE"
+  chmod 600 "$CONFIG_FILE" 2>/dev/null || true
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function print_config_summary
+# Line-oriented equivalent of the ncurses options screen. Bash users get
+# readable configuration state without a full-screen form.
+# ----------------------------------------------------------
+print_config_summary() {
+  cat <<EOF
+$PROGRAM configuration summary
+
+Config file:
+  $CONFIG_FILE
+
+Core:
+  MODEL=$(model_label)
+  CONTEXT_TURNS=$CONTEXT_TURNS
+  SESSION_DIR=$SESSION_DIR
+  ATTACHMENT_DIR=$ATTACHMENT_DIR
+  MODEL_TEST_PROMPT=$MODEL_TEST_PROMPT
+  STARTUP_NOTICE=$STARTUP_NOTICE
+  EDITOR=$(editor_command)
+  MAX_ATTACHMENT_BYTES=$MAX_ATTACHMENT_BYTES
+
+Model cache:
+  MODEL_CACHE_FILE=$MODEL_CACHE_FILE
+  cache present: $([ -f "$MODEL_CACHE_FILE" ] && printf yes || printf no)
+
+Model filters:
+  MODEL_FILTER_GENERATE_CONTENT=$MODEL_FILTER_GENERATE_CONTENT
+  MODEL_FILTER_REQUIRE_TOKENS=$MODEL_FILTER_REQUIRE_TOKENS
+  MODEL_FILTER_HIDE_PREVIEW=$MODEL_FILTER_HIDE_PREVIEW
+  MODEL_MIN_INPUT_TOKENS=$MODEL_MIN_INPUT_TOKENS
+  MODEL_MIN_OUTPUT_TOKENS=$MODEL_MIN_OUTPUT_TOKENS
+  MODEL_SORT_ORDER=$MODEL_SORT_ORDER
+
+API key:
+  environment/config loaded: $([ -n "$GEMINI_API_KEY" ] && printf yes || printf no)
+EOF
+}
+
+# ==========================================================
+# API KEY MANAGEMENT
+# ==========================================================
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function require_api_key
+# require_api_key is a named maintenance unit. Keep behavior stable, check
+# call sites before changing it, and update man pages/help/comments when
+# behavior changes.
+# ----------------------------------------------------------
+require_api_key() {
+  if [ -z "$GEMINI_API_KEY" ]; then
+    printf '%s\n' "ERROR: GEMINI_API_KEY not set."
+    printf '%s\n' "Set it with: export GEMINI_API_KEY=your_key"
+    printf '%s\n' "or save it with: $PROGRAM --set-api-key"
+    return 1
+  fi
+  return 0
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function set_api_key_command
+# set_api_key_command is a named maintenance unit. Keep behavior stable,
+# check call sites before changing it, and update man pages/help/comments
+# when behavior changes.
+# ----------------------------------------------------------
+set_api_key_command() {
+  local answer key
+  printf '%s\n' "This will save GEMINI_API_KEY in plaintext:"
+  printf '  %s\n\n' "$CONFIG_FILE"
+  printf 'Continue? [y/N] '
+  IFS= read -r answer
+  case "$answer" in y|Y|yes|YES) ;; *) printf '%s\n' "Cancelled."; return 1 ;; esac
+  printf 'Paste Gemini API key: '
+  IFS= read -r -s key
+  printf '%s\n' ""
+  [ -n "$key" ] || { printf '%s\n' "No key entered."; return 1; }
+  set_config_value "GEMINI_API_KEY" "$key"
+  printf 'saved GEMINI_API_KEY to %s\n' "$CONFIG_FILE"
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function forget_api_key_command
+# forget_api_key_command is a named maintenance unit. Keep behavior stable,
+# check call sites before changing it, and update man pages/help/comments
+# when behavior changes.
+# ----------------------------------------------------------
+forget_api_key_command() { remove_config_key "GEMINI_API_KEY"; printf 'removed GEMINI_API_KEY from config if present\n'; }
+
+
+# ==========================================================
+# DIAGNOSTICS / DOCTOR
+# ----------------------------------------------------------
+# The Python-helper Bash edition has enough moving parts that a quick doctor
+# command is useful for users and bug reporters. It checks tools, config,
+# storage paths, model cache state, editor availability, API-key presence, and
+# network reachability. It does not send a generation prompt to Gemini.
+# ==========================================================
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function doctor_status
+# doctor_status is a named maintenance unit. Keep behavior stable, check
+# call sites before changing it, and update man pages/help/comments when
+# behavior changes.
+# ----------------------------------------------------------
+doctor_status() { printf '[%-4s] %s: %s\n' "$1" "$2" "$3"; }
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function check_writable_dir
+# check_writable_dir is a named maintenance unit. Keep behavior stable,
+# check call sites before changing it, and update man pages/help/comments
+# when behavior changes.
+# ----------------------------------------------------------
+check_writable_dir() {
+  local path="$1" test_file
+  mkdir -p "$path" 2>/dev/null || { printf 'not creatable: %s' "$path"; return 1; }
+  test_file="$path/.ttychatter.bash-write-test-$$"
+  if printf '%s' ok > "$test_file" 2>/dev/null; then rm -f "$test_file"; printf 'writable: %s' "$path"; return 0; fi
+  printf 'not writable: %s' "$path"; return 1
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function doctor_command
+# Diagnostic command. It should report environment state without sending
+# generation prompts or leaking API keys.
+# ----------------------------------------------------------
+doctor_command() {
+  local status detail editor_first
+  printf '%s\n\n' "${PROGRAM} diagnostics"
+  doctor_status OK program "$PROGRAM version $VERSION"
+  doctor_status OK bash "$BASH_VERSION"
+  for cmd in bash curl python3 sed awk grep tr mktemp; do
+    if command -v "$cmd" >/dev/null 2>&1; then doctor_status OK "command $cmd" "$(command -v "$cmd")"; else doctor_status FAIL "command $cmd" "not found"; fi
+  done
+  [ -f "$CONFIG_FILE" ] && doctor_status OK "config file" "$CONFIG_FILE present" || doctor_status WARN "config file" "not found: $CONFIG_FILE"
+  [ -n "$GEMINI_API_KEY" ] && doctor_status OK "API key" "loaded" || doctor_status WARN "API key" "not loaded"
+  detail="$(check_writable_dir "$SESSION_DIR")"; status=$?; doctor_status $([ "$status" -eq 0 ] && printf OK || printf FAIL) "session dir" "$detail"
+  detail="$(check_writable_dir "$ATTACHMENT_DIR")"; status=$?; doctor_status $([ "$status" -eq 0 ] && printf OK || printf FAIL) "attachment dir" "$detail"
+  detail="$(check_writable_dir "$(dirname "$MODEL_CACHE_FILE")")"; status=$?; doctor_status $([ "$status" -eq 0 ] && printf OK || printf FAIL) "model cache dir" "$detail"
+  [ -f "$MODEL_CACHE_FILE" ] && doctor_status OK "model cache" "$MODEL_CACHE_FILE present" || doctor_status WARN "model cache" "missing; run --update-models"
+  editor_first="${EDITOR_CMD:-${VISUAL:-${EDITOR:-vi}}}"; editor_first="${editor_first%% *}"
+  command -v "$editor_first" >/dev/null 2>&1 && doctor_status OK editor "$(command -v "$editor_first")" || doctor_status WARN editor "$editor_first not found"
+  python3 - <<'PYDOC' 2>/dev/null
+import socket
+host='generativelanguage.googleapis.com'
+try:
+    infos=socket.getaddrinfo(host,443,type=socket.SOCK_STREAM)
+    addrs=sorted({i[4][0] for i in infos})[:3]
+    print('[OK  ] DNS: %s resolves to %s' % (host, ', '.join(addrs)))
+except Exception as exc:
+    print('[WARN] DNS: lookup failed for %s: %s' % (host, exc))
+PYDOC
+  if [ -n "$GEMINI_API_KEY" ]; then
+    curl -sS --max-time 20 "https://generativelanguage.googleapis.com/v1beta/models?$(models_query)" >/dev/null 2>&1 && doctor_status OK "models endpoint" reachable || doctor_status WARN "models endpoint" "not reachable or API key invalid"
+  else
+    doctor_status WARN "models endpoint" "skipped: no API key"
+  fi
+}
+
+# ==========================================================
+# HELP / VERSION / CREDITS
+# ==========================================================
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function version
+# version is a named maintenance unit. Keep behavior stable, check call
+# sites before changing it, and update man pages/help/comments when behavior
+# changes.
+# ----------------------------------------------------------
+version() { printf '%s\n' "$PROGRAM version $VERSION"; }
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function credits
+# credits is a named maintenance unit. Keep behavior stable, check call
+# sites before changing it, and update man pages/help/comments when behavior
+# changes.
+# ----------------------------------------------------------
+credits() {
+  cat <<'EOF'
+ttychatter
+
+GitHub:
+  https://github.com/remfan1994/ttychatter
+
+Project Lead notice:
+  I strongly encourage everyone to get cruetly-free VEGETARIAN food and remember the 'bloodguilt' curse from the Bible.  -Project Lead, remfan1994
+EOF
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function help_menu
+# Built-in user help. Keep it synchronized with the man page because
+# terminal users often discover tools through --help first.
+# ----------------------------------------------------------
+help_menu() {
+  cat <<EOF
+$PROGRAM - terminal Gemini interface
+
+USAGE
+    $PROGRAM [session]
+    $PROGRAM --resume <session>
+    $PROGRAM --list
+    $PROGRAM --rename-session OLD NEW
+    $PROGRAM --models [--all]
+    $PROGRAM --models --sort input-tokens
+    $PROGRAM --models --min-input-tokens 100000
+    $PROGRAM --update-models
+    $PROGRAM --test-model MODEL [--save]
+    $PROGRAM --select-model [--save]
+    $PROGRAM --config
+    $PROGRAM --set KEY VALUE
+    $PROGRAM --unset KEY
+    $PROGRAM --set-api-key
+    $PROGRAM --forget-api-key
+    $PROGRAM --show-memory <session>
+    $PROGRAM --edit-memory <session>
+    $PROGRAM --clear-memory <session>
+    $PROGRAM --editor-prompt [session]
+    $PROGRAM --attach FILE [session]
+    $PROGRAM --credits
+    $PROGRAM --doctor
+    $PROGRAM --version
+    $PROGRAM --help
+
+MODEL HELP
+    Official Gemini model documentation:
+        https://ai.google.dev/gemini-api/docs/models
+
+    Models API reference:
+        https://ai.google.dev/api/models
+
+    GenerateContent API reference:
+        https://ai.google.dev/api/generate-content
+
+RUNTIME COMMAND MODE
+    During a running chat, submit a line beginning with ':' to run a local
+    command instead of sending a message to Gemini.
+
+    Examples:
+        :help
+        :rename research-notes
+        :models
+        :select-model
+        :test-model gemini-2.5-flash
+        :config
+        :set CONTEXT_TURNS 20
+        :memory
+        :attach /path/to/file.txt
+        :editor
+        :credits
+
+    Type :help during a chat for the full runtime command list.
+
+INPUT
+    Type/paste text, then press Ctrl+D to send.
+
+VERSION
+    $PROGRAM version $VERSION
+EOF
+}
+
+# ==========================================================
+# SESSION MANAGEMENT
+# ==========================================================
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function resolve_session_path
+# resolve_session_path is a named maintenance unit. Keep behavior stable,
+# check call sites before changing it, and update man pages/help/comments
+# when behavior changes.
+# ----------------------------------------------------------
+resolve_session_path() { printf '%s/%s.log\n' "$SESSION_DIR" "$1"; }
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function list_sessions
+# list_sessions is a named maintenance unit. Keep behavior stable, check
+# call sites before changing it, and update man pages/help/comments when
+# behavior changes.
+# ----------------------------------------------------------
+list_sessions() { local path; for path in "$SESSION_DIR"/*.log; do [ -e "$path" ] || continue; basename "$path" .log; done; }
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function rename_session_command
+# rename_session_command is a named maintenance unit. Keep behavior stable,
+# check call sites before changing it, and update man pages/help/comments
+# when behavior changes.
+# ----------------------------------------------------------
+rename_session_command() {
+  local old_name new_name old_path new_path
+  old_name="$(sanitize_session_name "$1")"; new_name="$(sanitize_session_name "$2")"
+  old_path="$(resolve_session_path "$old_name")"; new_path="$(resolve_session_path "$new_name")"
+  [ -f "$old_path" ] || { printf 'ERROR: session not found: %s\n' "$old_name" >&2; return 1; }
+  [ ! -e "$new_path" ] || { printf 'ERROR: destination already exists: %s\n' "$new_name" >&2; return 1; }
+  mv "$old_path" "$new_path"
+  printf 'renamed session: %s -> %s\n' "$old_name" "$new_name"
+}
+
+# ==========================================================
+# MEMORY SNAPSHOTS / RESUME CONTEXT
+# ==========================================================
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function load_context_from_path
+# Rebuilds memory from logs. This is what lets Bash resumed sessions behave
+# like conversations instead of just appending to a file.
+# ----------------------------------------------------------
+load_context_from_path() {
+  local path="$1"
+  python3 - "$path" "$CONTEXT_TURNS" <<'PY'
+import re, sys
+path = sys.argv[1]
+try: context_turns = int(sys.argv[2])
+except Exception: context_turns = 12
+max_entries = max(1, context_turns) * 2
+entry_re = re.compile(r"^\[(\d{2}:\d{2}:\d{2})\] ([^:]+): (.*)$")
+entries=[]; current_speaker=None; current_lines=[]
+try: fh=open(path,"r",encoding="utf-8",errors="replace")
+except FileNotFoundError: sys.exit(0)
+with fh:
+    for raw_line in fh:
+        line=raw_line.rstrip("\n"); m=entry_re.match(line)
+        if m:
+            if current_speaker is not None: entries.append((current_speaker,"\n".join(current_lines)))
+            current_speaker=m.group(2); current_lines=[m.group(3)]
+        elif current_speaker is not None:
+            current_lines.append(line)
+if current_speaker is not None: entries.append((current_speaker,"\n".join(current_lines)))
+snapshot=None
+for speaker,text in reversed(entries):
+    if speaker.lower() != "system": continue
+    lines=text.splitlines()
+    if not lines or lines[0].strip() != "CONTEXT_BEGIN": continue
+    items=[]
+    for line in lines[1:]:
+        if line.strip() == "CONTEXT_END": break
+        if line.startswith("User: ") or line.startswith("Assistant: "): items.append(line)
+    snapshot=items[-max_entries:]
+    break
+if snapshot is None:
+    fallback=[]
+    for speaker,text in entries:
+        if speaker.lower() == "system": continue
+        label="Assistant" if speaker == "Gemini" else "User"
+        fallback.append(f"{label}: {text}")
+    snapshot=fallback[-max_entries:]
+for entry in snapshot:
+    sys.stdout.buffer.write(entry.encode("utf-8",errors="replace") + b"\0")
+PY
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function load_context_from_session
+# load_context_from_session is a named maintenance unit. Keep behavior
+# stable, check call sites before changing it, and update man
+# pages/help/comments when behavior changes.
+# ----------------------------------------------------------
+load_context_from_session() { load_context_from_path "$SESSION"; }
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function rebuild_context_from_session
+# rebuild_context_from_session is a named maintenance unit. Keep behavior
+# stable, check call sites before changing it, and update man
+# pages/help/comments when behavior changes.
+# ----------------------------------------------------------
+rebuild_context_from_session() {
+  CONTEXT_BUFFER=()
+  [ -f "$SESSION" ] || return 0
+  while IFS= read -r -d '' entry; do CONTEXT_BUFFER+=("$entry"); done < <(load_context_from_session)
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function write_context_snapshot_to_path
+# Stores explicit memory snapshots in logs. This future-proofs resume
+# behavior when logs become long or contain non-chat system messages.
+# ----------------------------------------------------------
+write_context_snapshot_to_path() {
+  local path="$1" ts="$2" item
+  printf '[%s] system: CONTEXT_BEGIN\n' "$ts" >> "$path"
+  for item in "${CONTEXT_BUFFER[@]}"; do printf '%s\n' "$item" >> "$path"; done
+  printf '[%s] system: CONTEXT_END\n' "$ts" >> "$path"
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function write_context_snapshot
+# write_context_snapshot is a named maintenance unit. Keep behavior stable,
+# check call sites before changing it, and update man pages/help/comments
+# when behavior changes.
+# ----------------------------------------------------------
+write_context_snapshot() { write_context_snapshot_to_path "$SESSION" "$1"; }
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function show_memory_command
+# show_memory_command is a named maintenance unit. Keep behavior stable,
+# check call sites before changing it, and update man pages/help/comments
+# when behavior changes.
+# ----------------------------------------------------------
+show_memory_command() {
+  local name path
+  name="$(sanitize_session_name "$1")"; path="$(resolve_session_path "$name")"
+  [ -f "$path" ] || { printf 'ERROR: session not found: %s\n' "$name" >&2; return 1; }
+  while IFS= read -r -d '' entry; do printf '%s\n' "$entry"; done < <(load_context_from_path "$path")
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function edit_memory_command
+# edit_memory_command is a named maintenance unit. Keep behavior stable,
+# check call sites before changing it, and update man pages/help/comments
+# when behavior changes.
+# ----------------------------------------------------------
+edit_memory_command() {
+  local name path tmp editor
+  name="$(sanitize_session_name "$1")"; path="$(resolve_session_path "$name")"
+  [ -f "$path" ] || { printf 'ERROR: session not found: %s\n' "$name" >&2; return 1; }
+  tmp="$(mktemp)"
+  while IFS= read -r -d '' entry; do printf '%s\n' "$entry" >> "$tmp"; done < <(load_context_from_path "$path")
+  editor="$(editor_command)"; $editor "$tmp"
+  mapfile -t CONTEXT_BUFFER < "$tmp"; rm -f "$tmp"
+  write_context_snapshot_to_path "$path" "$(timestamp)"
+  printf 'saved edited memory snapshot for session: %s\n' "$name"
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function clear_memory_command
+# clear_memory_command is a named maintenance unit. Keep behavior stable,
+# check call sites before changing it, and update man pages/help/comments
+# when behavior changes.
+# ----------------------------------------------------------
+clear_memory_command() {
+  local name path
+  name="$(sanitize_session_name "$1")"; path="$(resolve_session_path "$name")"
+  [ -f "$path" ] || { printf 'ERROR: session not found: %s\n' "$name" >&2; return 1; }
+  CONTEXT_BUFFER=(); write_context_snapshot_to_path "$path" "$(timestamp)"
+  printf 'cleared memory snapshot for session: %s\n' "$name"
+}
+
+# ==========================================================
+# MODEL CACHE / FILTERING
+# ==========================================================
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function fetch_models_live_json
+# The only live model-list fetch path. Ordinary model display should prefer
+# cache when possible to avoid unnecessary network calls.
+# ----------------------------------------------------------
+fetch_models_live_json() {
+  local url response curl_status
+  require_api_key || return 1
+  url="https://generativelanguage.googleapis.com/v1beta/models?$(models_query)"
+  response="$(curl -sS --max-time 60 "$url" 2>&1)"; curl_status=$?
+  [ "$curl_status" -eq 0 ] || { printf '%s\n' "curl error while fetching models: $response" >&2; return 1; }
+  printf '%s' "$response"
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function update_models_cache
+# User-requested cache refresh. Model discovery belongs here, not hidden
+# behind casual screen navigation.
+# ----------------------------------------------------------
+update_models_cache() {
+  local json
+  json="$(fetch_models_live_json)" || return 1
+  printf '%s' "$json" > "$MODEL_CACHE_FILE"
+  chmod 600 "$MODEL_CACHE_FILE" 2>/dev/null || true
+  printf 'updated model cache: %s\n' "$MODEL_CACHE_FILE" >&2
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function models_json_for_display
+# models_json_for_display is a named maintenance unit. Keep behavior stable,
+# check call sites before changing it, and update man pages/help/comments
+# when behavior changes.
+# ----------------------------------------------------------
+models_json_for_display() {
+  if [ -f "$MODEL_CACHE_FILE" ]; then cat "$MODEL_CACHE_FILE"; else update_models_cache >/dev/null || return 1; cat "$MODEL_CACHE_FILE"; fi
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function parse_models_table
+# Python JSON parsing keeps model metadata extraction maintainable. Bash-
+# only must approximate this, but this edition should stay robust.
+# ----------------------------------------------------------
+parse_models_table() {
+  local show_all="$1"
+  python3 - "$show_all" "$MODEL_FILTER_GENERATE_CONTENT" "$MODEL_FILTER_REQUIRE_TOKENS" "$MODEL_FILTER_HIDE_PREVIEW" "$MODEL_MIN_INPUT_TOKENS" "$MODEL_MIN_OUTPUT_TOKENS" "$MODEL_SORT_ORDER" <<'PY'
+import json, sys
+show_all=sys.argv[1]=="1"
+truth=lambda v: v.lower() in ("1","yes","true","on","y")
+filter_generate=truth(sys.argv[2]); require_tokens=truth(sys.argv[3]); hide_preview=truth(sys.argv[4])
+try: min_in=int(sys.argv[5])
+except Exception: min_in=0
+try: min_out=int(sys.argv[6])
+except Exception: min_out=0
+sort_order=sys.argv[7]
+raw=sys.stdin.read()
+try: data=json.loads(raw)
+except Exception as exc:
+    print(f"ERROR: could not parse model list JSON: {exc}", file=sys.stderr); sys.exit(1)
+if "error" in data:
+    err=data["error"]; print(f"ERROR: Gemini API error {err.get('code','')}: {err.get('message','')}", file=sys.stderr); sys.exit(1)
+rows=[]
+for item in data.get("models",[]):
+    methods=item.get("supportedGenerationMethods",[]) or []
+    name=item.get("name",""); model_id=name.split("/",1)[1] if name.startswith("models/") else name
+    if not model_id: continue
+    display=item.get("displayName",model_id); desc=item.get("description","") or ""
+    input_limit=int(item.get("inputTokenLimit") or 0); output_limit=int(item.get("outputTokenLimit") or 0)
+    hay=" ".join([model_id,display,desc]).lower(); preview=any(w in hay for w in ["preview","experimental"," exp ","-exp","_exp"])
+    if not show_all:
+        if filter_generate and "generateContent" not in methods: continue
+        if require_tokens and (input_limit<=0 or output_limit<=0): continue
+        if hide_preview and preview: continue
+        if input_limit < min_in: continue
+        if output_limit < min_out: continue
+    badges=[]
+    if "generateContent" in methods: badges.append("gen")
+    if preview: badges.append("preview")
+    if input_limit<=0 or output_limit<=0: badges.append("no-token-meta")
+    rows.append((model_id,display,input_limit,output_limit,",".join(badges) or "-"))
+if sort_order=="input_desc": rows.sort(key=lambda r:(r[2],r[0]), reverse=True)
+elif sort_order=="output_desc": rows.sort(key=lambda r:(r[3],r[0]), reverse=True)
+elif sort_order=="display": rows.sort(key=lambda r:(r[1].lower(),r[0]))
+else: rows.sort(key=lambda r:r[0])
+for r in rows: print("\t".join(map(str,r)))
+PY
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function print_models
+# print_models is a named maintenance unit. Keep behavior stable, check call
+# sites before changing it, and update man pages/help/comments when behavior
+# changes.
+# ----------------------------------------------------------
+print_models() { local json; json="$(models_json_for_display)" || return 1; printf '%s' "$json" | parse_models_table "$SHOW_ALL_MODELS"; }
+
+# ==========================================================
+# GEMINI GENERATION / ATTACHMENT PAYLOADS
+# ==========================================================
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function make_generate_payload
+# Builds valid Gemini JSON from arbitrary text and attachments. Do not
+# replace with manual string interpolation unless you also handle quotes,
+# backslashes, and newlines.
+# ----------------------------------------------------------
+make_generate_payload() {
+  python3 - "$MAX_ATTACHMENT_BYTES" "$@" <<'PY'
+import base64, json, mimetypes, os, sys
+from pathlib import Path
+max_bytes=int(sys.argv[1]); files=sys.argv[2:]; text=sys.stdin.read(); parts=[{"text":text}]
+text_exts={".txt",".md",".markdown",".sh",".bash",".py",".json",".yml",".yaml",".html",".css",".js",".c",".cpp",".h",".sql",".log"}
+for file_name in files:
+    path=Path(os.path.expanduser(os.path.expandvars(file_name)))
+    if not path.exists() or not path.is_file(): print(f"attachment not found: {file_name}", file=sys.stderr); sys.exit(2)
+    size=path.stat().st_size
+    if size > max_bytes: print(f"attachment too large: {path} ({size} bytes > {max_bytes})", file=sys.stderr); sys.exit(2)
+    mime=mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+    if mime.startswith("text/") or path.suffix.lower() in text_exts:
+        content=path.read_text(encoding="utf-8",errors="replace")
+        parts.append({"text":f"\n\n[Attached file: {path.name}]\n{content}"})
+    else:
+        data=base64.b64encode(path.read_bytes()).decode("ascii")
+        parts.append({"inlineData":{"mimeType":mime,"data":data}})
+print(json.dumps({"contents":[{"parts":parts}]}))
+PY
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function parse_generate_response
+# parse_generate_response is a named maintenance unit. Keep behavior stable,
+# check call sites before changing it, and update man pages/help/comments
+# when behavior changes.
+# ----------------------------------------------------------
+parse_generate_response() {
+  python3 - "$ATTACHMENT_DIR" "$SESSION_NAME" <<'PY'
+import base64, json, mimetypes, os, re, sys
+attachment_dir=sys.argv[1]; session_name=sys.argv[2] or "model-test"; raw=sys.stdin.read()
+try: data=json.loads(raw)
+except Exception as exc: print(f"invalid JSON response: {exc}; raw response: {raw[:1000]}"); sys.exit(1)
+if "error" in data:
+    err=data["error"]; print(f"Gemini API error {err.get('code','')}: {err.get('message','')}"); sys.exit(1)
+os.makedirs(attachment_dir, exist_ok=True); texts=[]
+def next_number(kind,ext):
+    highest=0; regex=re.compile(r"^"+re.escape(session_name)+r"-"+re.escape(kind)+r"-(\d{2,})"+re.escape(ext)+r"$")
+    for name in os.listdir(attachment_dir):
+        m=regex.match(name)
+        if m: highest=max(highest,int(m.group(1)))
+    return highest+1
+def save_inline(part):
+    inline=part.get("inlineData") or part.get("inline_data")
+    if not inline: return None
+    mime=inline.get("mimeType") or inline.get("mime_type") or "application/octet-stream"; data=inline.get("data") or ""
+    ext=mimetypes.guess_extension(mime) or ".bin"; kind=mime.split("/",1)[0].replace("+","p").replace("#","sharp")
+    filename=f"{session_name}-{kind}-{next_number(kind,ext):02d}{ext}"; path=os.path.join(attachment_dir,filename)
+    with open(path,"wb") as fh: fh.write(base64.b64decode(data))
+    return f"\n[attachment saved]\nfile: {filename}\nlocation: {attachment_dir}\n"
+for cand in data.get("candidates",[]):
+    for part in cand.get("content",{}).get("parts",[]):
+        if "text" in part: texts.append(part["text"])
+        notice=save_inline(part)
+        if notice: texts.append(notice)
+        file_data=part.get("fileData") or part.get("file_data")
+        if file_data:
+            uri=file_data.get("fileUri") or file_data.get("file_uri") or ""
+            texts.append(f"\n[fileData returned]\nuri: {uri}\n")
+output="\n".join(t for t in texts if t is not None)
+if not output.strip(): print("Gemini returned an empty text response"); sys.exit(1)
+print(output)
+PY
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function call_gemini_model
+# Single generation transport function. Keeping curl/API behavior
+# centralized makes quota, timeout, and error changes easier.
+# ----------------------------------------------------------
+call_gemini_model() {
+  local model="$1" prompt="$2" timeout="${3:-120}"; shift 3 || true
+  local attachments=("$@") clean_model quoted_model url response curl_status output parse_status
+  require_api_key || return 1
+  clean_model="$(normalize_model_id "$model")"; quoted_model="$(quote_url_component "$clean_model")"
+  url="https://generativelanguage.googleapis.com/v1beta/models/$quoted_model:generateContent?$(api_key_query)"
+  response="$(printf '%s' "$prompt" | make_generate_payload "${attachments[@]}" | curl -sS --max-time "$timeout" -H "Content-Type: application/json" -d @- "$url" 2>&1)"
+  curl_status=$?
+  [ "$curl_status" -eq 0 ] || { printf '%s\n' "curl error: $response"; return 1; }
+  output="$(printf '%s' "$response" | parse_generate_response)"; parse_status=$?
+  printf '%s\n' "$output"; return "$parse_status"
+}
+
+# ==========================================================
+# USER-OPERATED MODEL TESTING / SELECTION
+# ==========================================================
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function run_model_test
+# User-operated model test. This replaced automatic scanning/probing; keep
+# it one-model-at-a-time and transparent to the user.
+# ----------------------------------------------------------
+run_model_test() { local model="$1" output status; printf 'Model: %s\nTest prompt: %s\n\n--- model response ---\n' "$model" "$MODEL_TEST_PROMPT"; output="$(call_gemini_model "$model" "$MODEL_TEST_PROMPT" 60)"; status=$?; printf '%s\n--- end response ---\n' "$output"; return "$status"; }
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function test_model_command
+# test_model_command is a named maintenance unit. Keep behavior stable,
+# check call sites before changing it, and update man pages/help/comments
+# when behavior changes.
+# ----------------------------------------------------------
+test_model_command() {
+  local model="$1" status
+  [ -n "$model" ] || { printf '%s\n' "ERROR: --test-model requires a model id." >&2; return 2; }
+  run_model_test "$model"; status=$?
+  if [ "$status" -eq 0 ] && [ "$SAVE" -eq 1 ]; then set_config_value "MODEL" "$(normalize_model_id "$model")"; printf 'saved MODEL=%s to %s\n' "$(normalize_model_id "$model")" "$CONFIG_FILE" >&2; fi
+  return "$status"
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function removed_autoscan_message
+# removed_autoscan_message is a named maintenance unit. Keep behavior
+# stable, check call sites before changing it, and update man
+# pages/help/comments when behavior changes.
+# ----------------------------------------------------------
+removed_autoscan_message() { cat <<EOF
+ERROR: --autoscan-model has been removed.
+
+Use one of these instead:
+
+    $PROGRAM --models
+    $PROGRAM --test-model <model_id>
+    $PROGRAM --select-model
+
+The Bash version no longer probes every available model automatically.
+EOF
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function select_model_command
+# Line-oriented model selector. It should use metadata and optional testing
+# instead of guessing which future Google model is best.
+# ----------------------------------------------------------
+select_model_command() {
+  local json table line index choice selected_line selected_model display input_limit output_limit badges answer test_status=0
+  json="$(models_json_for_display)" || return 1
+  table="$(printf '%s' "$json" | parse_models_table "$SHOW_ALL_MODELS")" || return 1
+  [ -n "$table" ] || { printf '%s\n' "No models matched current filters."; return 1; }
+  mapfile -t MODEL_LINES <<< "$table"
+  printf '%s\n\n' "Available models:"
+  index=1
+  for line in "${MODEL_LINES[@]}"; do
+    IFS=$'\t' read -r selected_model display input_limit output_limit badges <<< "$line"
+    printf '%3d) %s - %s (input:%s output:%s badges:%s)\n' "$index" "$selected_model" "$display" "$input_limit" "$output_limit" "$badges"
+    index=$((index + 1))
+  done
+  printf '\nSelect model number: '; IFS= read -r choice
+  case "$choice" in ""|*[!0-9]*) printf '%s\n' "Invalid selection."; return 1 ;; esac
+  [ "$choice" -ge 1 ] && [ "$choice" -le "${#MODEL_LINES[@]}" ] || { printf '%s\n' "Selection out of range."; return 1; }
+  selected_line="${MODEL_LINES[$((choice - 1))]}"; IFS=$'\t' read -r selected_model display input_limit output_limit badges <<< "$selected_line"
+  printf 'Selected model: %s\n' "$selected_model"
+  printf 'Test selected model now? [Y/n] '; IFS= read -r answer
+  case "$answer" in n|N|no|NO) ;; *) run_model_test "$selected_model"; test_status=$? ;; esac
+  if [ "$SAVE" -eq 1 ]; then
+    [ "$test_status" -eq 0 ] || { printf '%s\n' "Test failed; model not saved."; return 1; }
+    set_config_value "MODEL" "$selected_model"; printf 'saved MODEL=%s to %s\n' "$selected_model" "$CONFIG_FILE"; return 0
+  fi
+  printf 'Save MODEL=%s to config? [y/N] ' "$selected_model"; IFS= read -r answer
+  case "$answer" in y|Y|yes|YES) set_config_value "MODEL" "$selected_model"; printf 'saved MODEL=%s to %s\n' "$selected_model" "$CONFIG_FILE" ;; *) printf '%s\n' "Model not saved." ;; esac
+}
+
+
+# ==========================================================
+# CONTEXT MEMORY BUFFER
+# ----------------------------------------------------------
+# CONTEXT_TURNS counts recent user/assistant exchanges.
+# Internally, each exchange is stored as two entries:
+#   User: ...
+#   Assistant: ...
+# ==========================================================
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function add_to_context
+# Adds one speaker entry to rolling context memory. This is not the same as
+# permanent logging.
+# ----------------------------------------------------------
+add_to_context() {
+  CONTEXT_BUFFER+=("$1")
+  trim_context_buffer
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function trim_context_buffer
+# trim_context_buffer is a named maintenance unit. Keep behavior stable,
+# check call sites before changing it, and update man pages/help/comments
+# when behavior changes.
+# ----------------------------------------------------------
+trim_context_buffer() {
+  local max_entries=$((CONTEXT_TURNS * 2))
+  while [ "${#CONTEXT_BUFFER[@]}" -gt "$max_entries" ]; do
+    CONTEXT_BUFFER=("${CONTEXT_BUFFER[@]:1}")
+  done
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function build_context
+# build_context is a named maintenance unit. Keep behavior stable, check
+# call sites before changing it, and update man pages/help/comments when
+# behavior changes.
+# ----------------------------------------------------------
+build_context() {
+  local context="$SUMMARY"
+  local msg
+  for msg in "${CONTEXT_BUFFER[@]}"; do
+    if [ -n "$context" ]; then
+      context+=$'\n'
+    fi
+    context+="$msg"
+  done
+  printf '%s' "$context"
+}
+
+# ==========================================================
+# ATTACHMENT EXTRACTION SYSTEM
+# ==========================================================
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function extract_attachments
+# Turns fenced code blocks into files. This preserves terminal readability
+# and makes generated artifacts useful in a Unix workflow.
+# ----------------------------------------------------------
+extract_attachments() {
+  python3 -c '
+import os, re, sys
+attachment_dir=sys.argv[1]; session_name=sys.argv[2]; text=sys.stdin.read()
+ext_map={"bash":".sh","sh":".sh","shell":".sh","python":".py","py":".py","json":".json","yaml":".yml","yml":".yml","javascript":".js","js":".js","html":".html","css":".css","sql":".sql","c":".c","cpp":".cpp","c++":".cpp","text":".txt"}
+pattern=re.compile(r"```([A-Za-z0-9_+.#-]*)[ \t]*\n(.*?)```", re.DOTALL)
+def safe_tag(lang):
+    lang=(lang or "text").strip().lower().replace("+","p").replace("#","sharp")
+    return re.sub(r"[^A-Za-z0-9._-]+","_",lang) or "text"
+def next_number(lang,ext):
+    highest=0; regex=re.compile(r"^"+re.escape(session_name)+"-"+re.escape(lang)+r"-(\d{2,})"+re.escape(ext)+r"$")
+    if os.path.isdir(attachment_dir):
+        for name in os.listdir(attachment_dir):
+            m=regex.match(name)
+            if m: highest=max(highest,int(m.group(1)))
+    return highest+1
+def repl(m):
+    raw=(m.group(1) or "text").strip().lower(); lang=safe_tag(raw); ext=ext_map.get(raw,ext_map.get(lang,".txt")); num=next_number(lang,ext)
+    filename=f"{session_name}-{lang}-{num:02d}{ext}"; path=os.path.join(attachment_dir,filename); os.makedirs(attachment_dir,exist_ok=True)
+    with open(path,"w",encoding="utf-8") as fh: fh.write(m.group(2))
+    return f"\n[attachment saved]\nfile: {filename}\nlocation: {attachment_dir}\n"
+print(pattern.sub(repl,text))
+' "$ATTACHMENT_DIR" "$SESSION_NAME"
+}
+
+# ==========================================================
+# EXTERNAL EDITOR PROMPT
+# ==========================================================
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function compose_with_editor
+# External editor support for long prompts. This is a Unix productivity
+# feature, not a convenience gimmick.
+# ----------------------------------------------------------
+compose_with_editor() {
+  local tmp editor
+  tmp="$(mktemp)"; editor="$(editor_command)"
+  $editor "$tmp"
+  cat "$tmp"
+  rm -f "$tmp"
+}
+
+
+# ==========================================================
+# RUNTIME COLON-COMMAND MODE
+# ----------------------------------------------------------
+# The ncurses edition has function-key menus. Bash does not have a reliable,
+# portable way to offer that kind of UI without becoming a different program,
+# so the Bash-family clients use a local command mode inside the normal chat
+# loop. If the first character of the submitted input is a colon, the input is
+# interpreted by the client and is NOT sent to Gemini.
+#
+# This is intentionally similar to IRC slash commands, vi/ex commands, and
+# other terminal-native command modes. We chose ':' rather than '/' because
+# paths and URLs commonly begin with or contain '/', while ':' at the beginning
+# of a submitted chat message is rare and easy to document.
+#
+# The command mode exists for end-user usability, not developer cleverness. It
+# lets someone rename a session, attach a file, inspect memory, open an editor,
+# list models, test a model, or view credits without exiting and relaunching.
+# Future maintainers should keep this command set line-oriented and readable.
+# If a new feature exists in ncurses as a screen, its Bash equivalent should be
+# considered here as a colon command when that makes sense.
+# ==========================================================
+
+runtime_command_help() {
+  cat <<EOF
+Runtime commands are local ttychatter.python commands.
+They are not logged as chat, not stored in memory, and not sent to Gemini.
+
+General:
+  :help                         Show this runtime command menu
+  :quit                         Exit the running chat
+  :credits                      Show project credits and Project Lead notice
+  :doctor                       Run diagnostics
+
+Sessions:
+  :list                         List saved sessions
+  :rename NAME                  Rename the current session/log file
+
+Models:
+  :models                       Show filtered cached/live model list
+  :update-models                Refresh model cache from Google
+  :select-model                 Open numbered model selector
+  :test-model MODEL             Test one model with MODEL_TEST_PROMPT
+  :model MODEL                  Use MODEL for this running chat only
+  :model-save MODEL             Use MODEL now and save it to config
+
+Config and API key:
+  :config                       Print current config summary
+  :set KEY VALUE                Save config KEY=VALUE
+  :unset KEY                    Remove KEY from config
+  :set-api-key                  Prompt and save GEMINI_API_KEY
+  :forget-api-key               Remove GEMINI_API_KEY from config
+
+Memory:
+  :memory                       Show current in-process memory/context
+  :edit-memory                  Edit current memory/context in external editor
+  :clear-memory                 Clear current memory/context
+
+Files and editor:
+  :attach FILE                  Attach FILE to the next Gemini message
+  :attachments                  List saved generated/code attachments
+  :editor                       Compose a prompt in external editor and send it
+
+Notes:
+  - Colon commands must be the first thing in the submitted input.
+  - Use Ctrl+D after typing a colon command, the same as sending a message.
+  - Use a backslash before a colon if you truly want to send a message that
+    begins with a colon; the client will remove the backslash and send it.
+EOF
+}
+
+rename_current_session() {
+  local new_name="$1"
+  local clean_name new_path old_path
+
+  if [ -z "$new_name" ]; then
+    printf '%s\n' "usage: :rename NEW_SESSION_NAME"
+    return 1
+  fi
+
+  clean_name="$(sanitize_session_name "$new_name")"
+  new_path="$(resolve_session_path "$clean_name")"
+  old_path="$SESSION"
+
+  if [ "$new_path" = "$old_path" ]; then
+    printf 'session already named: %s\n' "$clean_name"
+    return 0
+  fi
+
+  if [ -e "$new_path" ]; then
+    printf 'cannot rename: target session already exists: %s\n' "$clean_name"
+    return 1
+  fi
+
+  if [ -f "$old_path" ]; then
+    mv "$old_path" "$new_path" || return 1
+  fi
+
+  SESSION_NAME="$clean_name"
+  SESSION="$new_path"
+  printf 'current session renamed to: %s\n' "$SESSION_NAME"
+}
+
+show_current_memory_runtime() {
+  local item
+  if [ "${#CONTEXT_BUFFER[@]}" -eq 0 ]; then
+    printf '%s\n' "current memory is empty"
+    return 0
+  fi
+  printf '%s\n' "current memory/context buffer:"
+  printf '%s\n' "----------------------------------------"
+  for item in "${CONTEXT_BUFFER[@]}"; do
+    printf '%s\n' "$item"
+  done
+  printf '%s\n' "----------------------------------------"
+}
+
+edit_current_memory_runtime() {
+  local tmp editor line
+  tmp="$(mktemp)" || return 1
+
+  for line in "${CONTEXT_BUFFER[@]}"; do
+    printf '%s\n' "$line" >> "$tmp"
+  done
+
+  editor="$(editor_command)"
+  $editor "$tmp"
+
+  CONTEXT_BUFFER=()
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] && CONTEXT_BUFFER+=("$line")
+  done < "$tmp"
+  rm -f "$tmp"
+  trim_context_buffer
+  write_context_snapshot "$(timestamp)"
+  printf 'memory updated; entries: %s\n' "${#CONTEXT_BUFFER[@]}"
+}
+
+list_attachments_runtime() {
+  local file
+  if [ ! -d "$ATTACHMENT_DIR" ]; then
+    printf 'attachment directory does not exist: %s\n' "$ATTACHMENT_DIR"
+    return 1
+  fi
+  for file in "$ATTACHMENT_DIR"/*; do
+    [ -e "$file" ] || { printf 'no attachments found in %s\n' "$ATTACHMENT_DIR"; return 0; }
+    basename "$file"
+  done
+}
+
+apply_runtime_config_change() {
+  local key="$1"
+  local value="$2"
+
+  case "$key" in
+    MODEL)
+      MODEL="$(normalize_model_id "$value")"
+      ACTIVE_MODEL="$(effective_model)"
+      ;;
+    CONTEXT_TURNS)
+      CONTEXT_TURNS="$(positive_int_or_default "$value" "$CONTEXT_TURNS")"
+      trim_context_buffer
+      ;;
+    SESSION_DIR)
+      SESSION_DIR="$(expand_path "$value")"
+      mkdir -p "$SESSION_DIR"
+      ;;
+    ATTACHMENT_DIR)
+      ATTACHMENT_DIR="$(expand_path "$value")"
+      mkdir -p "$ATTACHMENT_DIR"
+      ;;
+    MODEL_TEST_PROMPT)
+      MODEL_TEST_PROMPT="$value"
+      ;;
+    STARTUP_NOTICE)
+      STARTUP_NOTICE="$value"
+      ;;
+  esac
+}
+
+handle_runtime_command() {
+  local raw="$1"
+  local command rest key value editor_buffer runtime_status
+
+  case "$raw" in
+    \\:*)
+      RUNTIME_SEND_OVERRIDE="${raw#\\}"
+      return 2
+      ;;
+    :*)
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  raw="${raw#:}"
+  command="${raw%%[[:space:]]*}"
+  if [ "$command" = "$raw" ]; then rest=""; else rest="${raw#*[[:space:]]}"; fi
+
+  case "$command" in
+    ""|help|h|\?) runtime_command_help ;;
+    quit|exit) printf '%s\n' "exiting"; exit 0 ;;
+    credits) credits ;;
+    doctor) doctor_command ;;
+
+    list|sessions) list_sessions ;;
+    rename) rename_current_session "$rest" ;;
+
+    models) print_models ;;
+    update-models|update_models) update_models_cache ;;
+    select-model|select_model) select_model_command ;;
+    test-model|test_model)
+      [ -n "$rest" ] || { printf '%s\n' "usage: :test-model MODEL"; return 0; }
+      test_model_command "$rest"
+      ;;
+    model)
+      [ -n "$rest" ] || { printf 'active model: %s\n' "$(model_label)"; return 0; }
+      MODEL="$(normalize_model_id "$rest")"
+      ACTIVE_MODEL="$(effective_model)"
+      printf 'active model for this chat: %s\n' "$ACTIVE_MODEL"
+      ;;
+    model-save)
+      [ -n "$rest" ] || { printf '%s\n' "usage: :model-save MODEL"; return 0; }
+      MODEL="$(normalize_model_id "$rest")"
+      ACTIVE_MODEL="$(effective_model)"
+      set_config_value "MODEL" "$ACTIVE_MODEL"
+      printf 'active model saved: %s\n' "$ACTIVE_MODEL"
+      ;;
+
+    config) print_config_summary ;;
+    set)
+      key="${rest%%[[:space:]]*}"
+      if [ "$key" = "$rest" ]; then value=""; else value="${rest#*[[:space:]]}"; fi
+      [ -n "$key" ] || { printf '%s\n' "usage: :set KEY VALUE"; return 0; }
+      set_config_value "$key" "$value"
+      apply_runtime_config_change "$key" "$value"
+      printf 'set %s=%s\n' "$key" "$value"
+      ;;
+    unset)
+      [ -n "$rest" ] || { printf '%s\n' "usage: :unset KEY"; return 0; }
+      remove_config_key "$rest"
+      [ "$rest" = "MODEL" ] && { MODEL=""; ACTIVE_MODEL="$(effective_model)"; }
+      printf 'removed config key if present: %s\n' "$rest"
+      ;;
+    set-api-key|api-key) set_api_key_command ;;
+    forget-api-key) forget_api_key_command ;;
+
+    memory|show-memory) show_current_memory_runtime ;;
+    edit-memory) edit_current_memory_runtime ;;
+    clear-memory)
+      CONTEXT_BUFFER=()
+      write_context_snapshot "$(timestamp)"
+      printf '%s\n' "current memory cleared"
+      ;;
+
+    attach)
+      [ -n "$rest" ] || { printf '%s\n' "usage: :attach FILE"; return 0; }
+      ATTACH_FILES+=("$rest")
+      printf 'queued attachment for next message: %s\n' "$rest"
+      ;;
+    attachments) list_attachments_runtime ;;
+    editor)
+      editor_buffer="$(compose_with_editor)"
+      [ -z "$editor_buffer" ] && { printf '%s\n' "editor returned empty prompt"; return 0; }
+      send_one_message "$editor_buffer"
+      ;;
+
+    *)
+      printf 'unknown runtime command: :%s\n' "$command"
+      printf '%s\n' "type :help for available commands"
+      ;;
+  esac
+
+  return 0
+}
+
+# ==========================================================
+# ARGUMENT PARSING
+# ==========================================================
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h|--help|help) ACTION="help" ;;
+    --version) ACTION="version" ;;
+    --credits) ACTION="credits" ;;
+    --doctor) ACTION="doctor" ;;
+    --list) ACTION="list" ;;
+    --rename-session) ACTION="rename"; shift; RENAME_OLD="${1:-}"; shift; RENAME_NEW="${1:-}" ;;
+    --models) ACTION="models" ;;
+    --update-models) ACTION="update-models" ;;
+    --all) SHOW_ALL_MODELS=1 ;;
+    --sort) shift; MODEL_SORT_ORDER="${1:-$MODEL_SORT_ORDER}" ;;
+    --modellist-sort-tokens) MODEL_SORT_ORDER="input-tokens" ;;
+    --min-input-tokens) shift; MODEL_MIN_INPUT_TOKENS="${1:-$MODEL_MIN_INPUT_TOKENS}" ;;
+    --min-output-tokens) shift; MODEL_MIN_OUTPUT_TOKENS="${1:-$MODEL_MIN_OUTPUT_TOKENS}" ;;
+    --hide-preview) MODEL_FILTER_HIDE_PREVIEW=1 ;;
+    --show-preview) MODEL_FILTER_HIDE_PREVIEW=0 ;;
+    --require-tokens) MODEL_FILTER_REQUIRE_TOKENS=1 ;;
+    --allow-missing-tokens) MODEL_FILTER_REQUIRE_TOKENS=0 ;;
+    --test-model) ACTION="test"; shift; TEST_MODEL="${1:-}" ;;
+    --autoscan-model) ACTION="removed-autoscan" ;;
+    --select-model) ACTION="select" ;;
+    --set-api-key) ACTION="set-api-key" ;;
+    --forget-api-key) ACTION="forget-api-key" ;;
+    --config) ACTION="config" ;;
+    --set) ACTION="set-config"; shift; SET_KEY="${1:-}"; shift; SET_VALUE="${1:-}" ;;
+    --unset) ACTION="unset-config"; shift; UNSET_KEY="${1:-}" ;;
+    --show-memory) ACTION="show-memory"; shift; MEMORY_SESSION="${1:-}" ;;
+    --edit-memory) ACTION="edit-memory"; shift; MEMORY_SESSION="${1:-}" ;;
+    --clear-memory) ACTION="clear-memory"; shift; MEMORY_SESSION="${1:-}" ;;
+    --editor-prompt) EDITOR_PROMPT=1 ;;
+    --attach) shift; [ -n "${1:-}" ] || { printf '%s\n' "ERROR: --attach requires a file." >&2; exit 2; }; ATTACH_FILES+=("$1") ;;
+    --save) SAVE=1 ;;
+    --resume) RESUME=1; shift; SESSION_NAME="${1:-}" ;;
+    --) shift; break ;;
+    -*) printf 'ERROR: unknown option: %s\n' "$1" >&2; exit 2 ;;
+    *) if [ "$ACTION" = "chat" ] && [ -z "$SESSION_NAME" ]; then SESSION_NAME="$1"; else printf 'ERROR: unexpected argument: %s\n' "$1" >&2; exit 2; fi ;;
+  esac
+  shift
+done
+
+case "$ACTION" in
+  help) help_menu; exit 0 ;;
+  version) version; exit 0 ;;
+  credits) credits; exit 0 ;;
+  doctor) doctor_command; exit $? ;;
+  list) list_sessions; exit 0 ;;
+  rename) [ -n "$RENAME_OLD" ] && [ -n "$RENAME_NEW" ] || { printf '%s\n' "ERROR: --rename-session requires OLD NEW" >&2; exit 2; }; rename_session_command "$RENAME_OLD" "$RENAME_NEW"; exit $? ;;
+  models) print_models; exit $? ;;
+  update-models) update_models_cache; exit $? ;;
+  test) test_model_command "$TEST_MODEL"; exit $? ;;
+  removed-autoscan) removed_autoscan_message >&2; exit 2 ;;
+  select) select_model_command; exit $? ;;
+  set-api-key) set_api_key_command; exit $? ;;
+  forget-api-key) forget_api_key_command; exit $? ;;
+  config) print_config_summary; exit 0 ;;
+  set-config) [ -n "$SET_KEY" ] || { printf '%s\n' "ERROR: --set requires KEY VALUE" >&2; exit 2; }; set_config_value "$SET_KEY" "$SET_VALUE"; exit $? ;;
+  unset-config) [ -n "$UNSET_KEY" ] || { printf '%s\n' "ERROR: --unset requires KEY" >&2; exit 2; }; remove_config_key "$UNSET_KEY"; exit $? ;;
+  show-memory) [ -n "$MEMORY_SESSION" ] || { printf '%s\n' "ERROR: --show-memory requires a session" >&2; exit 2; }; show_memory_command "$MEMORY_SESSION"; exit $? ;;
+  edit-memory) [ -n "$MEMORY_SESSION" ] || { printf '%s\n' "ERROR: --edit-memory requires a session" >&2; exit 2; }; edit_memory_command "$MEMORY_SESSION"; exit $? ;;
+  clear-memory) [ -n "$MEMORY_SESSION" ] || { printf '%s\n' "ERROR: --clear-memory requires a session" >&2; exit 2; }; clear_memory_command "$MEMORY_SESSION"; exit $? ;;
+esac
+
+if [ "$SAVE" -eq 1 ]; then printf '%s\n' "ERROR: --save is only valid with --test-model or --select-model." >&2; exit 2; fi
+
+# ==========================================================
+# CHAT SESSION SETUP
+# ==========================================================
+
+require_api_key || exit 1
+
+if [ -z "$SESSION_NAME" ]; then SESSION_NAME="session-$(date +%Y-%m-%d-%H-%M-%S)"; else SESSION_NAME="$(sanitize_session_name "$SESSION_NAME")"; fi
+SESSION="$(resolve_session_path "$SESSION_NAME")"
+SESSION_WAS_EMPTY=1; [ -s "$SESSION" ] && SESSION_WAS_EMPTY=0
+
+if [ "$RESUME" -eq 1 ] && [ ! -f "$SESSION" ]; then printf 'ERROR: session not found: %s\n' "$SESSION_NAME" >&2; exit 1; fi
+
+rebuild_context_from_session
+ACTIVE_MODEL="$(effective_model)"
+NOTICE_VISIBLE=0
+if truthy "$STARTUP_NOTICE" && [ "$SESSION_WAS_EMPTY" -eq 1 ]; then NOTICE_VISIBLE=1; fi
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function print_chat_header
+# print_chat_header is a named maintenance unit. Keep behavior stable, check
+# call sites before changing it, and update man pages/help/comments when
+# behavior changes.
+# ----------------------------------------------------------
+print_chat_header() {
+  printf '%s\n' "$PROGRAM"
+  printf 'session: %s\n' "$SESSION"
+  printf 'model: %s\n' "$(model_label)"
+  printf 'context turns: %s\n' "$CONTEXT_TURNS"
+  [ -f "$SESSION" ] && [ "${#CONTEXT_BUFFER[@]}" -gt 0 ] && printf 'loaded context entries: %s\n' "${#CONTEXT_BUFFER[@]}"
+  [ "${#ATTACH_FILES[@]}" -gt 0 ] && printf 'pending attachments: %s\n' "${#ATTACH_FILES[@]}"
+  printf '%s\n\n' "Ctrl+D to send message, :help for commands, Ctrl+C to exit"
+  if [ -z "$MODEL" ]; then
+    printf '%s\n' "No MODEL configured. Using fallback model."
+    printf '  %s --select-model\n\n' "$PROGRAM"
+  fi
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function print_project_lead_notice
+# print_project_lead_notice is a named maintenance unit. Keep behavior
+# stable, check call sites before changing it, and update man
+# pages/help/comments when behavior changes.
+# ----------------------------------------------------------
+print_project_lead_notice() { printf '[%s] %s: %s\n\n' "$(timestamp)" "$PROJECT_LEAD_NAME" "$PROJECT_LEAD_NOTICE"; }
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function send_one_message
+# Main per-message path: log user input, update memory, call Gemini, extract
+# attachments, snapshot memory, and display output.
+# ----------------------------------------------------------
+send_one_message() {
+  local buffer="$1" ts output output_status cleaned_output prompt_text
+  ts="$(timestamp)"
+  [ -z "$buffer" ] && { printf '%s\n' "empty message ignored"; return 1; }
+  printf '[%s] %s: %s\n' "$ts" "$USER_NAME" "$buffer" >> "$SESSION"
+  add_to_context "User: $buffer"
+  printf '\n________________________________________\nEND INPUT\n________________________________________\n'
+  printf '[%s] Generating response...\n' "$(timestamp)"
+  printf '________________________________________\nBEGIN OUTPUT\n________________________________________\n\n'
+  prompt_text="$(build_context)"
+  output="$(call_gemini_model "$ACTIVE_MODEL" "$prompt_text" 120 "${ATTACH_FILES[@]}")"; output_status=$?
+  ATTACH_FILES=()
+  [ "$output_status" -ne 0 ] && output="(response error: $output)"
+  [ -z "$output" ] && output="(empty response or API error)"
+  printf '[%s] Gemini: %s\n' "$(timestamp)" "$output" >> "$SESSION"
+  cleaned_output="$(printf '%s' "$output" | extract_attachments)"
+  add_to_context "Assistant: $cleaned_output"
+  write_context_snapshot "$(timestamp)"
+  printf '%s\n\n' "$cleaned_output"
+}
+
+print_chat_header
+[ "$NOTICE_VISIBLE" -eq 1 ] && print_project_lead_notice
+
+if [ "$EDITOR_PROMPT" -eq 1 ]; then
+  buffer="$(compose_with_editor)"
+  if [ "$NOTICE_VISIBLE" -eq 1 ]; then clear_screen; NOTICE_VISIBLE=0; print_chat_header; printf '[%s] %s: %s\n' "$(timestamp)" "$USER_NAME" "$buffer"; fi
+  send_one_message "$buffer"
+  exit $?
+fi
+
+while true; do
+  TS="$(timestamp)"
+  printf '[%s] %s> ' "$TS" "$USER_NAME"
+  buffer="$(cat)"
+  if [ -z "$buffer" ]; then
+    [ -t 0 ] || exit 0
+    continue
+  fi
+
+  RUNTIME_SEND_OVERRIDE=""
+  if handle_runtime_command "$buffer"; then
+    continue
+  else
+    runtime_status=$?
+    if [ "$runtime_status" -eq 2 ]; then
+      buffer="$RUNTIME_SEND_OVERRIDE"
+    fi
+  fi
+
+  if [ "$NOTICE_VISIBLE" -eq 1 ]; then clear_screen; NOTICE_VISIBLE=0; print_chat_header; printf '[%s] %s: %s
+' "$TS" "$USER_NAME" "$buffer"; fi
+  send_one_message "$buffer"
+done

@@ -1,0 +1,27 @@
+# ttychatter.ncurses changelog
+
+## 0.10.0
+
+### Added
+- OpenRouter-first provider migration for the ncurses client.
+- XDG-style default directories for config, sessions, attachments, and model cache.
+- `--resume` support for bare names, `.log` filenames, and explicit paths.
+- Model-browser search by typed string.
+- Persistent model favorites/bookmarks.
+- Favorite-aware model sorting.
+- Session-browser New Chat action.
+- Session-browser Delete action with confirmation.
+- `SEND_INPUT` config key.
+- `PROMPT_SESSION_NAME` config key.
+- `CODE_ATTACHMENT_MIN_LINES` config key.
+- Short code blocks stay inline; long code blocks become attachments.
+
+### Changed
+- `safe_addstr` no longer clips one character from every right edge; it only reserves the final cell on the bottom row.
+- AI transcript messages are dimmed while user messages remain normal/white by default.
+- Model-list refresh requires explicit confirmation before connecting to OpenRouter.
+- Cached model list is preferred in the model menu.
+- Startup notice now includes a temporary system explanation for the message list window.
+
+### Documentation
+- Updated flat-layout man page and README for OpenRouter, XDG paths, and model-browser behavior.
