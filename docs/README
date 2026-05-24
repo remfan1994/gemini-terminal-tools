@@ -1,0 +1,61 @@
+# ttychatter
+
+ttychatter is a terminal-first AI chat client project. The goal is a robust, user-friendly terminal chat client that can send text messages and attachments to AI without needing browser interfaces.
+
+## Flat layout
+
+```text
+c/
+docs/
+ttychatter.ncurses
+ttychatter.ncurses.1
+ttychatter.ncurses.changelog
+ttychatter.python
+ttychatter.python.1
+ttychatter.python.changelog
+ttychatter.bash
+ttychatter.bash.1
+ttychatter.bash.changelog
+README
+LICENSE
+```
+
+## Main client
+
+`ttychatter.ncurses` is the primary interface. It is OpenRouter-first in this release.
+
+## Configuration
+
+```text
+~/.config/ttychatter/openrouter/config
+```
+
+Important keys:
+
+```text
+OPENROUTER_API_KEY=...
+MODEL=openrouter/auto
+SEND_INPUT=enter
+CONTEXT_TURNS=12
+SESSION_DIR=~/.local/share/ttychatter/openrouter/sessions
+ATTACHMENT_DIR=~/.local/share/ttychatter/openrouter/attachments
+MODEL_CACHE_FILE=~/.cache/ttychatter/openrouter/models.json
+CODE_ATTACHMENT_MIN_LINES=5
+```
+
+## Default directories
+
+```text
+config:      ~/.config/ttychatter/openrouter/config
+sessions:    ~/.local/share/ttychatter/openrouter/sessions/
+attachments: ~/.local/share/ttychatter/openrouter/attachments/
+cache:       ~/.cache/ttychatter/openrouter/models.json
+```
+
+## Model browser
+
+The model browser supports cached model lists, explicit network refresh, search, favorites, metadata display, and model testing. It does not refresh the remote model list merely because F2 was pressed.
+
+## Code blocks
+
+Short code blocks remain inline. Longer code blocks are saved as attachments.
