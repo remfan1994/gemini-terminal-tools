@@ -1,61 +1,107 @@
 # ttychatter
 
-ttychatter is a terminal-first AI chat client project. The goal is a robust, user-friendly terminal chat client that can send text messages and attachments to AI without needing browser interfaces.
+Terminal-first AI chat clients for users who want a robust text-mode interface instead of a browser UI.
 
-## Flat layout
+The project is now OpenRouter-first. OpenRouter provides the model catalog and chat-completions endpoint used by the current clients.
+
+## Current flat layout
 
 ```text
-c/
-docs/
 ttychatter.ncurses
 ttychatter.ncurses.1
 ttychatter.ncurses.changelog
+
 ttychatter.python
 ttychatter.python.1
 ttychatter.python.changelog
+
 ttychatter.bash
 ttychatter.bash.1
 ttychatter.bash.changelog
-README
-LICENSE
+
+docs/
+c/
 ```
 
-## Main client
+## Clients
 
-`ttychatter.ncurses` is the primary interface. It is OpenRouter-first in this release.
+### ttychatter.ncurses
 
-## Configuration
+Python ncurses full-screen client. This is the current reference implementation.
+
+### ttychatter.python
+
+Bash client with Python 3 helper snippets for robust JSON, model-cache parsing, attachment handling, and log/context maintenance.
+
+### ttychatter.bash
+
+Dependency-light Bash-only client. It avoids Python and uses jq when available. Without jq, JSON handling is best-effort but the program remains an end-user interactive client rather than a curl example.
+
+## OpenRouter API key
+
+Preferred environment variable:
+
+```sh
+export OPENROUTER_API_KEY="your_key"
+```
+
+Provider-neutral fallback:
+
+```sh
+export TTYCHATTER_API_KEY="your_key"
+```
+
+Config file key:
+
+```text
+OPENROUTER_API_KEY=your_key
+```
+
+## Config paths
+
+Default config:
 
 ```text
 ~/.config/ttychatter/openrouter/config
 ```
 
-Important keys:
+Default sessions:
 
 ```text
-OPENROUTER_API_KEY=...
-MODEL=openrouter/auto
-SEND_INPUT=enter
-CONTEXT_TURNS=12
-SESSION_DIR=~/.local/share/ttychatter/openrouter/sessions
-ATTACHMENT_DIR=~/.local/share/ttychatter/openrouter/attachments
-MODEL_CACHE_FILE=~/.cache/ttychatter/openrouter/models.json
-CODE_ATTACHMENT_MIN_LINES=5
+~/.local/share/ttychatter/openrouter/sessions/
 ```
 
-## Default directories
+Default attachments:
 
 ```text
-config:      ~/.config/ttychatter/openrouter/config
-sessions:    ~/.local/share/ttychatter/openrouter/sessions/
-attachments: ~/.local/share/ttychatter/openrouter/attachments/
-cache:       ~/.cache/ttychatter/openrouter/models.json
+~/.local/share/ttychatter/openrouter/attachments/
 ```
 
-## Model browser
+Default model cache:
 
-The model browser supports cached model lists, explicit network refresh, search, favorites, metadata display, and model testing. It does not refresh the remote model list merely because F2 was pressed.
+```text
+~/.cache/ttychatter/openrouter/models.json
+```
 
-## Code blocks
+## Model catalog
 
-Short code blocks remain inline. Longer code blocks are saved as attachments.
+OpenRouter model catalog:
+
+```sh
+curl https://openrouter.ai/api/v1/models \
+  -H "Authorization: Bearer $OPENROUTER_API_KEY"
+```
+
+Model IDs include fixed models and router-like selectors such as `openrouter/auto` and `openrouter/free`.
+
+## Chat completion
+
+OpenRouter chat-completions endpoint:
+
+```text
+https://openrouter.ai/api/v1/chat/completions
+```
+
+## Maintainer philosophy
+
+The clients should remain user-facing terminal applications, not developer-only API examples. Keep comments verbose. Explain terminal behavior, JSON compromises, config compatibility, and provider assumptions so future maintainers can fork, repair, or port the project without guessing the original intent.
