@@ -74,7 +74,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-VERSION = "0.10.0"
+VERSION = "0.10.2"
 PROGRAM = "ttychatter.ncurses"
 FALLBACK_MODEL = "openrouter/auto"
 DEFAULT_MODEL_TEST_PROMPT = "Please reply with one short sentence confirming this model is available for text generation."
@@ -333,8 +333,11 @@ def load_config() -> Config:
                 elif key == "MAX_ATTACHMENT_BYTES":
                     cfg.max_attachment_bytes = parse_nonnegative_int(value, cfg.max_attachment_bytes)
                 elif key == "SEND_INPUT":
-                    if value.lower() in {"enter", "ctrl_g", "ctrl+g", "ctrl_g_only"}:
-                        cfg.send_input = "ctrl_g" if value.lower() in {"ctrl+g", "ctrl_g_only"} else value.lower()
+                    # Constrain this to known modes. Free-form send-key text
+                    # created invalid states in earlier options screens.
+                    normalized = value.strip().lower().replace("+", "_").replace("-", "_")
+                    if normalized in {"enter", "ctrl_g", "ctrl_enter"}:
+                        cfg.send_input = normalized
                 elif key == "PROMPT_SESSION_NAME":
                     cfg.prompt_session_name = parse_bool(value, cfg.prompt_session_name)
                 elif key == "CODE_ATTACHMENT_MIN_LINES":
@@ -1863,9 +1866,23 @@ class AICursesApp:
 
     # ------------------------------------------------------------
     # MAINTAINER COMMENTARY: def safe_addstr
-    # Maintainer note for safe_addstr: this routine is part of the long-term public behavior of
-    # the program. When changing it, check callers, documentation, config compatibility,
-    # session-log compatibility, and the parallel Bash/C implementation plans.
+    #
+    # This is the small drawing primitive that almost every screen uses.  It
+    # deserves more explanation than a normal wrapper because terminal drawing
+    # bugs are among the hardest defects for future maintainers to reproduce.
+    #
+    # Curses draws by absolute cell coordinates: y is the row, x is the column,
+    # both starting at zero.  On many terminals, writing to the final cell of
+    # the final row can trigger an implicit scroll or raise curses.error.  The
+    # earliest ttychatter builds avoided that by never writing the final column
+    # anywhere.  That prevented bottom-right crashes, but it also made users
+    # with large fonts / low resolutions see every line clipped by one visible
+    # character.  The current compromise reserves the last cell ONLY on the
+    # bottom row.  Everywhere else, the full line width is usable.
+    #
+    # If a porter rewrites the UI for another toolkit, this function is the
+    # place to preserve the "do not explode at the terminal edge" rule without
+    # globally stealing a column from all text.
     # ------------------------------------------------------------
     def safe_addstr(self, y: int, x: int, text: str, max_width: Optional[int] = None, attr: int = 0) -> None:
         height, width = self.stdscr.getmaxyx()
@@ -1874,11 +1891,6 @@ class AICursesApp:
         limit = width - x
         if max_width is not None:
             limit = min(limit, max_width)
-        # Historically this helper always left the final column blank to avoid
-        # curses errors at the bottom-right corner. That made low-resolution
-        # users see one character clipped from almost every line. The safer
-        # compromise is to reserve the final column only on the bottom row,
-        # where writing the last cell can trigger terminal scrolling.
         if y == height - 1:
             limit = max(0, limit - 1)
         if limit <= 0:
@@ -2733,10 +2745,10 @@ class AICursesApp:
             if ch in (27, ord("q"), ord("Q")):
                 self.status = "model menu closed"
                 return
-            if ch == curses.KEY_UP:
+            if ch in (curses.KEY_UP, ord("k"), ord("K")):
                 selected = max(0, selected - 1)
                 continue
-            if ch == curses.KEY_DOWN:
+            if ch in (curses.KEY_DOWN, ord("j"), ord("J")):
                 selected = min(len(actions) - 1, selected + 1)
                 continue
             if ch not in (10, 13, curses.KEY_ENTER):
@@ -2821,7 +2833,7 @@ class AICursesApp:
         model generation requests are sent from this screen.
         """
         selected = 0
-        sort_orders = ["api", "name", "display", "input-desc", "output-desc"]
+        sort_orders = ["favorites", "api", "name", "display", "input-desc", "output-desc"]
 
         while True:
             rows = [
@@ -2878,10 +2890,10 @@ class AICursesApp:
             if ch in (27, ord("q"), ord("Q")):
                 self.status = "model filters closed"
                 return
-            if ch == curses.KEY_UP:
+            if ch in (curses.KEY_UP, ord("k"), ord("K")):
                 selected = max(0, selected - 1)
                 continue
-            if ch == curses.KEY_DOWN:
+            if ch in (curses.KEY_DOWN, ord("j"), ord("J")):
                 selected = min(len(rows) - 1, selected + 1)
                 continue
             if ch not in (10, 13, curses.KEY_ENTER, ord(" ")):
@@ -2994,7 +3006,7 @@ class AICursesApp:
             visible_h = max(1, height - 9)
             self.safe_addstr(0, 0, "MODEL BROWSER", width, self.reverse_attr())
             self.safe_addstr(1, 0, f"Source: {source_label} | Search: {search or '(none)'} | Sort: {self.cfg.model_sort_order}", width, self.dim_attr())
-            self.safe_addstr(2, 0, "/=search | b=favorite | o=sort | t=test | i=info | s=save | Enter=activate", width, self.dim_attr())
+            self.safe_addstr(2, 0, "/=search | b=favorite | o/O=sort +/- | t=test | i=info | s=save | Enter=activate", width, self.dim_attr())
             self.safe_addstr(3, 0, "Fav  Model                                  InTok     OutTok    Features", width, self.reverse_dim_attr())
             self.safe_addstr(4, 0, "_" * width, width, self.dim_attr())
 
@@ -3072,8 +3084,14 @@ class AICursesApp:
                     idx = sort_modes.index(self.cfg.model_sort_order)
                 except ValueError:
                     idx = 0
-                self.cfg.model_sort_order = sort_modes[(idx + 1) % len(sort_modes)]
+                # Model browsing should feel like an old server/file browser:
+                # one key cycles sort modes forward, and Shift+O walks the same
+                # cycle backward.  This is faster than entering the options
+                # screen when the user is actively comparing model rows.
+                delta = -1 if ch == ord("O") else 1
+                self.cfg.model_sort_order = sort_modes[(idx + delta) % len(sort_modes)]
                 set_config_value(self.cfg, "MODEL_SORT_ORDER", self.cfg.model_sort_order)
+                self.status = f"model sort: {self.cfg.model_sort_order}"
                 selected = 0
                 top_index = 0
                 continue
@@ -3246,6 +3264,89 @@ class AICursesApp:
                 selected = min(len(names) - 1, selected + visible_h)
 
     # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def choice_modal
+    #
+    # Choice values such as SEND_INPUT should never force users to remember and
+    # type magic strings.  In a terminal UI, a setting with a small legal value
+    # set should look and behave like an old options dialog: move to the row,
+    # press Enter, select from a list.  This helper is intentionally tiny but it
+    # centralizes that behavior so future option fields do not quietly degrade
+    # into free-form text entry again.
+    #
+    # Navigation mirrors the rest of ttychatter: arrows, j/k, PgUp/PgDn,
+    # Home/End, mousewheel, row click, Enter.  Function keys remain global even
+    # inside this chooser so a mistaken key does not trap the user.
+    # ------------------------------------------------------------
+    def choice_modal(self, title: str, prompt: str, choices: List[str], current: str) -> Optional[str]:
+        if not choices:
+            return None
+        selected = choices.index(current) if current in choices else 0
+        top_index = 0
+        while True:
+            self.stdscr.erase()
+            height, width = self.stdscr.getmaxyx()
+            visible_h = max(1, height - 6)
+            self.safe_addstr(0, 0, title, width, self.reverse_attr())
+            self.safe_addstr(1, 0, prompt, width, self.dim_attr())
+            self.safe_addstr(2, 0, "Enter/click=choose | j/k move | Esc/q=cancel | F-keys jump", width, self.dim_attr())
+            self.safe_addstr(3, 0, "_" * width, width, self.dim_attr())
+
+            if selected < top_index:
+                top_index = selected
+            elif selected >= top_index + visible_h:
+                top_index = selected - visible_h + 1
+            top_index = max(0, min(top_index, max(0, len(choices) - visible_h)))
+
+            for row in range(visible_h):
+                idx = top_index + row
+                if idx >= len(choices):
+                    break
+                mark = "* " if choices[idx] == current else "  "
+                attr = self.reverse_attr() if idx == selected else 0
+                self.safe_addstr(4 + row, 0, mark + choices[idx], width, attr)
+
+            self.safe_addstr(height - 1, 0, f"{selected + 1}/{len(choices)}", width, self.reverse_dim_attr())
+            self.stdscr.refresh()
+            ch = self.stdscr.getch()
+            if self.handle_global_hotkey(ch, current_action="options"):
+                return None
+            if ch == curses.KEY_MOUSE:
+                try:
+                    _mid, _x, y, _z, state = curses.getmouse()
+                except curses.error:
+                    continue
+                delta = self.mouse_wheel_delta(state)
+                if delta > 0:
+                    selected = max(0, selected - MOUSE_SCROLL_LINES)
+                    continue
+                if delta < 0:
+                    selected = min(len(choices) - 1, selected + MOUSE_SCROLL_LINES)
+                    continue
+                if self.mouse_button1(state) and 4 <= y < 4 + visible_h:
+                    idx = top_index + (y - 4)
+                    if 0 <= idx < len(choices):
+                        selected = idx
+                        if self.mouse_button1_double(state):
+                            return choices[selected]
+                    continue
+            if ch in (27, ord("q"), ord("Q")):
+                return None
+            if ch in (curses.KEY_UP, ord("k"), ord("K")):
+                selected = max(0, selected - 1)
+            elif ch in (curses.KEY_DOWN, ord("j"), ord("J")):
+                selected = min(len(choices) - 1, selected + 1)
+            elif ch == curses.KEY_PPAGE:
+                selected = max(0, selected - visible_h)
+            elif ch == curses.KEY_NPAGE:
+                selected = min(len(choices) - 1, selected + visible_h)
+            elif ch == curses.KEY_HOME:
+                selected = 0
+            elif ch == curses.KEY_END:
+                selected = len(choices) - 1
+            elif ch in (10, 13, curses.KEY_ENTER):
+                return choices[selected]
+
+    # ------------------------------------------------------------
     # MAINTAINER COMMENTARY: def open_options_menu
     # Options UI. This should behave like a friendly form, not like dumping users into raw
     # config editing.
@@ -3283,10 +3384,10 @@ class AICursesApp:
                 {"key": "MODEL_FILTER_HIDE_PREVIEW", "label": "Model browser: hide preview/experimental", "kind": "bool", "value": self.cfg.model_filter_hide_preview},
                 {"key": "MODEL_MIN_INPUT_TOKENS", "label": "Model browser: min input tokens", "kind": "int", "value": str(self.cfg.model_min_input_tokens)},
                 {"key": "MODEL_MIN_OUTPUT_TOKENS", "label": "Model browser: min output tokens", "kind": "int", "value": str(self.cfg.model_min_output_tokens)},
-                {"key": "MODEL_SORT_ORDER", "label": "Model browser: sort order", "kind": "choice", "value": self.cfg.model_sort_order},
+                {"key": "MODEL_SORT_ORDER", "label": "Model browser: sort order", "kind": "choice", "value": self.cfg.model_sort_order, "choices": ["favorites", "api", "name", "display", "input-desc", "output-desc"]},
                 {"key": "MODEL_TEST_PROMPT", "label": "Model test prompt", "kind": "text", "value": self.cfg.model_test_prompt},
                 {"key": "INPUT_PLACEHOLDER", "label": "Input placeholder", "kind": "text", "value": self.cfg.input_placeholder},
-                {"key": "SEND_INPUT", "label": "Send key (enter or ctrl_g)", "kind": "choice", "value": self.cfg.send_input, "choices": ["enter", "ctrl_g"]},
+                {"key": "SEND_INPUT", "label": "Send key", "kind": "choice", "value": self.cfg.send_input, "choices": ["enter", "ctrl_g", "ctrl_enter"]},
                 {"key": "PROMPT_SESSION_NAME", "label": "Prompt for session name", "kind": "bool", "value": self.cfg.prompt_session_name},
                 {"key": "CODE_ATTACHMENT_MIN_LINES", "label": "Code block attachment min lines", "kind": "int", "value": str(self.cfg.code_attachment_min_lines)},
                 {"key": "MONOCHROME", "label": "Monochrome mode", "kind": "bool", "value": self.cfg.monochrome},
@@ -3339,7 +3440,7 @@ class AICursesApp:
                 set_config_value(self.cfg, key, str(self.cfg.model_min_output_tokens))
             elif key == "MODEL_SORT_ORDER":
                 value_text = str(value)
-                if value_text in {"api", "name", "display", "input-desc", "output-desc"}:
+                if value_text in {"favorites", "api", "name", "display", "input-desc", "output-desc"}:
                     self.cfg.model_sort_order = value_text
                     set_config_value(self.cfg, key, self.cfg.model_sort_order)
             elif key == "MODEL_TEST_PROMPT":
@@ -3470,6 +3571,21 @@ class AICursesApp:
             elif ch in (10, 13, curses.KEY_ENTER):
                 if field["kind"] == "bool":
                     apply_field(field["key"], not bool(field["value"]))
+                elif field["kind"] == "choice":
+                    # Choice fields are not free-form strings.  SEND_INPUT is
+                    # the main example: users should choose from supported send
+                    # gestures rather than typing labels like ctrl_g manually.
+                    # The chooser also gives us room to document terminal-
+                    # dependent options such as ctrl_enter without pretending
+                    # every terminal can distinguish them.
+                    chosen = self.choice_modal(
+                        f"CHOOSE {field['key']}",
+                        "Choose one supported value.  ctrl_enter depends on terminal support.",
+                        field.get("choices", []),
+                        str(field["value"]),
+                    )
+                    if chosen is not None:
+                        apply_field(field["key"], chosen)
                 else:
                     editing = True
                     edit_value = str(field["value"])
@@ -3481,22 +3597,74 @@ class AICursesApp:
     # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
     # ------------------------------------------------------------
     def open_memory_menu(self) -> None:
+        """Open the memory/context tools menu.
+
+        Terminal-physics note for future maintainers:
+        this screen is visually a small menu, not a transcript.  It should
+        therefore behave like every other small menu in ttychatter: Up/Down,
+        j/k, mousewheel, click, Enter, and global F-keys all work.  Earlier
+        versions accepted only letter shortcuts here, which made this screen
+        feel like a trap compared with F5 Options.  Consistency matters more
+        than saving a few lines of code because users often navigate by muscle
+        memory, in the dark, or on cramped keyboards.
+        """
+        choices = [
+            ("v", "view memory"),
+            ("e", "edit memory in external editor"),
+            ("c", "clear memory"),
+            ("r", "rebuild memory from log"),
+            ("q", "return to chat"),
+        ]
+        selected = 0
         while True:
             self.stdscr.erase()
             height, width = self.stdscr.getmaxyx()
-            choices = ["v view memory", "e edit memory in external editor", "c clear memory", "r rebuild from log", "q cancel"]
+            visible_h = max(1, height - 5)
             self.safe_addstr(0, 0, "MEMORY MENU", width, self.reverse_attr())
             self.safe_addstr(1, 0, f"Context entries: {len(self.context_buffer)} | CONTEXT_TURNS={self.cfg.context_turns}", width)
-            for idx, item in enumerate(choices):
-                self.safe_addstr(3 + idx, 0, item, width)
+            self.safe_addstr(2, 0, "Enter=select | j/k move | Esc/q=return | F-keys jump", width, self.dim_attr())
+            self.safe_addstr(3, 0, "_" * width, width, self.dim_attr())
+            selected = max(0, min(selected, len(choices) - 1))
+            for row, (_key, label) in enumerate(choices[:visible_h]):
+                attr = self.reverse_attr() if row == selected else 0
+                self.safe_addstr(4 + row, 0, f"{_key}  {label}", width, attr)
             self.stdscr.refresh()
             ch = self.stdscr.getch()
             if self.handle_global_hotkey(ch, current_action="memory"):
                 return
-            if ch in (ord("q"), ord("Q"), 27): return
-            if ch in (ord("v"), ord("V")):
+            if ch == curses.KEY_MOUSE:
+                try:
+                    _mid, _x, y, _z, state = curses.getmouse()
+                except curses.error:
+                    continue
+                delta = self.mouse_wheel_delta(state)
+                if delta > 0:
+                    selected = max(0, selected - MOUSE_SCROLL_LINES)
+                    continue
+                if delta < 0:
+                    selected = min(len(choices) - 1, selected + MOUSE_SCROLL_LINES)
+                    continue
+                if self.mouse_button1(state) and 4 <= y < 4 + len(choices):
+                    selected = y - 4
+                    ch = 10
+                else:
+                    continue
+            if ch in (27, ord("q"), ord("Q")):
+                return
+            if ch in (curses.KEY_UP, ord("k"), ord("K")):
+                selected = max(0, selected - 1)
+                continue
+            if ch in (curses.KEY_DOWN, ord("j"), ord("J")):
+                selected = min(len(choices) - 1, selected + 1)
+                continue
+            if ch in (10, 13, curses.KEY_ENTER):
+                action = choices[selected][0]
+            else:
+                action = chr(ch).lower() if 0 <= ch < 256 else ""
+
+            if action == "v":
                 self.show_message("CURRENT MEMORY", self.context_buffer or ["Memory is empty."])
-            elif ch in (ord("e"), ord("E")):
+            elif action == "e":
                 edited = self.run_external_editor("\n".join(self.context_buffer))
                 if edited is not None:
                     self.context_buffer = [line for line in edited.splitlines() if line.strip()]
@@ -3504,13 +3672,13 @@ class AICursesApp:
                     self.save_context_snapshot()
                     self.status = "memory edited and snapshot saved"
                     return
-            elif ch in (ord("c"), ord("C")):
+            elif action == "c":
                 if self.ask_yes_no("CLEAR MEMORY", "Clear current memory context? Logs are not deleted.", default=False):
                     self.context_buffer = []
                     self.save_context_snapshot()
                     self.status = "memory cleared"
                     return
-            elif ch in (ord("r"), ord("R")):
+            elif action == "r":
                 self.context_buffer = []
                 entries = load_log_entries(self.session_path)
                 snapshot = latest_context_snapshot(entries)
@@ -3519,17 +3687,13 @@ class AICursesApp:
                 else:
                     max_entries = self.cfg.context_turns * 2
                     for entry in entries[-max_entries:]:
-                        if is_snapshot_entry(entry) or entry.speaker == "system": continue
+                        if is_snapshot_entry(entry) or entry.speaker == "system":
+                            continue
                         self.context_buffer.append(("Assistant: " if entry.speaker == "AI" else "User: ") + entry.text)
                 self.trim_context_buffer()
                 self.status = "memory rebuilt from log"
                 return
 
-    # ------------------------------------------------------------
-    # MAINTAINER COMMENTARY: def file_picker
-    # Maintainer note for file_picker: this routine is part of the long-term public behavior of
-    # the program. When changing it, check callers, documentation, config compatibility,
-    # session-log compatibility, and the parallel Bash/C implementation plans.
     # ------------------------------------------------------------
     def file_picker(self, start_dir: Path, title: str) -> Optional[Path]:
         current = start_dir.expanduser().resolve()
@@ -3572,8 +3736,10 @@ class AICursesApp:
                     if 0 <= idx < len(entries): selected = idx
                 continue
             if ch in (27, ord("q"), ord("Q")): return None
-            if ch == curses.KEY_UP: selected = max(0, selected - 1)
-            elif ch == curses.KEY_DOWN: selected = min(len(entries) - 1, selected + 1)
+            if ch in (curses.KEY_UP, ord("k"), ord("K")):
+                selected = max(0, selected - 1)
+            elif ch in (curses.KEY_DOWN, ord("j"), ord("J")):
+                selected = min(len(entries) - 1, selected + 1)
             elif ch in (10, 13, curses.KEY_ENTER):
                 chosen = entries[selected]
                 if chosen.is_dir():
@@ -3629,10 +3795,10 @@ class AICursesApp:
 
             if ch in (27, ord("q"), ord("Q")):
                 return
-            if ch == curses.KEY_UP:
+            if ch in (curses.KEY_UP, ord("k"), ord("K")):
                 selected = max(0, selected - 1)
                 continue
-            if ch == curses.KEY_DOWN:
+            if ch in (curses.KEY_DOWN, ord("j"), ord("J")):
                 selected = min(len(choices) - 1, selected + 1)
                 continue
             if ch in (10, 13, curses.KEY_ENTER):
@@ -3672,7 +3838,7 @@ class AICursesApp:
         common editors with shutil.which(), which answers the practical
         question: can this command be launched from this terminal session?
         """
-        names = ["vim", "vi", "nano", "pico", "micro", "emacs", "mg", "ed"]
+        names = ["nvim", "vim", "vi", "micro", "nano", "pico", "emacs", "mg", "joe", "jed", "ed"]
         found: List[Tuple[str, str]] = []
         seen = set()
         for name in names:
@@ -3763,9 +3929,9 @@ class AICursesApp:
             if ch in (27, ord("q"), ord("Q")):
                 self.status = "editor menu closed"
                 return
-            if ch == curses.KEY_UP:
+            if ch in (curses.KEY_UP, ord("k"), ord("K")):
                 selected = max(0, selected - 1); continue
-            if ch == curses.KEY_DOWN:
+            if ch in (curses.KEY_DOWN, ord("j"), ord("J")):
                 selected = min(len(items) - 1, selected + 1); continue
             if ch not in (10, 13, curses.KEY_ENTER):
                 continue
@@ -4080,14 +4246,23 @@ class AICursesApp:
             self.dispatch_command_action(action)
             return
 
-        if ch == 7:  # Ctrl+G sends. F5 is Options, not send.
+        if ch == 7:  # Ctrl+G remains a reliable send key. F5 is Options, not send.
             self.send_current_message()
             return
 
         if ch == 17:  # Ctrl+Q
             self.should_quit = True
             return
-        if ch in (10, 13, curses.KEY_ENTER): self.insert_newline()
+        if ch == curses.KEY_ENTER and self.cfg.send_input == "ctrl_enter":
+            # Ctrl+Enter is terminal-dependent: many terminal emulators collapse
+            # it into ordinary Enter. If curses reports a distinct KEY_ENTER,
+            # honor it here; otherwise users should choose enter or ctrl_g.
+            self.send_current_message()
+        elif ch in (10, 13, curses.KEY_ENTER):
+            if self.cfg.send_input == "enter":
+                self.send_current_message()
+            else:
+                self.insert_newline()
         elif ch in (curses.KEY_BACKSPACE, 127, 8): self.backspace()
         elif ch == curses.KEY_DC: self.delete_forward()
         elif ch == curses.KEY_LEFT: self.move_left()

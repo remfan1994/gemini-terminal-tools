@@ -46,12 +46,28 @@ CONTROLS
 
     Enter     Sends by default when SEND_INPUT=enter.
     Ctrl+G    Always sends.
-    j/k       Move in lists where applicable.
+    Ctrl+Enter
+              May send when SEND_INPUT=ctrl_enter, if the terminal emulator
+              reports Ctrl+Enter as a distinct key. Many terminals do not.
+    j/k       Move in menus, lists, model browser, memory, files, and editor
+              screens.
 
 MODEL BROWSER
     The model browser is table-like. It supports typed search, favorites,
     metadata filters, model tests, and sorting. Cached model lists are preferred.
     Updating the model list contacts OpenRouter only after confirmation.
+
+    Keys inside the browser:
+        /       Search by typed string.
+        b       Toggle favorite/bookmark for the highlighted model.
+        o       Cycle model sort method forward.
+        O       Cycle model sort method backward.
+        f       Open model filter/options screen.
+        t       Test highlighted model.
+        i       Show model metadata.
+        s       Save highlighted model to config.
+        Enter   Activate highlighted model for the current run.
+        j/k     Move down/up.
 
 CONFIGURATION
     Config file:
@@ -60,7 +76,7 @@ CONFIGURATION
     Important keys:
         OPENROUTER_API_KEY
         MODEL
-        SEND_INPUT=enter|ctrl_g
+        SEND_INPUT=enter|ctrl_g|ctrl_enter
         PROMPT_SESSION_NAME=1|0
         CONTEXT_TURNS
         SESSION_DIR
@@ -73,6 +89,9 @@ CONFIGURATION
         MODEL_MIN_INPUT_TOKENS
         MODEL_MIN_OUTPUT_TOKENS
         MODEL_SORT_ORDER
+            Sort order used by the model browser. Common values include
+            favorites, api, name, display, input-desc, and output-desc.
+
 
 DEFAULT DIRECTORIES
     config:      ~/.config/ttychatter/openrouter/config
@@ -89,4 +108,4 @@ LIMITATIONS
     key behavior depend on terminal emulator support.
 
 VERSION
-    ttychatter.ncurses version 0.10.0
+    ttychatter.ncurses version 0.10.2

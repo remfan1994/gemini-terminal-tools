@@ -1,5 +1,27 @@
 # ttychatter.ncurses changelog
 
+## 0.10.2
+
+### Added
+- `Shift+O` / uppercase `O` in the model browser to cycle sort methods in reverse.
+- Choice-list selector for options that have a finite set of legal values.
+- `ctrl_enter` as a recognized `SEND_INPUT` choice in options and config parsing.
+- Expanded maintainer commentary around terminal-edge drawing safety and option choice handling.
+
+### Changed
+- `SEND_INPUT` is no longer edited as arbitrary free text in the options screen; it is selected from supported values.
+- Model browser sort cycling now supports both forward (`o`) and reverse (`O`) direction.
+- Model sort choices now consistently include `favorites`, `api`, `name`, `display`, `input-desc`, and `output-desc`.
+- Help/man page text now documents `Ctrl+Enter` as terminal-dependent instead of guaranteed.
+
+### Fixed
+- More menu/list screens now consistently accept vim-style `j`/`k` navigation.
+- Prevented invalid free-form `SEND_INPUT` values from being saved through the options form.
+
+### Notes
+- `Ctrl+Enter` support depends on the terminal emulator. Many terminals report it as ordinary Enter.
+- The embedded editor idea was not implemented because embedding real external editors inside a curses subwindow would require pseudo-terminal integration and is outside this release.
+
 ## 0.10.0
 
 ### Added
