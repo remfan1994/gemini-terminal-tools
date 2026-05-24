@@ -74,7 +74,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-VERSION = "0.10.2"
+VERSION = "0.11.0"
 PROGRAM = "ttychatter.ncurses"
 FALLBACK_MODEL = "openrouter/auto"
 DEFAULT_MODEL_TEST_PROMPT = "Please reply with one short sentence confirming this model is available for text generation."
@@ -93,7 +93,7 @@ DEFAULT_MODEL_SORT_ORDER = "api"
 # Configuration model
 # ---------------------------------------------------------------------------
 # Shared config file:
-#   ~/.config/ttychatter/gemini/config
+#   ~/.config/ttychatter/openrouter/config
 #
 # Preferred memory terminology:
 #   CONTEXT_TURNS
@@ -256,10 +256,10 @@ def parse_bool(value: str, default: bool = False) -> bool:
 # only and future C implementations must be able to follow the same rules.
 # ------------------------------------------------------------
 def load_config() -> Config:
-    """Load ~/.config/ttychatter/gemini/config using simple KEY=VALUE parsing.
+    """Load ~/.config/ttychatter/openrouter/config using simple KEY=VALUE parsing.
 
     This path is now part of the ttychatter public contract. Keep provider
-    settings under the `gemini` subdirectory so future providers can use their
+    settings under the `openrouter` subdirectory so future providers can use their
     own sibling directories without confusing user configuration. This loader is
     intentionally simple so Bash-only, Bash+Python3, Python ncurses, and future
     C implementations can all share the same behavior.
@@ -271,7 +271,7 @@ def load_config() -> Config:
     read_config_file = cfg.config_file
 
     # Namespace note:
-    # ttychatter AI clients read ~/.config/ttychatter/gemini/config. Keep
+    # ttychatter AI clients read ~/.config/ttychatter/openrouter/config. Keep
     # provider configuration under this explicit AI subdirectory so future
     # providers can use sibling directories without changing the project name.
 
@@ -726,7 +726,7 @@ def mime_extension(mime_type: str) -> str:
 
 
 # ------------------------------------------------------------
-# MAINTAINER COMMENTARY: def build_gemini_parts
+# MAINTAINER COMMENTARY: def build_openrouter_user_content
 # Builds REST request parts. Keep text/media separation clear so maintainers can adapt when
 # AI changes MIME or file handling rules.
 # ------------------------------------------------------------
@@ -734,7 +734,7 @@ def build_openrouter_user_content(prompt_text: str, attachments: List[PendingAtt
     """Build OpenRouter chat-message content for text plus optional files.
 
     Text-only requests use a plain string because that is the most widely
-    compatible OpenAI/OpenRouter chat-completions shape. When attachments are
+    compatible OpenOpenRouter chat-completions shape. When attachments are
     present, the content becomes a list of typed parts. Text files are folded
     into text parts. Image files are sent as data URLs where possible because
     many OpenRouter multimodal models understand OpenAI-style image_url parts.
@@ -862,12 +862,12 @@ def generate_with_model(
 
 
 # ------------------------------------------------------------
-# MAINTAINER COMMENTARY: def call_gemini
-# Maintainer note for call_gemini: this routine is part of the long-term public behavior of the
+# MAINTAINER COMMENTARY: def call_ai
+# Maintainer note for call_openrouter: this routine is part of the long-term public behavior of the
 # program. When changing it, check callers, documentation, config compatibility, session-log
 # compatibility, and the parallel Bash/C implementation plans.
 # ------------------------------------------------------------
-def call_gemini(cfg: Config, prompt_text: str, session_name: str, attachment_dir: Path, attachments: List[PendingAttachment]) -> str:
+def call_ai(cfg: Config, prompt_text: str, session_name: str, attachment_dir: Path, attachments: List[PendingAttachment]) -> str:
     ok, text = generate_with_model(cfg, cfg.effective_model, prompt_text, session_name, attachment_dir, attachments, timeout=120)
     if ok:
         return text
@@ -4137,16 +4137,16 @@ class AICursesApp:
         context = self.build_context()
         prompt_text = (context + "\n" if context else "") + "User: " + message
         attachments_to_send = list(self.pending_attachments)
-        raw_output = call_gemini(self.cfg, prompt_text, self.session_name, self.attachment_dir, attachments_to_send)
+        raw_output = call_ai(self.cfg, prompt_text, self.session_name, self.attachment_dir, attachments_to_send)
         self.pending_attachments = []
 
-        gemini_time = now_time()
-        append_log(self.session_path, "AI", raw_output, gemini_time)
+        openrouter_time = now_time()
+        append_log(self.session_path, "AI", raw_output, openrouter_time)
         cleaned_output = extract_code_attachments(raw_output, self.attachment_dir, self.session_name, self.cfg.code_attachment_min_lines)
         self.context_buffer.append("Assistant: " + cleaned_output)
         self.trim_context_buffer()
         self.save_context_snapshot()
-        self.transcript.append(TranscriptItem("AI", cleaned_output, gemini_time))
+        self.transcript.append(TranscriptItem("AI", cleaned_output, openrouter_time))
         self.status = "response complete"
 
     # ------------------------------------------------------------------

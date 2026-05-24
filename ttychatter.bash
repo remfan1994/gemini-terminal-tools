@@ -3,7 +3,7 @@
 # ==========================================================
 # ttychatter.bash (bash-only edition)
 # ----------------------------------------------------------
-# Dependency-light Gemini terminal chat client.
+# Dependency-light OpenRouter terminal chat client.
 #
 # PROJECT ROLE
 #   This edition exists for users who want the project goal -- a friendly,
@@ -22,7 +22,7 @@
 # RUNTIME COMMAND MODE
 #   Bash-only cannot offer ncurses function-key screens, so it now provides
 #   colon commands inside the chat loop. A submitted input beginning with : is
-#   handled locally as a client command instead of being sent to Gemini.
+#   handled locally as a client command instead of being sent to OpenRouter.
 #
 # DESIGN LIMIT
 #   JSON is the hard part. Without Python or jq, JSON parsing is best-effort.
@@ -41,12 +41,12 @@
 #
 # The difference from bash/python3/ttychatter.python is dependency
 # posture.  This edition must avoid Python.  It can rely on curl and ordinary
-# shell-era tools because any machine that can realistically talk to Gemini over
+# shell-era tools because any machine that can realistically talk to OpenRouter over
 # HTTPS already needs a working curl/TLS stack, but it should not assume Python
 # 3 is installed.  Optional helpers such as jq, base64, and file may improve
 # behavior, but the program should remain usable without them where possible.
 #
-# This creates maintenance tension: Gemini speaks JSON, and shell is not good
+# This creates maintenance tension: OpenRouter speaks JSON, and shell is not good
 # at JSON.  The comments in this file are therefore especially important.  When
 # you see a sed/awk parser, understand that it is a compatibility compromise,
 # not a claim that regex is the ideal JSON engine.  If jq is available, use it.
@@ -62,7 +62,7 @@
 set -o pipefail
 
 PROGRAM="ttychatter.bash"
-VERSION="0.6.0-bash-only"
+VERSION="0.7.0-bash-only"
 CONFIG_DIR="$HOME/.config/ttychatter/openrouter"
 CONFIG_FILE="$CONFIG_DIR/config"
 MODEL_CACHE_FILE="$CONFIG_DIR/models-cache.json"
@@ -71,9 +71,9 @@ SESSION_DIR="$HOME/.local/share/ttychatter/openrouter/sessions"
 ATTACHMENT_DIR=""
 ATTACHMENT_DIR_CONFIGURED=0
 MODEL=""
-FALLBACK_MODEL="gemini-2.5-flash"
+FALLBACK_MODEL="openrouter/auto"
 CONTEXT_TURNS=8
-GEMINI_API_KEY="${GEMINI_API_KEY:-}"
+OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-${TTYCHATTER_API_KEY:-}}"
 MODEL_TEST_PROMPT="Please reply with a short sentence confirming this model is available for text generation."
 STARTUP_NOTICE=1
 PROJECT_LEAD_NAME="remfan1994"
@@ -207,12 +207,12 @@ doctor_command() {
   command -v base64 >/dev/null 2>&1 && doctor_status OK "command base64" "$(command -v base64)" || doctor_status WARN "command base64" "not found; binary attachments limited"
   command -v file >/dev/null 2>&1 && doctor_status OK "command file" "$(command -v file)" || doctor_status WARN "command file" "not found; MIME detection falls back to extension"
   [ -f "$CONFIG_FILE" ] && doctor_status OK "config file" "$CONFIG_FILE present" || doctor_status WARN "config file" "not found: $CONFIG_FILE"
-  [ -n "$GEMINI_API_KEY" ] && doctor_status OK "API key" loaded || doctor_status WARN "API key" "not loaded"
+  [ -n "$OPENROUTER_API_KEY" ] && doctor_status OK "API key" loaded || doctor_status WARN "API key" "not loaded"
   d="$(check_writable_dir "$SESSION_DIR")"; st=$?; doctor_status $([ "$st" -eq 0 ] && printf OK || printf FAIL) "session dir" "$d"
   d="$(check_writable_dir "$ATTACHMENT_DIR")"; st=$?; doctor_status $([ "$st" -eq 0 ] && printf OK || printf FAIL) "attachment dir" "$d"
   d="$(check_writable_dir "$(dirname "$MODEL_CACHE_FILE")")"; st=$?; doctor_status $([ "$st" -eq 0 ] && printf OK || printf FAIL) "model cache dir" "$d"
   [ -f "$MODEL_CACHE_FILE" ] && doctor_status OK "model cache" "$MODEL_CACHE_FILE present" || doctor_status WARN "model cache" "missing; run --update-models"
-  curl -sS --max-time 10 https://generativelanguage.googleapis.com/ >/dev/null 2>&1 && doctor_status OK network "Gemini host reachable" || doctor_status WARN network "Gemini host not reachable from curl"
+  curl -sS --max-time 10 https://openrouter.ai/api/v1/models -H "Authorization: Bearer ${OPENROUTER_API_KEY:-dummy}" >/dev/null 2>&1 && doctor_status OK network "OpenRouter reachable" || doctor_status WARN network "OpenRouter not reachable or API key missing"
 }
 
 # ==========================================================
@@ -233,7 +233,7 @@ load_config() {
     case "$key" in
       MODEL) MODEL="$(normalize_model_id "$value")" ;;
       CONTEXT_TURNS|HISTORY_LIMIT) CONTEXT_TURNS="$value" ;;
-      GEMINI_API_KEY) GEMINI_API_KEY="${GEMINI_API_KEY:-$value}" ;;
+      OPENROUTER_API_KEY|API_KEY) OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-$value}" ;;
       SESSION_DIR) SESSION_DIR="${value/#\~/$HOME}" ;;
       ATTACHMENT_DIR) ATTACHMENT_DIR="${value/#\~/$HOME}"; ATTACHMENT_DIR_CONFIGURED=1 ;;
       MODEL_TEST_PROMPT) [ -n "$value" ] && MODEL_TEST_PROMPT="$value" ;;
@@ -274,9 +274,9 @@ mkdir -p "$CONFIG_DIR" "$SESSION_DIR" "$ATTACHMENT_DIR"
 # changes.
 # ----------------------------------------------------------
 require_api_key() {
-  if [ -z "$GEMINI_API_KEY" ]; then
-    printf '%s\n' "ERROR: GEMINI_API_KEY not set."
-    printf '%s\n' "Set it with: export GEMINI_API_KEY=your_key"
+  if [ -z "$OPENROUTER_API_KEY" ]; then
+    printf '%s\n' "ERROR: OPENROUTER_API_KEY not set." >&2
+    printf '%s\n' "Set it with: export OPENROUTER_API_KEY=your_key" >&2
     printf '%s\n' "or save it in: $CONFIG_FILE"
     return 1
   fi
@@ -294,7 +294,7 @@ require_api_key() {
 # ----------------------------------------------------------
 help_menu() {
   cat <<EOF
-$PROGRAM (bash-only edition) - dependency-light Gemini terminal chat client
+$PROGRAM (bash-only edition) - dependency-light OpenRouter terminal chat client
 
 USAGE
     $PROGRAM [session]
@@ -314,21 +314,21 @@ USAGE
 INPUT
     Type or paste a message, then press Ctrl+D to send.
 
-GOOGLE HELP
-    Model docs:      https://ai.google.dev/gemini-api/docs/models
-    Models API:      https://ai.google.dev/api/models
-    GenerateContent: https://ai.google.dev/api/generate-content
+OPENROUTER HELP
+    Model docs:      https://openrouter.ai/docs/models
+    Models API:      https://openrouter.ai/docs/api-reference/models/get-models
+    Chat completions: https://openrouter.ai/docs/api-reference/chat/send-chat-completion-request
 
 RUNTIME COMMAND MODE
     During a running chat, submit a line beginning with ':' to run a local
-    command instead of sending a message to Gemini.
+    command instead of sending a message to the AI backend.
 
     Examples:
         :help
         :rename notes
         :models
         :select-model
-        :model gemini-2.5-flash
+        :model openrouter/auto
         :memory
         :attach /path/to/file.txt
         :editor
@@ -372,7 +372,7 @@ EOF
 # should preserve old-system usability and update docs/comments if behavior
 # changes.
 # ----------------------------------------------------------
-fetch_models_json() { require_api_key || return 1; curl -sS --max-time 60 "https://generativelanguage.googleapis.com/v1beta/models?key=$GEMINI_API_KEY&pageSize=100"; }
+fetch_models_json() { require_api_key || return 1; curl -sS --max-time 60 -H "Authorization: Bearer $OPENROUTER_API_KEY" "https://openrouter.ai/api/v1/models"; }
 # ----------------------------------------------------------
 # MAINTAINER COMMENTARY: function update_models_cache
 # update_models_cache is part of the dependency-light client behavior.
@@ -393,13 +393,36 @@ models_json_source() { if [ -f "$MODEL_CACHE_FILE" ]; then cat "$MODEL_CACHE_FIL
 # Changes should preserve old-system usability and update docs/comments if
 # behavior changes.
 # ----------------------------------------------------------
-parse_models_basic() { awk '/"name"[[:space:]]*:/ {name=$0;sub(/^.*"name"[[:space:]]*:[[:space:]]*"/,"",name);sub(/".*$/, "", name);sub(/^models\//,"",name)} /"displayName"[[:space:]]*:/ {display=$0;sub(/^.*"displayName"[[:space:]]*:[[:space:]]*"/,"",display);sub(/".*$/,"",display)} /"inputTokenLimit"[[:space:]]*:/ {input=$0;sub(/^.*"inputTokenLimit"[[:space:]]*:[[:space:]]*/,"",input);sub(/[^0-9].*$/,"",input)} /"outputTokenLimit"[[:space:]]*:/ {output=$0;sub(/^.*"outputTokenLimit"[[:space:]]*:[[:space:]]*/,"",output);sub(/[^0-9].*$/,"",output)} /generateContent/ {gen=1} /}/ {if(name!=""){if(gen==1) print name "\t" (display?display:name) "\t" input "\t" output; name="";display="";input="";output="";gen=0}}'; }
+parse_models_basic() {
+  if command -v jq >/dev/null 2>&1; then
+    jq -r '
+      (.data // .models // [])[]
+      | . as $m
+      | [
+          ($m.id // $m.name // ""),
+          ($m.name // $m.id // ""),
+          (($m.context_length // $m.contextLength // "")|tostring),
+          (($m.max_completion_tokens // $m.maxCompletionTokens // "")|tostring)
+        ]
+      | select(.[0] != "")
+      | @tsv
+    '
+    return
+  fi
+
+  # Fallback parser for systems without jq. OpenRouter's model catalog is JSON,
+  # and shell is not a JSON language. This fallback intentionally extracts only
+  # model IDs from common compact/pretty-printed shapes. Users who need richer
+  # token metadata on a dependency-light system should install jq; the program
+  # remains useful without it because model ID selection and testing still work.
+  tr ',' '\n' | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1\t\1\t\t/p'
+}
 # ----------------------------------------------------------
 # MAINTAINER COMMENTARY: function list_models
 # Shows model candidates using jq when possible and sed/grep fallback
 # otherwise. This is intentionally best-effort in bash-only.
 # ----------------------------------------------------------
-list_models() { models_json_source | parse_models_basic; }
+list_models() { local json; json="$(models_json_source)" || return 1; printf '%s' "$json" | parse_models_basic; }
 
 # ----------------------------------------------------------
 # MAINTAINER COMMENTARY: function select_model
@@ -409,7 +432,7 @@ list_models() { models_json_source | parse_models_basic; }
 select_model() {
   local lines choice selected model display input output answer status
   mapfile -t lines < <(list_models)
-  [ "${#lines[@]}" -gt 0 ] || { printf '%s\n' "No generateContent models found."; return 1; }
+  [ "${#lines[@]}" -gt 0 ] || { printf '%s\n' "No OpenRouter models found."; return 1; }
   local i=1 line
   for line in "${lines[@]}"; do IFS=$'\t' read -r model display input output <<< "$line"; printf '%3d) %s - %s (input:%s output:%s)\n' "$i" "$model" "$display" "${input:-?}" "${output:-?}"; i=$((i+1)); done
   printf 'Select model number: '; IFS= read -r choice
@@ -422,75 +445,89 @@ select_model() {
 }
 
 # ==========================================================
-# GEMINI REQUESTS
+# OPENROUTER REQUESTS
 # ==========================================================
 
 # ----------------------------------------------------------
-# MAINTAINER COMMENTARY: function build_parts_json
-# build_parts_json is part of the dependency-light client behavior. Changes
-# should preserve old-system usability and update docs/comments if behavior
-# changes.
+# MAINTAINER COMMENTARY: function build_prompt_with_attachments
+# The bash-only edition deliberately keeps attachment handling simple. Text
+# attachments are merged into the prompt because every chat model can read text.
+# Binary/media files are represented by a visible notice instead of pretending
+# this low-dependency shell path can safely build every possible multipart or
+# multimodal request. The Python/ncurses edition remains the stronger media path.
 # ----------------------------------------------------------
-build_parts_json() {
-  local prompt="$1" escaped file mime data name
-  escaped="$(printf '%s' "$prompt" | json_escape_stream)"
-  printf '[{"text":"%s"}' "$escaped"
+build_prompt_with_attachments() {
+  local prompt="$1" file name mime
+  printf '%s' "$prompt"
   for file in "${ATTACH_FILES[@]}"; do
-    [ -f "$file" ] || continue
+    [ -f "$file" ] || { printf '\n\n[Attachment unavailable: %s]' "$file"; continue; }
     name="$(basename "$file")"
     if command -v file >/dev/null 2>&1; then mime="$(file -b --mime-type "$file" 2>/dev/null)"; else mime=""; fi
-    [ -n "$mime" ] || case "$file" in *.png) mime=image/png;; *.jpg|*.jpeg) mime=image/jpeg;; *.gif) mime=image/gif;; *.webp) mime=image/webp;; *.pdf) mime=application/pdf;; *.txt|*.md|*.log) mime=text/plain;; *) mime=application/octet-stream;; esac
-    if [ "$mime" = "text/plain" ]; then
-      escaped="$(printf '\n[Attached file: %s]\n' "$name"; cat "$file" | json_escape_stream)"
-      printf ',{"text":"%s"}' "$escaped"
-    elif command -v base64 >/dev/null 2>&1; then
-      data="$(base64 < "$file" | tr -d '\n')"
-      printf ',{"inlineData":{"mimeType":"%s","data":"%s"}}' "$mime" "$data"
-    fi
+    case "$mime:$file" in
+      text/*:*|*:*.txt|*:*.md|*:*.log|*:*.sh|*:*.c|*:*.h|*:*.py|*:*.json|*:*.yaml|*:*.yml)
+        printf '\n\n[Attached text file: %s]\n' "$name"
+        cat "$file"
+        ;;
+      *)
+        printf '\n\n[Attachment not sent inline by ttychatter.bash: %s (%s)]' "$name" "${mime:-unknown MIME}"
+        ;;
+    esac
   done
-  printf ']'
 }
 
 # ----------------------------------------------------------
-# MAINTAINER COMMENTARY: function save_inline_data_best_effort
-# save_inline_data_best_effort is part of the dependency-light client
-# behavior. Changes should preserve old-system usability and update
-# docs/comments if behavior changes.
+# MAINTAINER COMMENTARY: function build_openrouter_payload
+# Builds the OpenRouter chat-completions JSON request. JSON construction in
+# bash-only is necessarily more fragile than in the Python-helper edition, so
+# this function keeps all manual escaping in one place. If jq is installed, it
+# is used for correct JSON generation. Otherwise a conservative escape routine
+# is used.
 # ----------------------------------------------------------
-save_inline_data_best_effort() {
-  local response="$1" mime data ext file num
-  command -v base64 >/dev/null 2>&1 || return 0
-  mime="$(printf '%s' "$response" | tr '\n' ' ' | sed -n 's/^.*"mimeType"[[:space:]]*:[[:space:]]*"\([^"]*\)".*$/\1/p' | head -1)"
-  data="$(printf '%s' "$response" | tr '\n' ' ' | sed -n 's/^.*"data"[[:space:]]*:[[:space:]]*"\([^"]*\)".*$/\1/p' | head -1)"
-  [ -n "$mime" ] && [ -n "$data" ] || return 0
-  case "$mime" in image/png) ext=png;; image/jpeg) ext=jpg;; image/gif) ext=gif;; image/webp) ext=webp;; video/mp4) ext=mp4;; audio/*) ext=audio;; *) ext=bin;; esac
-  num=1; while [ -e "$ATTACHMENT_DIR/$SESSION_NAME-inline-$num.$ext" ]; do num=$((num+1)); done
-  file="$ATTACHMENT_DIR/$SESSION_NAME-inline-$num.$ext"
-  printf '%s' "$data" | base64 -d > "$file" 2>/dev/null && printf '\n[generated attachment saved]\nfile: %s\nlocation: %s\n' "$(basename "$file")" "$ATTACHMENT_DIR"
+build_openrouter_payload() {
+  local model="$1" prompt="$2"
+  if command -v jq >/dev/null 2>&1; then
+    jq -n --arg model "$model" --arg text "$prompt" '{model:$model, messages:[{role:"user", content:$text}]}'
+  else
+    printf '{"model":"%s","messages":[{"role":"user","content":"%s"}]}' "$(printf '%s' "$model" | json_escape_stream)" "$(printf '%s' "$prompt" | json_escape_stream)"
+  fi
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function extract_openrouter_text
+# Extracts text from OpenRouter's chat-completions response. jq is preferred.
+# The sed fallback is intentionally best-effort and documented as such because
+# shell regular expressions cannot fully parse JSON.
+# ----------------------------------------------------------
+extract_openrouter_text() {
+  if command -v jq >/dev/null 2>&1; then
+    jq -r 'if .error then (.error.message // .error | tostring) else ([.choices[]?.message.content] | map(if type=="string" then . else tostring end) | join("\n")) end'
+  else
+    tr '\n' ' ' | sed -n 's/^.*"content"[[:space:]]*:[[:space:]]*"\(.*\)"[[:space:]]*[,}].*$/\1/p' | json_unescape_basic
+  fi
 }
 
 # ----------------------------------------------------------
 # MAINTAINER COMMENTARY: function call_model
-# Single model generation request. All curl generation behavior should stay
-# centralized here.
+# Single OpenRouter generation request. All curl/OpenRouter behavior should
+# stay centralized here so endpoint, authentication, timeout, and error changes
+# do not get scattered across the interactive loop and colon commands.
 # ----------------------------------------------------------
 call_model() {
-  local model="$1" prompt="$2" parts response text status
+  local model="$1" prompt="$2" full_prompt payload response text status
   require_api_key || return 1
-  parts="$(build_parts_json "$prompt")"
-  response="$(printf '{"contents":[{"parts":%s}]}' "$parts" | curl -sS --max-time 120 -H 'Content-Type: application/json' -d @- "https://generativelanguage.googleapis.com/v1beta/models/$(normalize_model_id "$model"):generateContent?key=$GEMINI_API_KEY" 2>&1)"
+  full_prompt="$(build_prompt_with_attachments "$prompt")"
+  payload="$(build_openrouter_payload "$(normalize_model_id "$model")" "$full_prompt")"
+  response="$(printf '%s' "$payload" | curl -sS --max-time 120 -H 'Content-Type: application/json' -H "Authorization: Bearer $OPENROUTER_API_KEY" -H 'HTTP-Referer: https://github.com/remfan1994/ttychatter' -H 'X-Title: ttychatter' -d @- 'https://openrouter.ai/api/v1/chat/completions' 2>&1)"
   status=$?; [ "$status" -eq 0 ] || { printf 'curl error: %s\n' "$response"; return 1; }
-  if printf '%s' "$response" | grep -q '"error"'; then printf '%s\n' "$response"; return 1; fi
-  text="$(printf '%s' "$response" | tr '\n' ' ' | sed -n 's/^.*"text"[[:space:]]*:[[:space:]]*"\(.*\)"[[:space:]]*}.*$/\1/p' | json_unescape_basic)"
+  text="$(printf '%s' "$response" | extract_openrouter_text)"
   [ -n "$text" ] || text="(could not extract text response; raw response follows)\n$response"
   printf '%s\n' "$text"
-  save_inline_data_best_effort "$response"
 }
 
 # ----------------------------------------------------------
 # MAINTAINER COMMENTARY: function test_model
-# User-operated test for one selected model. Do not resurrect automatic
-# model probing in this edition.
+# User-operated test for one selected model. Do not resurrect automatic model
+# probing in this edition; users should choose a model, test it, and decide.
 # ----------------------------------------------------------
 test_model() { local model="$1"; printf 'Model: %s\nPrompt: %s\n\n' "$model" "$MODEL_TEST_PROMPT"; call_model "$model" "$MODEL_TEST_PROMPT"; }
 
@@ -552,7 +589,7 @@ extract_code_blocks() { awk -v dir="$ATTACHMENT_DIR" -v session="$SESSION_NAME" 
 # The bash-only edition needs a way to expose client operations while the chat
 # loop is running. Ncurses can use F-key screens; this edition deliberately has
 # no such UI layer. Colon commands are the dependency-light equivalent. They
-# are local client commands, not Gemini messages. They are not logged, not sent
+# are local client commands, not AI messages. They are not logged, not sent
 # to the model, and not stored in memory.
 #
 # This mechanism is essential to keeping the bash-only edition from becoming
@@ -563,7 +600,7 @@ extract_code_blocks() { awk -v dir="$ATTACHMENT_DIR" -v session="$SESSION_NAME" 
 runtime_command_help() {
   cat <<EOF
 Runtime commands are local ttychatter.bash commands.
-They are not sent to Gemini.
+They are not sent to OpenRouter.
 
 General:
   :help                   Show this menu
@@ -577,7 +614,7 @@ Sessions:
 
 Models:
   :models                 Show model list
-  :update-models          Refresh model cache from Google
+  :update-models          Refresh model cache from OpenRouter
   :select-model           Numbered model selector
   :test-model MODEL       Test one model
   :model MODEL            Use MODEL for this running chat only
@@ -612,7 +649,7 @@ print_config_summary() {
   printf 'ATTACHMENT_DIR=%s\n' "$ATTACHMENT_DIR"
   printf 'MODEL_TEST_PROMPT=%s\n' "$MODEL_TEST_PROMPT"
   printf 'STARTUP_NOTICE=%s\n' "$STARTUP_NOTICE"
-  if [ -n "$GEMINI_API_KEY" ]; then printf 'GEMINI_API_KEY=(loaded)\n'; else printf 'GEMINI_API_KEY=(not set)\n'; fi
+  if [ -n "$OPENROUTER_API_KEY" ]; then printf 'OPENROUTER_API_KEY=(loaded)\n'; else printf 'OPENROUTER_API_KEY=(not set)\n'; fi
 }
 
 editor_command_basic() {
@@ -707,8 +744,8 @@ handle_runtime_command() {
       save_config_value "$key" "$value"; apply_runtime_config_change "$key" "$value"; printf 'set %s=%s\n' "$key" "$value"
       ;;
     unset) [ -n "$rest" ] && { remove_config_key "$rest"; [ "$rest" = "MODEL" ] && { MODEL=""; ACTIVE_MODEL="$(effective_model)"; }; printf 'removed config key if present: %s\n' "$rest"; } || printf '%s\n' "usage: :unset KEY" ;;
-    set-api-key|api-key) printf 'Paste Gemini API key: '; IFS= read -r -s key; printf '\n'; [ -n "$key" ] && { GEMINI_API_KEY="$key"; save_config_value GEMINI_API_KEY "$key"; } ;;
-    forget-api-key) remove_config_key GEMINI_API_KEY; printf '%s\n' "removed GEMINI_API_KEY from config if present" ;;
+    set-api-key|api-key) printf 'Paste OpenRouter API key: '; IFS= read -r -s key; printf '\n'; [ -n "$key" ] && { OPENROUTER_API_KEY="$key"; save_config_value OPENROUTER_API_KEY "$key"; } ;;
+    forget-api-key) remove_config_key OPENROUTER_API_KEY; printf '%s\n' "removed OPENROUTER_API_KEY from config if present" ;;
     memory|show-memory) show_current_memory_runtime ;;
     clear-memory) CONTEXT_BUFFER=(); write_context_snapshot "$(timestamp)"; printf '%s\n' "current memory cleared" ;;
     attach) [ -n "$rest" ] && { ATTACH_FILES+=("$rest"); printf 'queued attachment: %s\n' "$rest"; } || printf '%s\n' "usage: :attach FILE" ;;
@@ -737,7 +774,7 @@ while [ "$#" -gt 0 ]; do
 # This keeps command behavior easy to audit: parse flags, dispatch one action,
 # or fall through into the interactive chat loop.
 case "$ACTION" in
-  help) help_menu; exit 0;; version) printf '%s version %s\n' "$PROGRAM" "$VERSION"; exit 0;; doctor) doctor_command; exit 0;; credits) credits; exit 0;; list) list_sessions; exit 0;; models) list_models; exit $?;; update-models) update_models_cache; exit $?;; select) select_model; exit $?;; test) [ -n "$TEST_MODEL" ] || { printf 'ERROR: --test-model requires a model\n' >&2; exit 2; }; test_model "$TEST_MODEL"; [ "$SAVE" -eq 1 ] && save_config_value MODEL "$TEST_MODEL"; exit $?;; set-key) printf 'Paste Gemini API key: '; IFS= read -r -s key; printf '\n'; [ -n "$key" ] && save_config_value GEMINI_API_KEY "$key"; exit $?;;
+  help) help_menu; exit 0;; version) printf '%s version %s\n' "$PROGRAM" "$VERSION"; exit 0;; doctor) doctor_command; exit 0;; credits) credits; exit 0;; list) list_sessions; exit 0;; models) list_models; exit $?;; update-models) update_models_cache; exit $?;; select) select_model; exit $?;; test) [ -n "$TEST_MODEL" ] || { printf 'ERROR: --test-model requires a model\n' >&2; exit 2; }; test_model "$TEST_MODEL"; [ "$SAVE" -eq 1 ] && save_config_value MODEL "$TEST_MODEL"; exit $?;; set-key) printf 'Paste OpenRouter API key: '; IFS= read -r -s key; printf '\n'; [ -n "$key" ] && save_config_value OPENROUTER_API_KEY "$key"; exit $?;;
 esac
 
 # ==========================================================
@@ -753,7 +790,7 @@ ACTIVE_MODEL="$(effective_model)"
 NOTICE_VISIBLE=0
 truthy "$STARTUP_NOTICE" && [ ! -s "$SESSION" ] && NOTICE_VISIBLE=1
 printf '%s (bash-only)\n' "$PROGRAM"; printf 'session: %s\n' "$SESSION"; printf 'model: %s\n' "$(model_label)"; printf 'Ctrl+D to send, :help for commands, Ctrl+C to exit\n\n'
-if [ "$NOTICE_VISIBLE" -eq 1 ]; then printf '[%s] %s: %s\n' "$(timestamp)" "$PROJECT_LEAD_NAME" "$PROJECT_LEAD_NOTICE"; printf '[%s] system: This is the message list window. The notice above will disappear when you send your first message, and messages to and from Gemini will appear here.\n\n' "$(timestamp)"; fi
+if [ "$NOTICE_VISIBLE" -eq 1 ]; then printf '[%s] %s: %s\n' "$(timestamp)" "$PROJECT_LEAD_NAME" "$PROJECT_LEAD_NOTICE"; printf '[%s] system: This is the message list window. The notice above will disappear when you send your first message, and messages to and from AI will appear here.\n\n' "$(timestamp)"; fi
 send_one_message() {
   local buffer="$1" ts context output cleaned
   ts="$(timestamp)"
@@ -764,7 +801,7 @@ send_one_message() {
   add_context "User: $buffer"
   context="$(build_context)"
   output="$(call_model "$ACTIVE_MODEL" "$context")"
-  printf '[%s] Gemini: %s
+  printf '[%s] AI: %s
 ' "$(timestamp)" "$output" >> "$SESSION"
   cleaned="$(printf '%s
 ' "$output" | extract_code_blocks)"

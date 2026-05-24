@@ -3,7 +3,7 @@
 # ==========================================================
 # ttychatter.python
 # ----------------------------------------------------------
-# Bash + Python 3 helper terminal Gemini AI interface.
+# Bash + Python 3 helper terminal OpenRouter AI interface.
 #
 # VERSION
 #   3.2
@@ -15,7 +15,7 @@
 #   in a command-line interface.
 #
 # NEW IN 2.6
-#   - Cached Gemini model list support
+#   - Cached OpenRouter model list support
 #   - --update-models
 #   - --models uses cache when available
 #   - --models --all
@@ -27,7 +27,7 @@
 #   - --editor-prompt
 #   - --attach FILE for prompt attachments
 #   - Direct --models filter/sort flags
-#   - Google Gemini help links in built-in help
+#   - OpenRouter help links in built-in help
 #   - --credits
 #
 # OPTIONS PARITY NOTE
@@ -38,8 +38,8 @@
 #       --unset KEY
 #
 # MODEL METADATA NOTE
-#   Google model names can change. This script uses listModels metadata such as
-#   supportedGenerationMethods, inputTokenLimit, and outputTokenLimit to help
+#   OpenRouter model listings can change. This script uses models catalog metadata such as
+#   supported_parameters, context_length, and max_completion_tokens to help
 #   users choose models without guessing future model names.
 #
 # INPUT MODEL
@@ -48,7 +48,7 @@
 #
 # RUNTIME COMMAND MODE
 #   If an input begins with a colon, such as :help or :rename notes, the
-#   client treats it as a local command instead of sending it to Gemini.
+#   client treats it as a local command instead of sending it to OpenRouter.
 #   This gives the Bash interface an IRC/ex-style command mode so users can
 #   manage sessions, models, memory, attachments, config, and editor workflow
 #   without quitting the running chat.
@@ -84,7 +84,7 @@
 set -o pipefail
 
 PROGRAM="ttychatter.python"
-VERSION="3.3"
+VERSION="3.4"
 
 CONFIG_DIR="$HOME/.config/ttychatter/openrouter"
 CONFIG_FILE="$CONFIG_DIR/config"
@@ -95,7 +95,7 @@ SESSION_DIR="$HOME/.local/share/ttychatter/openrouter/sessions"
 ATTACHMENT_DIR=""
 ATTACHMENT_DIR_CONFIGURED=0
 
-FALLBACK_MODEL="gemini-2.5-flash"
+FALLBACK_MODEL="openrouter/auto"
 MODEL=""
 CONTEXT_TURNS=12
 CONTEXT_TURNS_EXPLICIT=0
@@ -118,6 +118,8 @@ USER_NAME="$(whoami)"
 CONTEXT_BUFFER=()
 SUMMARY=""
 ATTACH_FILES=()
+
+OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-${TTYCHATTER_API_KEY:-}}"
 
 ACTION="chat"
 SAVE=0
@@ -164,7 +166,7 @@ expand_path() {
 
 # ----------------------------------------------------------
 # MAINTAINER COMMENTARY: function normalize_model_id
-# Allows both models/name and name forms. Google may return names with a
+# Allows both models/name and name forms. Provider APIs may return names with a
 # models/ prefix while users often configure the shorter form.
 # ----------------------------------------------------------
 normalize_model_id() {
@@ -191,7 +193,7 @@ quote_url_component() {
 # behavior changes.
 # ----------------------------------------------------------
 api_key_query() {
-  python3 -c 'import sys, urllib.parse; print(urllib.parse.urlencode({"key": sys.argv[1]}))' "$GEMINI_API_KEY"
+  python3 -c 'import sys, urllib.parse; print(urllib.parse.urlencode({"key": sys.argv[1]}))' "$OPENROUTER_API_KEY"
 }
 
 # ----------------------------------------------------------
@@ -201,7 +203,7 @@ api_key_query() {
 # changes.
 # ----------------------------------------------------------
 models_query() {
-  python3 -c 'import sys, urllib.parse; print(urllib.parse.urlencode({"key": sys.argv[1], "pageSize": "100"}))' "$GEMINI_API_KEY"
+  python3 -c 'import sys, urllib.parse; print(urllib.parse.urlencode({"key": sys.argv[1], "pageSize": "100"}))' "$OPENROUTER_API_KEY"
 }
 
 # ----------------------------------------------------------
@@ -306,7 +308,7 @@ if [ -f "$CONFIG_READ_FILE" ]; then
       MODEL) MODEL="$(normalize_model_id "$value")" ;;
       CONTEXT_TURNS) CONTEXT_TURNS="$value"; CONTEXT_TURNS_EXPLICIT=1 ;;
       HISTORY_LIMIT) if [ "$CONTEXT_TURNS_EXPLICIT" -eq 0 ]; then CONTEXT_TURNS="$value"; fi ;;
-      GEMINI_API_KEY) GEMINI_API_KEY="${GEMINI_API_KEY:-$value}" ;;
+      OPENROUTER_API_KEY|API_KEY) OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-$value}" ;;
       SESSION_DIR) SESSION_DIR="$(expand_path "$value")" ;;
       ATTACHMENT_DIR) ATTACHMENT_DIR="$(expand_path "$value")"; ATTACHMENT_DIR_CONFIGURED=1 ;;
       MODEL_TEST_PROMPT) [ -n "$value" ] && MODEL_TEST_PROMPT="$value" ;;
@@ -404,7 +406,7 @@ Model filters:
   MODEL_SORT_ORDER=$MODEL_SORT_ORDER
 
 API key:
-  environment/config loaded: $([ -n "$GEMINI_API_KEY" ] && printf yes || printf no)
+  environment/config loaded: $([ -n "$OPENROUTER_API_KEY" ] && printf yes || printf no)
 EOF
 }
 
@@ -419,10 +421,10 @@ EOF
 # behavior changes.
 # ----------------------------------------------------------
 require_api_key() {
-  if [ -z "$GEMINI_API_KEY" ]; then
-    printf '%s\n' "ERROR: GEMINI_API_KEY not set."
-    printf '%s\n' "Set it with: export GEMINI_API_KEY=your_key"
-    printf '%s\n' "or save it with: $PROGRAM --set-api-key"
+  if [ -z "$OPENROUTER_API_KEY" ]; then
+    printf '%s\n' "ERROR: OPENROUTER_API_KEY not set." >&2
+    printf '%s\n' "Set it with: export OPENROUTER_API_KEY=your_key" >&2
+    printf '%s\n' "or save it with: $PROGRAM --set-api-key" >&2
     return 1
   fi
   return 0
@@ -436,17 +438,17 @@ require_api_key() {
 # ----------------------------------------------------------
 set_api_key_command() {
   local answer key
-  printf '%s\n' "This will save GEMINI_API_KEY in plaintext:"
+  printf '%s\n' "This will save OPENROUTER_API_KEY in plaintext:"
   printf '  %s\n\n' "$CONFIG_FILE"
   printf 'Continue? [y/N] '
   IFS= read -r answer
   case "$answer" in y|Y|yes|YES) ;; *) printf '%s\n' "Cancelled."; return 1 ;; esac
-  printf 'Paste Gemini API key: '
+  printf 'Paste OpenRouter API key: '
   IFS= read -r -s key
   printf '%s\n' ""
   [ -n "$key" ] || { printf '%s\n' "No key entered."; return 1; }
-  set_config_value "GEMINI_API_KEY" "$key"
-  printf 'saved GEMINI_API_KEY to %s\n' "$CONFIG_FILE"
+  set_config_value "OPENROUTER_API_KEY" "$key"
+  printf 'saved OPENROUTER_API_KEY to %s\n' "$CONFIG_FILE"
 }
 
 # ----------------------------------------------------------
@@ -455,7 +457,7 @@ set_api_key_command() {
 # check call sites before changing it, and update man pages/help/comments
 # when behavior changes.
 # ----------------------------------------------------------
-forget_api_key_command() { remove_config_key "GEMINI_API_KEY"; printf 'removed GEMINI_API_KEY from config if present\n'; }
+forget_api_key_command() { remove_config_key "OPENROUTER_API_KEY"; printf 'removed OPENROUTER_API_KEY from config if present\n'; }
 
 
 # ==========================================================
@@ -464,7 +466,7 @@ forget_api_key_command() { remove_config_key "GEMINI_API_KEY"; printf 'removed G
 # The Python-helper Bash edition has enough moving parts that a quick doctor
 # command is useful for users and bug reporters. It checks tools, config,
 # storage paths, model cache state, editor availability, API-key presence, and
-# network reachability. It does not send a generation prompt to Gemini.
+# network reachability. It does not send a generation prompt to OpenRouter.
 # ==========================================================
 
 # ----------------------------------------------------------
@@ -503,7 +505,7 @@ doctor_command() {
     if command -v "$cmd" >/dev/null 2>&1; then doctor_status OK "command $cmd" "$(command -v "$cmd")"; else doctor_status FAIL "command $cmd" "not found"; fi
   done
   [ -f "$CONFIG_FILE" ] && doctor_status OK "config file" "$CONFIG_FILE present" || doctor_status WARN "config file" "not found: $CONFIG_FILE"
-  [ -n "$GEMINI_API_KEY" ] && doctor_status OK "API key" "loaded" || doctor_status WARN "API key" "not loaded"
+  [ -n "$OPENROUTER_API_KEY" ] && doctor_status OK "API key" "loaded" || doctor_status WARN "API key" "not loaded"
   detail="$(check_writable_dir "$SESSION_DIR")"; status=$?; doctor_status $([ "$status" -eq 0 ] && printf OK || printf FAIL) "session dir" "$detail"
   detail="$(check_writable_dir "$ATTACHMENT_DIR")"; status=$?; doctor_status $([ "$status" -eq 0 ] && printf OK || printf FAIL) "attachment dir" "$detail"
   detail="$(check_writable_dir "$(dirname "$MODEL_CACHE_FILE")")"; status=$?; doctor_status $([ "$status" -eq 0 ] && printf OK || printf FAIL) "model cache dir" "$detail"
@@ -512,7 +514,7 @@ doctor_command() {
   command -v "$editor_first" >/dev/null 2>&1 && doctor_status OK editor "$(command -v "$editor_first")" || doctor_status WARN editor "$editor_first not found"
   python3 - <<'PYDOC' 2>/dev/null
 import socket
-host='generativelanguage.googleapis.com'
+host='openrouter.ai'
 try:
     infos=socket.getaddrinfo(host,443,type=socket.SOCK_STREAM)
     addrs=sorted({i[4][0] for i in infos})[:3]
@@ -520,8 +522,8 @@ try:
 except Exception as exc:
     print('[WARN] DNS: lookup failed for %s: %s' % (host, exc))
 PYDOC
-  if [ -n "$GEMINI_API_KEY" ]; then
-    curl -sS --max-time 20 "https://generativelanguage.googleapis.com/v1beta/models?$(models_query)" >/dev/null 2>&1 && doctor_status OK "models endpoint" reachable || doctor_status WARN "models endpoint" "not reachable or API key invalid"
+  if [ -n "$OPENROUTER_API_KEY" ]; then
+    curl -sS --max-time 20 "https://openrouter.ai/v1beta/models?$(models_query)" >/dev/null 2>&1 && doctor_status OK "models endpoint" reachable || doctor_status WARN "models endpoint" "not reachable or API key invalid"
   else
     doctor_status WARN "models endpoint" "skipped: no API key"
   fi
@@ -564,7 +566,7 @@ EOF
 # ----------------------------------------------------------
 help_menu() {
   cat <<EOF
-$PROGRAM - terminal Gemini interface
+$PROGRAM - terminal OpenRouter interface
 
 USAGE
     $PROGRAM [session]
@@ -593,25 +595,25 @@ USAGE
     $PROGRAM --help
 
 MODEL HELP
-    Official Gemini model documentation:
-        https://ai.google.dev/gemini-api/docs/models
+    Official OpenRouter model documentation:
+        https://openrouter.ai/docs/models
 
     Models API reference:
-        https://ai.google.dev/api/models
+        https://openrouter.ai/docs/api-reference/models/get-models
 
-    GenerateContent API reference:
-        https://ai.google.dev/api/generate-content
+    Chat-completions API reference:
+        https://openrouter.ai/docs/api-reference/chat/send-chat-completion-request
 
 RUNTIME COMMAND MODE
     During a running chat, submit a line beginning with ':' to run a local
-    command instead of sending a message to Gemini.
+    command instead of sending a message to the AI backend.
 
     Examples:
         :help
         :rename research-notes
         :models
         :select-model
-        :test-model gemini-2.5-flash
+        :test-model openrouter/auto
         :config
         :set CONTEXT_TURNS 20
         :memory
@@ -710,7 +712,7 @@ if snapshot is None:
     fallback=[]
     for speaker,text in entries:
         if speaker.lower() == "system": continue
-        label="Assistant" if speaker == "Gemini" else "User"
+        label="Assistant" if speaker == "AI" or speaker == "OpenRouter" else "User"
         fallback.append(f"{label}: {text}")
     snapshot=fallback[-max_entries:]
 for entry in snapshot:
@@ -815,8 +817,8 @@ clear_memory_command() {
 fetch_models_live_json() {
   local url response curl_status
   require_api_key || return 1
-  url="https://generativelanguage.googleapis.com/v1beta/models?$(models_query)"
-  response="$(curl -sS --max-time 60 "$url" 2>&1)"; curl_status=$?
+  url="https://openrouter.ai/api/v1/models"
+  response="$(curl -sS --max-time 60 -H "Authorization: Bearer $OPENROUTER_API_KEY" "$url" 2>&1)"; curl_status=$?
   [ "$curl_status" -eq 0 ] || { printf '%s\n' "curl error while fetching models: $response" >&2; return 1; }
   printf '%s' "$response"
 }
@@ -851,11 +853,11 @@ models_json_for_display() {
 # ----------------------------------------------------------
 parse_models_table() {
   local show_all="$1"
-  python3 - "$show_all" "$MODEL_FILTER_GENERATE_CONTENT" "$MODEL_FILTER_REQUIRE_TOKENS" "$MODEL_FILTER_HIDE_PREVIEW" "$MODEL_MIN_INPUT_TOKENS" "$MODEL_MIN_OUTPUT_TOKENS" "$MODEL_SORT_ORDER" <<'PY'
+  python3 - "$show_all" "$MODEL_FILTER_GENERATE_CONTENT" "$MODEL_FILTER_REQUIRE_TOKENS" "$MODEL_FILTER_HIDE_PREVIEW" "$MODEL_MIN_INPUT_TOKENS" "$MODEL_MIN_OUTPUT_TOKENS" "$MODEL_SORT_ORDER" <<'PYMODEL'
 import json, sys
 show_all=sys.argv[1]=="1"
-truth=lambda v: v.lower() in ("1","yes","true","on","y")
-filter_generate=truth(sys.argv[2]); require_tokens=truth(sys.argv[3]); hide_preview=truth(sys.argv[4])
+truth=lambda v: str(v).lower() in ("1","yes","true","on","y")
+filter_chat=truth(sys.argv[2]); require_tokens=truth(sys.argv[3]); hide_preview=truth(sys.argv[4])
 try: min_in=int(sys.argv[5])
 except Exception: min_in=0
 try: min_out=int(sys.argv[6])
@@ -864,36 +866,58 @@ sort_order=sys.argv[7]
 raw=sys.stdin.read()
 try: data=json.loads(raw)
 except Exception as exc:
-    print(f"ERROR: could not parse model list JSON: {exc}", file=sys.stderr); sys.exit(1)
+    print(f"ERROR: could not parse OpenRouter model-list JSON: {exc}", file=sys.stderr); sys.exit(1)
 if "error" in data:
-    err=data["error"]; print(f"ERROR: Gemini API error {err.get('code','')}: {err.get('message','')}", file=sys.stderr); sys.exit(1)
+    err=data["error"]
+    if isinstance(err, dict):
+        print(f"ERROR: OpenRouter API error {err.get('code','')}: {err.get('message','')}", file=sys.stderr)
+    else:
+        print(f"ERROR: OpenRouter API error: {err}", file=sys.stderr)
+    sys.exit(1)
 rows=[]
-for item in data.get("models",[]):
-    methods=item.get("supportedGenerationMethods",[]) or []
-    name=item.get("name",""); model_id=name.split("/",1)[1] if name.startswith("models/") else name
+for item in data.get("data", data.get("models", [])):
+    model_id=str(item.get("id") or item.get("name") or "")
     if not model_id: continue
-    display=item.get("displayName",model_id); desc=item.get("description","") or ""
-    input_limit=int(item.get("inputTokenLimit") or 0); output_limit=int(item.get("outputTokenLimit") or 0)
-    hay=" ".join([model_id,display,desc]).lower(); preview=any(w in hay for w in ["preview","experimental"," exp ","-exp","_exp"])
+    display=str(item.get("name") or item.get("display_name") or model_id)
+    desc=str(item.get("description") or "")
+    context=item.get("context_length") or item.get("contextLength") or 0
+    try: input_limit=int(context or 0)
+    except Exception: input_limit=0
+    output_limit=item.get("max_completion_tokens") or item.get("maxCompletionTokens") or 0
+    try: output_limit=int(output_limit or 0)
+    except Exception: output_limit=0
+    arch=item.get("architecture") if isinstance(item.get("architecture"), dict) else {}
+    modalities=arch.get("input_modalities") or arch.get("inputModalities") or arch.get("modality") or ""
+    if isinstance(modalities, list): modality=" ".join(map(str, modalities))
+    else: modality=str(modalities)
+    hay=" ".join([model_id,display,desc]).lower(); preview=any(w in hay for w in ["preview","experimental"," exp ","-exp","_exp"," beta","-beta","_beta"])
+    methods=["chat"]
+    if "image" in modality.lower(): methods.append("image")
+    if model_id.startswith("openrouter/"): methods.append("router")
+    if model_id.endswith(":free") or model_id == "openrouter/free": methods.append("free")
     if not show_all:
-        if filter_generate and "generateContent" not in methods: continue
-        if require_tokens and (input_limit<=0 or output_limit<=0): continue
+        if require_tokens and input_limit <= 0: continue
         if hide_preview and preview: continue
         if input_limit < min_in: continue
         if output_limit < min_out: continue
     badges=[]
-    if "generateContent" in methods: badges.append("gen")
+    badges.extend(methods)
     if preview: badges.append("preview")
-    if input_limit<=0 or output_limit<=0: badges.append("no-token-meta")
+    if input_limit<=0: badges.append("no-context-meta")
     rows.append((model_id,display,input_limit,output_limit,",".join(badges) or "-"))
-if sort_order=="input_desc": rows.sort(key=lambda r:(r[2],r[0]), reverse=True)
-elif sort_order=="output_desc": rows.sort(key=lambda r:(r[3],r[0]), reverse=True)
-elif sort_order=="display": rows.sort(key=lambda r:(r[1].lower(),r[0]))
-else: rows.sort(key=lambda r:r[0])
+if sort_order in ("input_desc","input","tokens","context"):
+    rows.sort(key=lambda r:(r[2],r[0]), reverse=True)
+elif sort_order in ("output_desc","output"):
+    rows.sort(key=lambda r:(r[3],r[0]), reverse=True)
+elif sort_order=="display":
+    rows.sort(key=lambda r:(r[1].lower(),r[0]))
+elif sort_order=="favorites":
+    rows.sort(key=lambda r:(0 if r[0].startswith("openrouter/") else 1, r[0].lower()))
+else:
+    rows.sort(key=lambda r:r[0].lower())
 for r in rows: print("\t".join(map(str,r)))
-PY
+PYMODEL
 }
-
 # ----------------------------------------------------------
 # MAINTAINER COMMENTARY: function print_models
 # print_models is a named maintenance unit. Keep behavior stable, check call
@@ -903,21 +927,25 @@ PY
 print_models() { local json; json="$(models_json_for_display)" || return 1; printf '%s' "$json" | parse_models_table "$SHOW_ALL_MODELS"; }
 
 # ==========================================================
-# GEMINI GENERATION / ATTACHMENT PAYLOADS
+# OPENROUTER GENERATION / ATTACHMENT PAYLOADS
 # ==========================================================
 
 # ----------------------------------------------------------
-# MAINTAINER COMMENTARY: function make_generate_payload
-# Builds valid Gemini JSON from arbitrary text and attachments. Do not
+# MAINTAINER COMMENTARY: function make_openrouter_payload
+# Builds valid OpenRouter JSON from arbitrary text and attachments. Do not
 # replace with manual string interpolation unless you also handle quotes,
 # backslashes, and newlines.
 # ----------------------------------------------------------
-make_generate_payload() {
-  python3 - "$MAX_ATTACHMENT_BYTES" "$@" <<'PY'
+make_openrouter_payload() {
+  local model="$1"
+  shift
+  python3 - "$MAX_ATTACHMENT_BYTES" "$model" "$@" <<'PYPAYLOAD'
 import base64, json, mimetypes, os, sys
 from pathlib import Path
-max_bytes=int(sys.argv[1]); files=sys.argv[2:]; text=sys.stdin.read(); parts=[{"text":text}]
+max_bytes=int(sys.argv[1]); model=sys.argv[2]; files=sys.argv[3:]; text=sys.stdin.read()
 text_exts={".txt",".md",".markdown",".sh",".bash",".py",".json",".yml",".yaml",".html",".css",".js",".c",".cpp",".h",".sql",".log"}
+content_parts=[]
+base_text=text
 for file_name in files:
     path=Path(os.path.expanduser(os.path.expandvars(file_name)))
     if not path.exists() or not path.is_file(): print(f"attachment not found: {file_name}", file=sys.stderr); sys.exit(2)
@@ -926,76 +954,68 @@ for file_name in files:
     mime=mimetypes.guess_type(str(path))[0] or "application/octet-stream"
     if mime.startswith("text/") or path.suffix.lower() in text_exts:
         content=path.read_text(encoding="utf-8",errors="replace")
-        parts.append({"text":f"\n\n[Attached file: {path.name}]\n{content}"})
-    else:
+        base_text += f"\n\n[Attached file: {path.name}]\n{content}"
+    elif mime.startswith("image/"):
         data=base64.b64encode(path.read_bytes()).decode("ascii")
-        parts.append({"inlineData":{"mimeType":mime,"data":data}})
-print(json.dumps({"contents":[{"parts":parts}]}))
-PY
+        content_parts.append({"type":"image_url","image_url":{"url":f"data:{mime};base64,{data}"}})
+    else:
+        base_text += f"\n\n[Attachment not sent inline by ttychatter.python: {path.name} ({mime})]"
+if content_parts:
+    content=[{"type":"text","text":base_text}]+content_parts
+else:
+    content=base_text
+payload={"model":model,"messages":[{"role":"user","content":content}]}
+print(json.dumps(payload))
+PYPAYLOAD
 }
-
 # ----------------------------------------------------------
-# MAINTAINER COMMENTARY: function parse_generate_response
-# parse_generate_response is a named maintenance unit. Keep behavior stable,
+# MAINTAINER COMMENTARY: function parse_openrouter_response
+# parse_openrouter_response is a named maintenance unit. Keep behavior stable,
 # check call sites before changing it, and update man pages/help/comments
 # when behavior changes.
 # ----------------------------------------------------------
-parse_generate_response() {
-  python3 - "$ATTACHMENT_DIR" "$SESSION_NAME" <<'PY'
-import base64, json, mimetypes, os, re, sys
+parse_openrouter_response() {
+  python3 - "$ATTACHMENT_DIR" "$SESSION_NAME" <<'PYRESP'
+import json, sys
 attachment_dir=sys.argv[1]; session_name=sys.argv[2] or "model-test"; raw=sys.stdin.read()
 try: data=json.loads(raw)
 except Exception as exc: print(f"invalid JSON response: {exc}; raw response: {raw[:1000]}"); sys.exit(1)
 if "error" in data:
-    err=data["error"]; print(f"Gemini API error {err.get('code','')}: {err.get('message','')}"); sys.exit(1)
-os.makedirs(attachment_dir, exist_ok=True); texts=[]
-def next_number(kind,ext):
-    highest=0; regex=re.compile(r"^"+re.escape(session_name)+r"-"+re.escape(kind)+r"-(\d{2,})"+re.escape(ext)+r"$")
-    for name in os.listdir(attachment_dir):
-        m=regex.match(name)
-        if m: highest=max(highest,int(m.group(1)))
-    return highest+1
-def save_inline(part):
-    inline=part.get("inlineData") or part.get("inline_data")
-    if not inline: return None
-    mime=inline.get("mimeType") or inline.get("mime_type") or "application/octet-stream"; data=inline.get("data") or ""
-    ext=mimetypes.guess_extension(mime) or ".bin"; kind=mime.split("/",1)[0].replace("+","p").replace("#","sharp")
-    filename=f"{session_name}-{kind}-{next_number(kind,ext):02d}{ext}"; path=os.path.join(attachment_dir,filename)
-    with open(path,"wb") as fh: fh.write(base64.b64decode(data))
-    return f"\n[attachment saved]\nfile: {filename}\nlocation: {attachment_dir}\n"
-for cand in data.get("candidates",[]):
-    for part in cand.get("content",{}).get("parts",[]):
-        if "text" in part: texts.append(part["text"])
-        notice=save_inline(part)
-        if notice: texts.append(notice)
-        file_data=part.get("fileData") or part.get("file_data")
-        if file_data:
-            uri=file_data.get("fileUri") or file_data.get("file_uri") or ""
-            texts.append(f"\n[fileData returned]\nuri: {uri}\n")
+    err=data["error"]
+    if isinstance(err, dict): print(f"OpenRouter API error {err.get('code','')}: {err.get('message','')}")
+    else: print(f"OpenRouter API error: {err}")
+    sys.exit(1)
+texts=[]
+for choice in data.get("choices",[]):
+    msg=choice.get("message",{}) if isinstance(choice,dict) else {}
+    content=msg.get("content","")
+    if isinstance(content,str): texts.append(content)
+    elif isinstance(content,list):
+        for part in content:
+            if isinstance(part,dict):
+                if isinstance(part.get("text"),str): texts.append(part["text"])
+                elif isinstance(part.get("content"),str): texts.append(part["content"])
 output="\n".join(t for t in texts if t is not None)
-if not output.strip(): print("Gemini returned an empty text response"); sys.exit(1)
+if not output.strip(): print("OpenRouter returned an empty text response"); sys.exit(1)
 print(output)
-PY
+PYRESP
 }
-
 # ----------------------------------------------------------
-# MAINTAINER COMMENTARY: function call_gemini_model
+# MAINTAINER COMMENTARY: function call_openrouter_model
 # Single generation transport function. Keeping curl/API behavior
 # centralized makes quota, timeout, and error changes easier.
 # ----------------------------------------------------------
-call_gemini_model() {
+call_openrouter_model() {
   local model="$1" prompt="$2" timeout="${3:-120}"; shift 3 || true
-  local attachments=("$@") clean_model quoted_model url response curl_status output parse_status
+  local attachments=("$@") clean_model response curl_status output parse_status
   require_api_key || return 1
-  clean_model="$(normalize_model_id "$model")"; quoted_model="$(quote_url_component "$clean_model")"
-  url="https://generativelanguage.googleapis.com/v1beta/models/$quoted_model:generateContent?$(api_key_query)"
-  response="$(printf '%s' "$prompt" | make_generate_payload "${attachments[@]}" | curl -sS --max-time "$timeout" -H "Content-Type: application/json" -d @- "$url" 2>&1)"
+  clean_model="$(normalize_model_id "$model")"
+  response="$(printf '%s' "$prompt" | make_openrouter_payload "$clean_model" "${attachments[@]}" | curl -sS --max-time "$timeout" -H "Content-Type: application/json" -H "Authorization: Bearer $OPENROUTER_API_KEY" -H "HTTP-Referer: https://github.com/remfan1994/ttychatter" -H "X-Title: ttychatter" -d @- "https://openrouter.ai/api/v1/chat/completions" 2>&1)"
   curl_status=$?
   [ "$curl_status" -eq 0 ] || { printf '%s\n' "curl error: $response"; return 1; }
-  output="$(printf '%s' "$response" | parse_generate_response)"; parse_status=$?
+  output="$(printf '%s' "$response" | parse_openrouter_response)"; parse_status=$?
   printf '%s\n' "$output"; return "$parse_status"
 }
-
 # ==========================================================
 # USER-OPERATED MODEL TESTING / SELECTION
 # ==========================================================
@@ -1005,7 +1025,7 @@ call_gemini_model() {
 # User-operated model test. This replaced automatic scanning/probing; keep
 # it one-model-at-a-time and transparent to the user.
 # ----------------------------------------------------------
-run_model_test() { local model="$1" output status; printf 'Model: %s\nTest prompt: %s\n\n--- model response ---\n' "$model" "$MODEL_TEST_PROMPT"; output="$(call_gemini_model "$model" "$MODEL_TEST_PROMPT" 60)"; status=$?; printf '%s\n--- end response ---\n' "$output"; return "$status"; }
+run_model_test() { local model="$1" output status; printf 'Model: %s\nTest prompt: %s\n\n--- model response ---\n' "$model" "$MODEL_TEST_PROMPT"; output="$(call_openrouter_model "$model" "$MODEL_TEST_PROMPT" 60)"; status=$?; printf '%s\n--- end response ---\n' "$output"; return "$status"; }
 
 # ----------------------------------------------------------
 # MAINTAINER COMMENTARY: function test_model_command
@@ -1043,7 +1063,7 @@ EOF
 # ----------------------------------------------------------
 # MAINTAINER COMMENTARY: function select_model_command
 # Line-oriented model selector. It should use metadata and optional testing
-# instead of guessing which future Google model is best.
+# instead of guessing which future OpenRouter model is best.
 # ----------------------------------------------------------
 select_model_command() {
   local json table line index choice selected_line selected_model display input_limit output_limit badges answer test_status=0
@@ -1183,7 +1203,7 @@ compose_with_editor() {
 # portable way to offer that kind of UI without becoming a different program,
 # so the Bash-family clients use a local command mode inside the normal chat
 # loop. If the first character of the submitted input is a colon, the input is
-# interpreted by the client and is NOT sent to Gemini.
+# interpreted by the client and is NOT sent to OpenRouter.
 #
 # This is intentionally similar to IRC slash commands, vi/ex commands, and
 # other terminal-native command modes. We chose ':' rather than '/' because
@@ -1201,7 +1221,7 @@ compose_with_editor() {
 runtime_command_help() {
   cat <<EOF
 Runtime commands are local ttychatter.python commands.
-They are not logged as chat, not stored in memory, and not sent to Gemini.
+They are not logged as chat, not stored in memory, and not sent to OpenRouter.
 
 General:
   :help                         Show this runtime command menu
@@ -1215,7 +1235,7 @@ Sessions:
 
 Models:
   :models                       Show filtered cached/live model list
-  :update-models                Refresh model cache from Google
+  :update-models                Refresh model cache from OpenRouter
   :select-model                 Open numbered model selector
   :test-model MODEL             Test one model with MODEL_TEST_PROMPT
   :model MODEL                  Use MODEL for this running chat only
@@ -1225,8 +1245,8 @@ Config and API key:
   :config                       Print current config summary
   :set KEY VALUE                Save config KEY=VALUE
   :unset KEY                    Remove KEY from config
-  :set-api-key                  Prompt and save GEMINI_API_KEY
-  :forget-api-key               Remove GEMINI_API_KEY from config
+  :set-api-key                  Prompt and save OPENROUTER_API_KEY
+  :forget-api-key               Remove OPENROUTER_API_KEY from config
 
 Memory:
   :memory                       Show current in-process memory/context
@@ -1234,7 +1254,7 @@ Memory:
   :clear-memory                 Clear current memory/context
 
 Files and editor:
-  :attach FILE                  Attach FILE to the next Gemini message
+  :attach FILE                  Attach FILE to the next OpenRouter message
   :attachments                  List saved generated/code attachments
   :editor                       Compose a prompt in external editor and send it
 
@@ -1568,7 +1588,7 @@ print_project_lead_notice() { printf '[%s] %s: %s\n\n' "$(timestamp)" "$PROJECT_
 
 # ----------------------------------------------------------
 # MAINTAINER COMMENTARY: function send_one_message
-# Main per-message path: log user input, update memory, call Gemini, extract
+# Main per-message path: log user input, update memory, call OpenRouter, extract
 # attachments, snapshot memory, and display output.
 # ----------------------------------------------------------
 send_one_message() {
@@ -1581,11 +1601,11 @@ send_one_message() {
   printf '[%s] Generating response...\n' "$(timestamp)"
   printf '________________________________________\nBEGIN OUTPUT\n________________________________________\n\n'
   prompt_text="$(build_context)"
-  output="$(call_gemini_model "$ACTIVE_MODEL" "$prompt_text" 120 "${ATTACH_FILES[@]}")"; output_status=$?
+  output="$(call_openrouter_model "$ACTIVE_MODEL" "$prompt_text" 120 "${ATTACH_FILES[@]}")"; output_status=$?
   ATTACH_FILES=()
   [ "$output_status" -ne 0 ] && output="(response error: $output)"
   [ -z "$output" ] && output="(empty response or API error)"
-  printf '[%s] Gemini: %s\n' "$(timestamp)" "$output" >> "$SESSION"
+  printf '[%s] AI: %s\n' "$(timestamp)" "$output" >> "$SESSION"
   cleaned_output="$(printf '%s' "$output" | extract_attachments)"
   add_to_context "Assistant: $cleaned_output"
   write_context_snapshot "$(timestamp)"

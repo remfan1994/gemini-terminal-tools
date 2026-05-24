@@ -1,10 +1,22 @@
-# ttychatter.python changelog
+## 3.4
 
-## 3.3
+### Added
+- OpenRouter-first transport for the Python-helper Bash client.
+- OpenRouter model-catalog parsing.
+- `OPENROUTER_API_KEY` / `TTYCHATTER_API_KEY` support.
+- OpenRouter chat-completions request construction through Python JSON helpers.
+- OpenRouter response parsing for `choices[].message.content`.
 
 ### Changed
-- Renamed flat-layout executable to `ttychatter.python`.
-- Paths adjusted toward ttychatter OpenRouter naming.
+- Replaced the earlier provider-specific generation endpoint with OpenRouter `/api/v1/chat/completions`.
+- Replaced the earlier provider-specific model-list endpoint with OpenRouter `/api/v1/models`.
+- Default fallback model changed to `openrouter/auto`.
+- Session logs now use `AI` as the assistant speaker label.
+- Help text and comments now describe OpenRouter.
+
+### Documentation
+- Updated man page with OpenRouter API-key and model-list language.
+- Updated built-in help links to OpenRouter documentation.
 
 ### Notes
-- Full OpenRouter behavior is led by `ttychatter.ncurses` in this pass.
+- Python helper snippets remain intentionally used for robust JSON generation/parsing.
