@@ -1,4 +1,58 @@
 # ttychatter.bash changelog
+0.11.0-bash-only
+- Added --routers and --model-type model-list filters.
+- Added MODEL_TYPE_FILTER config support.
+- Added runtime :routers command.
+- Added dependency-light router/fixed/free/auto filtering using available model-list columns.
+- Updated documentation for OpenRouter router entries.
+
+## 0.10.0-bash-only
+
+### Added
+- `--loopback` mode for piping AI responses from an interactive chat to another program.
+- `--loopback-file <path>` for appending AI responses to a file.
+- LOOPBACK_FILE config support.
+
+### Changed
+- In `--loopback` mode, interface text is routed to stderr while clean AI responses are written to stdout.
+
+### Documentation
+- Added LOOPBACK OUTPUT documentation to the man page and help text.
+
+## 0.9.0-bash-only
+
+### Added
+- Optional GPG-encrypted API-key loading through `api-key.gpg`.
+- `API_KEY_GPG_FILE` / `OPENROUTER_API_KEY_GPG_FILE` config key support.
+- GPG availability and encrypted-key presence checks in `--doctor`.
+
+### Changed
+- API-key loading now checks environment, config, and optional GPG encrypted file while remaining Python-free.
+
+### Documentation
+- Updated man page with GPG API-key storage behavior.
+
+### Notes
+- GPG support is dependency-light and uses the user's external `gpg` command.
+- If gpg is unavailable, the Bash-only client still works with environment or plaintext config API keys.
+
+## 0.9.0-bash-only
+
+### Added
+- Optional GPG-encrypted API-key loading through `api-key.gpg`.
+- `API_KEY_GPG_FILE` / `OPENROUTER_API_KEY_GPG_FILE` config key support.
+- GPG availability and encrypted-key presence checks in `--doctor`.
+
+### Changed
+- API-key loading now checks environment, config, and optional GPG encrypted file while remaining Python-free.
+
+### Documentation
+- Updated man page with GPG API-key storage behavior.
+
+### Notes
+- GPG support is dependency-light and uses the user's external `gpg` command.
+- If gpg is unavailable, the Bash-only client still works with environment or plaintext config API keys.
+
 ## 0.8.0-bash-only
 
 ### Added
