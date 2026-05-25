@@ -1,4 +1,44 @@
 # ttychatter.bash changelog
+## 0.8.0-bash-only
+
+### Added
+- `--demo` no-network demo mode.
+- `DEMO_MODE` config key.
+- Local demo model catalog for model listing and selection.
+- Local demo response for model testing and chat messages.
+- Demo code-block output for attachment-extraction testing.
+
+### Changed
+- Demo mode bypasses API-key requirements.
+- Demo mode lets the Bash-only client be tested without contacting OpenRouter.
+
+### Documentation
+- Added demo mode to man page and built-in help.
+
+### Notes
+- Demo mode preserves the project’s end-user terminal-client posture while avoiding provider traffic during artificial testing.
+
+## 0.7.0-bash-only
+
+### Added
+- OpenRouter-first transport for the Bash-only client.
+- `OPENROUTER_API_KEY` / `TTYCHATTER_API_KEY` support.
+- OpenRouter model-catalog support using jq when available and shell fallback parsing otherwise.
+- OpenRouter chat-completions payload construction.
+
+### Changed
+- Replaced earlier provider-specific endpoints with OpenRouter endpoints.
+- Default fallback model changed to `openrouter/auto`.
+- Session logs now use `AI` as the assistant speaker label.
+- Help text, comments, and man page language now describe OpenRouter.
+
+### Documentation
+- Updated man page and built-in help to point to OpenRouter documentation.
+- Clarified that jq improves JSON reliability but is optional.
+
+### Notes
+- This remains the dependency-light end-user client, not a curl example.
+
 ## 0.7.0-bash-only
 
 ### Added
