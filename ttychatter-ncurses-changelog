@@ -1,4 +1,47 @@
 # Changelog
+## 0.14.4
+
+### Fixed
+- The main ncurses command bar no longer hard-codes `Send: Enter/Ctrl+G`.
+- The visible send label now reflects the active `SEND_INPUT` option.
+- F8 now opens the configured external editor immediately instead of opening the editor selector.
+- Editor selection is now treated as an Options-screen preference instead of a per-compose action.
+
+### Changed
+- The main function-key bar now contains only screen-navigation commands.
+- Ctrl-key compose actions were moved out of the function-key tier.
+- A separate compose hotkey bar now displays the configured send key, Ctrl+K quick attach, and Ctrl+L pending-file review.
+- The input placeholder now includes the active send key dynamically.
+- The EDITOR option keeps the detected-editor selector behavior.
+- `SEND_INPUT` choices now include `ctrl_enter` in the Options selector, while the man page warns that Ctrl+Enter remains terminal-dependent.
+
+### Documentation
+- Updated man page controls for F8 editor behavior.
+- Added COMMAND AND HOTKEY BARS section.
+- Updated editor documentation to distinguish F8 compose editing from Options editor selection.
+- Updated version to 0.14.4.
+
+### Notes
+- Ctrl+K and Ctrl+L remain active hotkeys, but they are no longer displayed as if they were function-key screens.
+- F8 is the quick action; F5 Options is where users choose or save the editor.
+## 0.14.3
+
+### Added
+- Ctrl+K quick file attachment shortcut from the main ncurses chat screen.
+- Ctrl+L pending-file list shortcut from the main ncurses chat screen.
+- Visible command-bar hints for quick attachment and pending-file review.
+- Additional maintainer commentary explaining why Ctrl+T was retired and why pending attachments are compose-state rather than chat memory.
+
+### Changed
+- Quick attachment no longer uses Ctrl+T because ChromeOS Terminal and other tabbed terminals may intercept Ctrl+T before ncurses receives it.
+- The compact command bar now tries to keep F1, send, attach, pending-files, and F10 visible on narrow terminals.
+- F8 editor behavior is documented more clearly as a detected editor selector rather than an immediate editor launch.
+
+### Documentation
+- Updated man page controls from Ctrl+T to Ctrl+K.
+- Added Ctrl+L pending-file documentation.
+- Added editor selector documentation.
+
 ## 0.14.2
 
 ### Added
