@@ -1,4 +1,83 @@
 # Changelog
+0.14.0
+- Added THEME config support: default, dim, high_contrast, mono, solarized_dark.
+- Added theme/style role handling for AI/user/system transcript rendering.
+- Added Ctrl+T quick file attachment shortcut from the main interface.
+- Added OpenRouter router/special model shortcut screen.
+- Added MODEL_TYPE_FILTER config key: all, routers, fixed, free, auto.
+- Added --routers and --model-type command-line filters for model output.
+- Added model type column to model browser rows.
+- Added type sort mode for model browser.
+- Added router/free/auto/fixed badges in model metadata displays.
+- Updated options screen to expose THEME and MODEL_TYPE_FILTER as choice fields.
+- Expanded maintainer commentary around theme profiles, router semantics, and quick attachment pipeline.
+
+## 0.13.0
+
+### Added
+- `--loopback-file <path>` for appending AI responses to a separate file while the ncurses UI remains active.
+- LOOPBACK_FILE config support for persistent response mirroring.
+
+### Documentation
+- Added LOOPBACK OUTPUT documentation to the man page.
+
+### Notes
+- Direct stdout piping is not recommended for the ncurses client because curses owns the terminal display. Use `--loopback-file` for ncurses output mirroring.
+
+## 0.12.0
+
+### Added
+- Obvious `~DEMO~` marker in the ncurses title/header line when running with `--demo` or `DEMO_MODE=1`.
+- First-live-send confirmation before making a real OpenRouter chat request.
+- `CONFIRM_LIVE_SEND` config key.
+- Optional GPG-encrypted API-key loading through `api-key.gpg`.
+- `API_KEY_GPG_FILE` / `OPENROUTER_API_KEY_GPG_FILE` config key support.
+- GPG availability and encrypted-key presence checks in `--doctor`.
+- Compact command-bar fallback for narrow terminals.
+
+### Changed
+- Narrow command bar now shows essential actions instead of clipping half of a long F-key list.
+- Send-key options shown in the ncurses options selector now emphasize reliable values: `enter` and `ctrl_g`.
+- Ctrl+Enter remains a possible legacy config value but is no longer promoted as a dependable option because many terminal emulators report it as plain Enter.
+- Live mode is harder to confuse with demo mode.
+
+### Documentation
+- Updated man page with GPG API-key storage.
+- Updated man page with live-request confirmation behavior.
+- Updated man page with clearer demo-mode behavior.
+- Updated limitations around Ctrl+Enter terminal support.
+
+### Notes
+- GPG support shells out to the user's `gpg` command. ttychatter does not embed cryptographic code.
+- The decrypted API key is never printed by diagnostics or written to logs.
+
+## 0.12.0
+
+### Added
+- Obvious `~DEMO~` marker in the ncurses title/header line when running with `--demo` or `DEMO_MODE=1`.
+- First-live-send confirmation before making a real OpenRouter chat request.
+- `CONFIRM_LIVE_SEND` config key.
+- Optional GPG-encrypted API-key loading through `api-key.gpg`.
+- `API_KEY_GPG_FILE` / `OPENROUTER_API_KEY_GPG_FILE` config key support.
+- GPG availability and encrypted-key presence checks in `--doctor`.
+- Compact command-bar fallback for narrow terminals.
+
+### Changed
+- Narrow command bar now shows essential actions instead of clipping half of a long F-key list.
+- Send-key options shown in the ncurses options selector now emphasize reliable values: `enter` and `ctrl_g`.
+- Ctrl+Enter remains a possible legacy config value but is no longer promoted as a dependable option because many terminal emulators report it as plain Enter.
+- Live mode is harder to confuse with demo mode.
+
+### Documentation
+- Updated man page with GPG API-key storage.
+- Updated man page with live-request confirmation behavior.
+- Updated man page with clearer demo-mode behavior.
+- Updated limitations around Ctrl+Enter terminal support.
+
+### Notes
+- GPG support shells out to the user's `gpg` command. ttychatter does not embed cryptographic code.
+- The decrypted API key is never printed by diagnostics or written to logs.
+
 ## 0.11.1
 
 ### Added
