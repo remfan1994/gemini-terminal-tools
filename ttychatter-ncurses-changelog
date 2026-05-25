@@ -1,4 +1,44 @@
 # Changelog
+## 0.11.1
+
+### Added
+- `--demo` no-network demo mode.
+- `DEMO_MODE` config key.
+- Local demo model catalog with `demo/auto`, `demo/free`, and `demo/code-helper` rows.
+- Local demo AI response path for UI and attachment testing without OpenRouter requests.
+- Demo response containing both a short inline code block and a longer code block for attachment-threshold testing.
+
+### Changed
+- Demo mode bypasses API-key requirements.
+- Demo mode labels the header as `demo:no-network` so users can see no provider request is being made.
+- Model listing and model testing can now be exercised locally.
+
+### Documentation
+- Added DEMO MODE section to the man page.
+- Documented `DEMO_MODE=1` in configuration.
+- Updated limitations to clarify demo mode tests ttychatter behavior, not provider/model quality.
+
+### Notes
+- This release is intended to help users test ttychatter without abusing OpenRouter/free or spending provider requests on artificial testing.
+
+## 0.11.0
+
+### Added
+- OpenRouter terminology cleanup across help text, comments, and man page.
+- Provider-neutral AI speaker language for transcript/log-facing documentation.
+
+### Changed
+- Removed stale provider terminology from the ncurses client source where it described current behavior.
+- Config path documentation now consistently uses `~/.config/ttychatter/openrouter/config`.
+- Model/browser documentation now describes OpenRouter model catalog behavior.
+
+### Documentation
+- Updated man page to use OpenRouter chat-completions and model-catalog language.
+- Updated comments around provider transport to avoid stale provider naming.
+
+### Notes
+- This is a cleanup pass; no intended ncurses runtime feature expansion beyond terminology/provider coherence.
+
 # ttychatter.ncurses changelog
 ## 0.11.0
 
