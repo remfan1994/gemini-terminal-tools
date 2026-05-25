@@ -7,6 +7,15 @@
 - SEND_INPUT config support for enter vs Ctrl+D-style input loops
 - CODE_ATTACHMENT_MIN_LINES support so short code blocks can remain inline
 - Model favorites file support through MODEL_FAVORITES_FILE
+### Changed
+- Model sorting can now use saved favorites where supported
+- Long code-block extraction is now threshold-controlled
+- Bash output styling avoids ANSI escapes when output is piped or loopback is active
+
+### Documentation
+- Updated man page with favorites, theme, send input, and code attachment threshold sections
+- Updated comments around line-oriented parity with the ncurses client
+
 
 3.8
 - Added --routers and --model-type model-list filters.
