@@ -74,13 +74,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-VERSION = "0.14.2"
+VERSION = "0.14.4"
 PROGRAM = "ttychatter.ncurses"
 FALLBACK_MODEL = "openrouter/auto"
 DEFAULT_MODEL_TEST_PROMPT = "Please reply with one short sentence confirming this model is available for text generation."
 DEFAULT_GITHUB_URL = "https://github.com/remfan1994/ttychatter"
 PROJECT_NOTICE = "I strongly encourage everyone to get cruetly-free VEGETARIAN food and remember the 'bloodguilt' curse from the Bible.  -Project Lead, remfan1994"
-INPUT_PLACEHOLDER_DEFAULT = "Type your chat message here... (Enter/Ctrl+G sends)"
+INPUT_PLACEHOLDER_DEFAULT = "Type here..."
 MOUSE_SCROLL_LINES = 3
 MAX_INLINE_ATTACHMENT_BYTES = 20 * 1024 * 1024
 DEFAULT_MODEL_CACHE_FILE = Path.home() / ".cache" / "ttychatter" / "openrouter" / "models.json"
@@ -1990,7 +1990,7 @@ class AICursesApp:
         self.layout: dict[str, int] = {}
         self.last_input_segments: List[InputSegment] = []
         self.command_hotspots: List[Tuple[int, int, int, str]] = []
-        self.command_click_targets: List[Tuple[int, int, str]] = []
+        self.command_click_targets: List[Tuple[int, int, int, str]] = []
 
         self.status = self.default_status()
         self.should_quit = False
@@ -2004,7 +2004,28 @@ class AICursesApp:
     # session-log compatibility, and the parallel Bash/C implementation plans.
     # ------------------------------------------------------------
     def default_status(self) -> str:
-        return "F1 Menu | Ctrl+G Send | F10 Quit"
+        # The status line is intentionally short.  The main command bar and the
+        # compose hotkey bar carry the stable command hints; the status line is
+        # reserved for current state.  Earlier builds mixed function-key screen
+        # navigation with Ctrl-key compose actions in one long strip.  That made
+        # the screen look crowded and made the configured send key easy to miss.
+        return f"F1 Menu | {self.send_key_label()} Send | F10 Quit"
+
+    def send_key_label(self) -> str:
+        """Return the user-facing label for the configured send action.
+
+        SEND_INPUT is a config value, so the UI must not hard-code "Enter" or
+        "Ctrl+G" in visible instructions.  Users who deliberately select
+        Ctrl+G should see Ctrl+G; users who select Enter should see Enter.  This
+        helper exists so the header, command bar, hotkey bar, placeholder text,
+        help pages, and future ports use one vocabulary.
+        """
+        value = (self.cfg.send_input or "enter").lower()
+        if value == "ctrl_g":
+            return "Ctrl+G"
+        if value == "ctrl_enter":
+            return "Ctrl+Enter"
+        return "Enter"
 
     # ------------------------------------------------------------------
     # Context memory
@@ -2364,9 +2385,17 @@ class AICursesApp:
 
     # ------------------------------------------------------------
     # MAINTAINER COMMENTARY: def command_bar_items
-    # Maintainer note for command_bar_items: this routine is part of the long-term public
-    # behavior of the program. When changing it, check callers, documentation, config
-    # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
+    #
+    # This list is the main-screen command strip.  It deliberately mixes
+    # function-key screens and a few direct control-key actions because the user
+    # should not need to remember that attachments live behind F7.  The visible
+    # bar is especially important on laptop terminals with no backlit keyboard:
+    # it is the user's map of the interface.
+    #
+    # draw_command_bar() may hide some of these labels on narrow screens, but
+    # the full list remains the authoritative clickable inventory for ordinary
+    # terminal sizes.  If a maintainer changes the names or actions here, update
+    # handle_key(), dispatch_command_action(), the help menu, and the man page.
     # ------------------------------------------------------------
     def command_bar_items(self) -> List[Tuple[str, str]]:
         return [
@@ -2381,6 +2410,22 @@ class AICursesApp:
             ("F9 Credits", "credits"),
         ]
 
+    def compose_hotkey_items(self) -> List[Tuple[str, str]]:
+        """Return non-function-key compose actions shown near the input pane.
+
+        Function keys are screen-navigation commands: F2 opens Models, F4 opens
+        Sessions, F8 launches the editor, and so on.  Ctrl-key actions are
+        different: they operate on the current message being composed.  Mixing
+        them with the F-key tier made the command strip visually confusing.
+        Keeping compose hotkeys in their own row lets users learn them without
+        making them look like more application screens.
+        """
+        return [
+            (f"Send:{self.send_key_label()}", "send"),
+            ("Attach:Ctrl+K", "attach"),
+            ("Pending:Ctrl+L", "pending"),
+        ]
+
     # ------------------------------------------------------------
     # MAINTAINER COMMENTARY: def draw_command_bar
     # Maintainer note for draw_command_bar: this routine is part of the long-term public
@@ -2388,18 +2433,16 @@ class AICursesApp:
     # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
     # ------------------------------------------------------------
     def draw_command_bar(self, y: int, width: int) -> None:
-        # The command bar must remain useful even on narrow terminal windows.
-        # Earlier versions tried to print every F-key label on one line and
-        # simply clipped the text. That worked on wide terminals but looked
-        # broken on Chromebook/Crostini windows with large fonts. The command
-        # bar now has a compact fallback: on narrow screens it shows only the
-        # essentials (F1 help, the configured send key, and F10 quit). F1 then
-        # acts as the complete command launcher. Visible labels remain clickable
-        # so mouse users are not punished for the compact layout.
+        # The command bar is now strictly the function-key navigation tier.
+        # It names screens, not compose-time actions.  This separation matters
+        # because function keys are global: if the user presses F5 from inside
+        # the model browser, the app should jump to Options.  Ctrl+K and Ctrl+L
+        # are not screens; they operate on the current draft message.  They are
+        # therefore drawn by draw_hotkey_bar() directly below this bar.
         self.command_click_targets = []
         self.safe_addstr(y, 0, "_" * width, width, self.dim_attr())
         if width < 72:
-            items = [("F1 Menu", "help"), (f"Send:{self.cfg.send_input}", "send"), ("F10 Quit", "quit")]
+            items = [("F1 Menu", "help"), ("F2 Models", "models"), ("F5 Options", "options"), ("F10 Quit", "quit")]
         else:
             items = self.command_bar_items()
         x = 0
@@ -2412,7 +2455,30 @@ class AICursesApp:
             self.safe_addstr(y, x, text, width - x, self.dim_attr())
             label_start = x + (3 if idx else 0)
             label_end = label_start + len(label)
-            self.command_click_targets.append((label_start, label_end, action))
+            self.command_click_targets.append((y, label_start, label_end, action))
+            x += len(text)
+
+    def draw_hotkey_bar(self, y: int, width: int) -> None:
+        """Draw compose-time shortcuts separately from function-key screens.
+
+        This row answers a different question than the function-key bar.  The
+        function bar says "where can I go?"; the hotkey bar says "what can I do
+        to the message I am writing right now?"  It also reflects SEND_INPUT at
+        runtime, so the visible send instruction always matches Options.
+        """
+        self.safe_addstr(y, 0, "-" * width, width, self.dim_attr())
+        items = self.compose_hotkey_items()
+        x = 0
+        for idx, (label, action) in enumerate(items):
+            text = label if idx == 0 else " | " + label
+            if x + len(text) >= width:
+                if x + 4 < width:
+                    self.safe_addstr(y, x, " ...", width - x, self.dim_attr())
+                break
+            self.safe_addstr(y, x, text, width - x, self.dim_attr())
+            label_start = x + (3 if idx else 0)
+            label_end = label_start + len(label)
+            self.command_click_targets.append((y, label_start, label_end, action))
             x += len(text)
 
     # ------------------------------------------------------------
@@ -2423,6 +2489,7 @@ class AICursesApp:
     # ------------------------------------------------------------
     def draw_input(self, label_y: int, input_y: int, width: int) -> None:
         self.draw_command_bar(label_y, width)
+        self.draw_hotkey_bar(label_y + 1, width)
 
         segments, cursor_visual_index, cursor_x = self.input_segments(width)
         self.last_input_segments = segments
@@ -2433,7 +2500,7 @@ class AICursesApp:
         self.input_scroll = max(0, min(self.input_scroll, max(0, len(segments) - self.INPUT_HEIGHT)))
 
         if self.current_input() == "":
-            placeholder = "> " + self.cfg.input_placeholder
+            placeholder = f"> {self.cfg.input_placeholder}  [{self.send_key_label()} to send]"
             self.safe_addstr(input_y, 0, placeholder, width, self.dim_attr())
             for offset in range(1, self.INPUT_HEIGHT):
                 self.safe_addstr(input_y + offset, 0, "", width)
@@ -2484,7 +2551,7 @@ class AICursesApp:
 
         header_h = 2
         status_h = 1
-        input_label_h = 1
+        input_label_h = 2
         transcript_h = height - header_h - input_label_h - self.INPUT_HEIGHT - status_h
         transcript_y = header_h
         input_label_y = transcript_y + transcript_h
@@ -2570,12 +2637,10 @@ class AICursesApp:
         if not self.layout:
             return
         if self.mouse_button1(state):
-            label_y = self.layout.get("input_label_y", -1)
-            if y == label_y:
-                for start, end, action in self.command_click_targets:
-                    if start <= x < end:
-                        self.dispatch_command_action(action)
-                        return
+            for target_y, start, end, action in self.command_click_targets:
+                if y == target_y and start <= x < end:
+                    self.dispatch_command_action(action)
+                    return
 
             input_y = self.layout.get("input_y", -1)
             input_h = self.layout.get("input_h", 0)
@@ -2914,7 +2979,7 @@ class AICursesApp:
             ("F5", "Options: edit config-backed settings", "options"),
             ("F6", "Memory: view, edit, clear, rebuild", "memory"),
             ("F7", "Files: attach local files, browse saved attachments", "files"),
-            ("F8", "External editor for current prompt", "editor"),
+            ("F8", "Open configured external editor for current prompt", "editor"),
             ("F9", "Credits / about", "credits"),
             ("Ctrl+G", "Send current message", "send"),
             ("F10", "Quit", "quit"),
@@ -2945,6 +3010,10 @@ class AICursesApp:
             self.open_memory_menu()
         elif action == "files":
             self.open_file_menu()
+        elif action == "attach":
+            self.quick_attach_file()
+        elif action == "pending":
+            self.show_pending_attachments()
         elif action == "editor":
             self.open_external_editor_for_input()
         elif action == "credits":
@@ -3991,7 +4060,7 @@ class AICursesApp:
                 {"key": "CONTEXT_TURNS", "label": "Context turns", "kind": "int", "value": str(self.cfg.context_turns)},
                 {"key": "SESSION_DIR", "label": "Session directory", "kind": "path", "value": str(self.cfg.session_dir)},
                 {"key": "ATTACHMENT_DIR", "label": "Attachment directory", "kind": "path", "value": str(self.cfg.effective_attachment_dir)},
-                {"key": "EDITOR", "label": "External editor", "kind": "text", "value": self.cfg.editor},
+                {"key": "EDITOR", "label": "External editor", "kind": "editor_choice", "value": self.cfg.editor},
                 {"key": "MODEL_CACHE_FILE", "label": "Model cache file", "kind": "path", "value": str(self.cfg.model_cache_file)},
                 {"key": "MODEL_FILTER_CHAT_COMPLETIONS", "label": "Model browser: chat.completions only", "kind": "bool", "value": self.cfg.model_filter_chat_completions},
                 {"key": "MODEL_FILTER_REQUIRE_TOKENS", "label": "Model browser: require token limits", "kind": "bool", "value": self.cfg.model_filter_require_tokens},
@@ -4003,7 +4072,7 @@ class AICursesApp:
                 {"key": "THEME", "label": "Theme / style profile", "kind": "choice", "value": self.cfg.theme, "choices": THEME_CHOICES},
                 {"key": "MODEL_TEST_PROMPT", "label": "Model test prompt", "kind": "text", "value": self.cfg.model_test_prompt},
                 {"key": "INPUT_PLACEHOLDER", "label": "Input placeholder", "kind": "text", "value": self.cfg.input_placeholder},
-                {"key": "SEND_INPUT", "label": "Send key", "kind": "choice", "value": self.cfg.send_input, "choices": ["enter", "ctrl_g"]},
+                {"key": "SEND_INPUT", "label": "Send key", "kind": "choice", "value": self.cfg.send_input, "choices": ["enter", "ctrl_g", "ctrl_enter"]},
                 {"key": "PROMPT_SESSION_NAME", "label": "Prompt for session name", "kind": "bool", "value": self.cfg.prompt_session_name},
                 {"key": "CODE_ATTACHMENT_MIN_LINES", "label": "Code block attachment min lines", "kind": "int", "value": str(self.cfg.code_attachment_min_lines)},
                 {"key": "MONOCHROME", "label": "Monochrome mode", "kind": "bool", "value": self.cfg.monochrome},
@@ -4133,7 +4202,10 @@ class AICursesApp:
                     mark = "[x]" if field["value"] else "[ ]"
                     line = f"{mark} {field['label']}"
                 else:
-                    val = str(field["value"])
+                    if field["kind"] == "editor_choice":
+                        val = str(field["value"] or self.cfg.effective_editor)
+                    else:
+                        val = str(field["value"])
                     if editing and idx == selected:
                         val = edit_value
                     line = f"{field['label']:<24} [{val}]"
@@ -4225,6 +4297,15 @@ class AICursesApp:
                     )
                     if chosen is not None:
                         apply_field(field["key"], chosen)
+                elif field["kind"] == "editor_choice":
+                    # EDITOR is a bounded-choice field in practice even though
+                    # users may ultimately type a custom path.  The selector
+                    # shows only editors found in PATH, plus Custom/Browse
+                    # fallbacks.  This keeps the Options screen from becoming
+                    # a raw config-file editor.
+                    chosen_editor = self.select_editor_value()
+                    if chosen_editor is not None:
+                        apply_field(field["key"], chosen_editor)
                 else:
                     editing = True
                     edit_value = str(field["value"])
@@ -4388,18 +4469,40 @@ class AICursesApp:
 
     # ------------------------------------------------------------
     # MAINTAINER COMMENTARY: def quick_attach_file
-    # Ctrl+T uses this helper to expose the most common file workflow without
-    # forcing the user through the full F7 file menu.  The shortcut deliberately
-    # reuses the same file picker and PendingAttachment object as F7 so the
-    # application has one attachment pipeline rather than two subtly different
-    # pipelines.  If future ports add drag/drop, paste-from-clipboard, or richer
-    # file browsers, keep them feeding this same pending-attachment list.
+    # Ctrl+K uses this helper to expose the most common file workflow without
+    # forcing the user through the full F7 file menu.  Earlier versions used
+    # Ctrl+T, but on ChromeOS Terminal that keystroke can be intercepted by the
+    # terminal emulator to open a new tab before ttychatter ever receives it.
+    # Ctrl+K is not perfect -- Emacs-style editors often use it for kill-line --
+    # but ttychatter owns the keystroke while focus is inside the curses
+    # application, and it is less likely to be stolen globally by the terminal.
+    #
+    # The shortcut deliberately reuses the same file picker and PendingAttachment
+    # object as F7 so the application has one attachment pipeline rather than two
+    # subtly different pipelines.  If future ports add drag/drop, paste-from-
+    # clipboard, or richer file browsers, keep them feeding this same pending-
+    # attachment list.
     # ------------------------------------------------------------
     def quick_attach_file(self) -> None:
         path = self.file_picker(Path.cwd(), "ATTACH FILE")
         if path:
             self.pending_attachments.append(PendingAttachment(path, guess_mime(path)))
             self.status = f"attached file for next request: {path.name}"
+
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def show_pending_attachments
+    # Ctrl+L uses this helper to let the user check what will be sent with the
+    # next message without opening the full F7 file tools screen.  The pending
+    # list is intentionally a local compose-state list: it is cleared after a
+    # successful send and is not written to memory as if it were normal chat
+    # text.  The log records that attachments were sent, but the pending UI list
+    # itself is just an operational aid for the human at the terminal.
+    # ------------------------------------------------------------
+    def show_pending_attachments(self) -> None:
+        if not self.pending_attachments:
+            self.show_message("PENDING FILES", ["No files are queued for the next message."])
+            return
+        self.show_message("PENDING FILES", [f"{idx + 1}. {p.path} ({p.mime_type})" for idx, p in enumerate(self.pending_attachments)])
 
     # ------------------------------------------------------------
     # MAINTAINER COMMENTARY: def open_file_menu
@@ -4522,116 +4625,35 @@ class AICursesApp:
         return None
 
     # ------------------------------------------------------------
-    # MAINTAINER COMMENTARY: def open_editor_menu
-    # External editor chooser. This supports Unix-style composition workflows similar to mail
-    # clients such as mutt.
+    # MAINTAINER COMMENTARY: def select_editor_value
+    #
+    # Compact editor selector used by the Options screen.  F8 is deliberately
+    # *not* this selector: F8 is the quick compose action that opens the already
+    # configured editor for the current draft.  Editor selection is a preference,
+    # so it belongs in Options alongside SEND_INPUT and THEME.
+    #
+    # The list is built from executables found in PATH with shutil.which().  We
+    # do not show editors that are not installed, because a menu of imaginary
+    # commands teaches users nothing and makes old-PC/minimal installations feel
+    # broken.  "Custom" and "Browse" remain available because Unix users often
+    # keep editors in nonstandard paths.
     # ------------------------------------------------------------
-    def open_editor_menu(self) -> None:
-        """Open a menu for choosing, saving, browsing, and launching editors.
-
-        Earlier versions launched the configured editor immediately. That was
-        too abrupt and not friendly to users who are not sure which editor is
-        available. The menu preserves the mutt-style external editor workflow
-        while making the editor choice discoverable.
-        """
-        selected = 0
-        custom_editor = self.cfg.effective_editor
-        while True:
-            detected = self.detected_editors()
-            items: List[Tuple[str, str, str]] = []
-            for name, path in detected:
-                items.append((name, f"{name} ({path})", path))
-            items.extend([
-                ("custom", f"Enter custom editor command/path (current: {custom_editor})", "__custom__"),
-                ("browse", "Browse for editor executable", "__browse__"),
-                ("save", f"Save current editor to config: {custom_editor}", "__save__"),
-                ("open", "Open current prompt in current editor", "__open__"),
-                ("quit", "Return to chat", "__quit__"),
-            ])
-
-            self.stdscr.erase()
-            height, width = self.stdscr.getmaxyx()
-            visible_h = max(1, height - 5)
-            self.safe_addstr(0, 0, "EDITOR MENU", width, self.reverse_attr())
-            self.safe_addstr(1, 0, "Enter/click=choose | F-keys jump screens | Esc/q=return", width, self.dim_attr())
-            self.safe_addstr(2, 0, f"Effective editor: {self.cfg.effective_editor}", width)
-            self.safe_addstr(3, 0, "_" * width, width, self.dim_attr())
-            selected = max(0, min(selected, len(items) - 1))
-            for row, (name, label, _value) in enumerate(items[:visible_h]):
-                attr = self.reverse_attr() if row == selected else 0
-                self.safe_addstr(4 + row, 0, f"{name:<10} {label}", width, attr)
-            self.stdscr.refresh()
-
-            ch = self.stdscr.getch()
-            if self.handle_global_hotkey(ch, current_action="editor"):
-                return
-            if ch == curses.KEY_MOUSE:
-                try:
-                    _mid, _x, y, _z, state = curses.getmouse()
-                except curses.error:
-                    continue
-                delta = self.mouse_wheel_delta(state)
-                if delta > 0:
-                    selected = max(0, selected - MOUSE_SCROLL_LINES); continue
-                if delta < 0:
-                    selected = min(len(items) - 1, selected + MOUSE_SCROLL_LINES); continue
-                if self.mouse_button1(state) and 4 <= y < 4 + min(visible_h, len(items)):
-                    selected = y - 4
-                    ch = 10
-                else:
-                    continue
-            if ch in (27, ord("q"), ord("Q")):
-                self.status = "editor menu closed"
-                return
-            if ch in (curses.KEY_UP, ord("k"), ord("K")):
-                selected = max(0, selected - 1); continue
-            if ch in (curses.KEY_DOWN, ord("j"), ord("J")):
-                selected = min(len(items) - 1, selected + 1); continue
-            if ch not in (10, 13, curses.KEY_ENTER):
-                continue
-
-            _name, _label, value = items[selected]
-            if value == "__quit__":
-                self.status = "editor menu closed"
-                return
-            if value == "__custom__":
-                entered = self.text_input_modal("CUSTOM EDITOR", "Enter editor command or executable path.", initial=custom_editor)
-                if entered:
-                    custom_editor = entered
-                    self.cfg.editor = entered
-                    self.status = f"editor selected: {entered}"
-                continue
-            if value == "__browse__":
-                chosen = self.browse_for_editor()
-                if chosen:
-                    custom_editor = chosen
-                    self.cfg.editor = chosen
-                    self.status = f"editor selected: {chosen}"
-                continue
-            if value == "__save__":
-                if custom_editor:
-                    set_config_value(self.cfg, "EDITOR", custom_editor)
-                    self.cfg.editor = custom_editor
-                    self.status = f"editor saved: {custom_editor}"
-                continue
-            if value == "__open__":
-                selected_editor = custom_editor
-            else:
-                selected_editor = value
-                custom_editor = value
-                self.cfg.editor = value
-                self.status = f"editor selected: {value}"
-
-            old_editor = self.cfg.editor
-            self.cfg.editor = selected_editor
-            edited = self.run_external_editor(self.current_input())
-            self.cfg.editor = old_editor if value == "__open__" else self.cfg.editor
-            if edited is not None:
-                self.input_lines = edited.rstrip("\n").splitlines() or [""]
-                self.cursor_row = len(self.input_lines) - 1
-                self.cursor_col = len(self.input_lines[-1])
-                self.status = "input loaded from external editor"
-            return
+    def select_editor_value(self) -> Optional[str]:
+        detected = self.detected_editors()
+        choices: List[Tuple[str, str]] = [(f"{name} ({path})", path) for name, path in detected]
+        choices.append(("Custom command/path...", "__custom__"))
+        choices.append(("Browse executable...", "__browse__"))
+        labels = [label for label, _value in choices]
+        current = self.cfg.editor or self.cfg.effective_editor
+        chosen = self.choice_modal("SELECT EDITOR", f"Current editor: {current}", labels, labels[0] if labels else "")
+        if chosen is None:
+            return None
+        value = dict(choices).get(chosen)
+        if value == "__custom__":
+            return self.text_input_modal("CUSTOM EDITOR", "Enter editor command or executable path.", initial=current)
+        if value == "__browse__":
+            return self.browse_for_editor()
+        return value
 
     # ------------------------------------------------------------
     # MAINTAINER COMMENTARY: def open_external_editor_for_input
@@ -4640,7 +4662,20 @@ class AICursesApp:
     # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
     # ------------------------------------------------------------
     def open_external_editor_for_input(self) -> None:
-        self.open_editor_menu()
+        """Open the configured editor immediately for the current draft.
+
+        F8 is the compose shortcut: users expect it to edit the message, not to
+        make them choose an editor every time.  Editor selection belongs in the
+        Options screen, where it behaves like a stable preference.  This routine
+        therefore uses the effective editor, opens a temporary file, and loads
+        the edited result back into the input pane.
+        """
+        edited = self.run_external_editor(self.current_input())
+        if edited is not None:
+            self.input_lines = edited.rstrip("\n").splitlines() or [""]
+            self.cursor_row = len(self.input_lines) - 1
+            self.cursor_col = len(self.input_lines[-1])
+            self.status = "input loaded from external editor"
 
     # ------------------------------------------------------------------
     # Input editing and sending
@@ -4869,8 +4904,18 @@ class AICursesApp:
             self.open_memory_menu()
         elif action == "files":
             self.open_file_menu()
+        elif action == "attach":
+            self.quick_attach_file()
+        elif action == "pending":
+            self.show_pending_attachments()
         elif action == "editor":
             self.open_external_editor_for_input()
+        elif action == "quick-attach":
+            # Backward-compatible alias used by older generated help rows.
+            self.quick_attach_file()
+        elif action == "pending-files":
+            # Backward-compatible alias used by older generated help rows.
+            self.show_pending_attachments()
         elif action == "credits":
             self.open_credits()
         elif action == "quit":
@@ -4922,8 +4967,12 @@ class AICursesApp:
             self.send_current_message()
             return
 
-        if ch == 20:  # Ctrl+T = quick attach file.  Mnemonic: Transfer/Tack-on.
+        if ch == 11:  # Ctrl+K = quick attach file.  See quick_attach_file() for why Ctrl+T was retired.
             self.quick_attach_file()
+            return
+
+        if ch == 12:  # Ctrl+L = list pending files.  This replaces the old redraw-only use of Ctrl+L.
+            self.show_pending_attachments()
             return
 
         if ch == 17:  # Ctrl+Q
@@ -4950,7 +4999,6 @@ class AICursesApp:
         elif ch == curses.KEY_PPAGE: self.transcript_scroll += 10
         elif ch == curses.KEY_NPAGE: self.transcript_scroll = max(0, self.transcript_scroll - 10)
         elif ch == 21: self.clear_input()
-        elif ch == 12: pass
         elif ch == 9: self.insert_text("    ")
         elif 32 <= ch <= 126: self.insert_text(chr(ch))
 

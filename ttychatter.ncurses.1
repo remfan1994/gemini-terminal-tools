@@ -40,14 +40,30 @@ CONTROLS
     F5      Options
     F6      Memory
     F7      Files / attachments
-    F8      Editor
+    F8      Open configured external editor for the current prompt
     F9      Credits
     F10     Quit
 
-    Enter   Send or newline depending on SEND_INPUT
-    Ctrl+G  Send where configured/available
-    Ctrl+T  Quick attach file
-    j/k     Move down/up in menu and list screens
+    Enter       Sends or inserts a newline depending on SEND_INPUT.
+    Ctrl+G      Sends if SEND_INPUT is ctrl_g; remains a reliable send key.
+    Ctrl+K      Quick attach file for the next message.
+    Ctrl+L      List files currently queued for the next message.
+    j/k         Move down/up in menu and list screens.
+
+COMMAND AND HOTKEY BARS
+    The main screen separates two kinds of controls.
+
+    Function-key bar:
+        Shows screen-navigation commands such as F1 Help, F2 Models,
+        F5 Options, and F8 Editor.
+
+    Compose hotkey bar:
+        Shows actions that operate on the message currently being written,
+        including the configured send key, Ctrl+K attachment, and Ctrl+L
+        pending-file review.
+
+    The send label reflects the current SEND_INPUT setting instead of always
+    saying Enter or Ctrl+G.
 
 API KEY STORAGE
     The F3 API-key screen supports three practical storage modes:
@@ -91,11 +107,20 @@ CONFIGURATION
         MODEL_CACHE_FILE
         CODE_ATTACHMENT_MIN_LINES
         CONFIRM_LIVE_SEND
+        EDITOR
 
 GPG NOTES
     GPG support is optional. ttychatter uses the external gpg command instead
     of implementing cryptography internally. The decrypted API key is never
     printed in diagnostics, logs, or transcripts.
+
+EDITOR BEHAVIOR
+    F8 opens the configured external editor immediately for the current prompt.
+    The edited text is loaded back into the input pane after the editor exits.
+
+    Editor selection belongs in F5 Options. The EDITOR option opens a detected
+    editor selector that searches PATH, shows runnable editors, supports a
+    custom command/path, and supports browsing for an executable.
 
 MODEL BROWSER
     The F2 model browser supports cached OpenRouter model lists, search,
@@ -116,4 +141,4 @@ FILES
         ~/.config/ttychatter/openrouter/api-key.gpg
 
 VERSION
-    ttychatter.ncurses version 0.14.2
+    ttychatter.ncurses version 0.14.4
