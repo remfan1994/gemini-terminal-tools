@@ -6,7 +6,8 @@ NAME
 SYNOPSIS
     ttychatter.bash [session]
     ttychatter.bash --resume <session|session.log|/path/session.log>
-    ttychatter.bash --models
+    ttychatter.bash --models [--model-type TYPE]
+    ttychatter.bash --routers
     ttychatter.bash --update-models
     ttychatter.bash --test-model <model_id>
     ttychatter.bash --select-model
@@ -22,24 +23,24 @@ DESCRIPTION
     remains dependency-light while still providing an end-user interactive chat
     client with sessions, model tools, memory, logs, and attachment attempts.
 
-API KEYS
-    API keys may be loaded from:
-        OPENROUTER_API_KEY
-        TTYCHATTER_API_KEY
-        OPENROUTER_API_KEY or API_KEY in config
-        API_KEY_GPG_FILE via external gpg decryption
+ROUTERS AND FIXED MODELS
+    The Bash-only edition can filter model-list output by OpenRouter type:
 
-    The default encrypted key file is:
-        ~/.config/ttychatter/openrouter/api-key.gpg
+        ttychatter.bash --routers
+        ttychatter.bash --models --model-type routers
+        ttychatter.bash --models --model-type fixed
+        ttychatter.bash --models --model-type free
+        ttychatter.bash --models --model-type auto
 
-    GPG support is optional. If gpg is missing or decryption fails, normal API
-    key prompts/errors are used.
+    Without jq, model metadata parsing is best-effort. The client remains
+    usable because exact model IDs can still be entered and tested.
 
 RUNTIME COMMAND MODE
-    During interactive chat, inputs beginning with ':' are local commands rather
-    than messages to OpenRouter. Examples:
+    Inputs beginning with ':' are local commands rather than messages to
+    OpenRouter. Examples:
         :help
         :models
+        :routers
         :select-model
         :test-model openrouter/auto
         :memory
@@ -49,19 +50,38 @@ RUNTIME COMMAND MODE
 
 LOOPBACK OUTPUT
     ttychatter.bash --loopback
-        Runs the interactive chat normally, but sends prompts, status text,
-        separators, and runtime-command output to stderr while clean AI
-        responses are written to stdout. This allows the user to pipe AI
-        responses into another program without mixing user-interface text into
-        the pipe.
+        Sends interface text to stderr and clean AI responses to stdout so the
+        output can be piped into another program.
 
-    ttychatter.bash --loopback-file <path>
-        Appends each AI response to the named file while preserving the normal
-        interactive display.
 
-DEMO MODE
-    --demo provides local model rows and local AI responses so the client can be
-    tested without making OpenRouter chat requests.
+MODEL FAVORITES
+    Model favorites/bookmarks are stored as plain text and are shared with
+    model-list sorting/filtering where the client supports it.
+
+    Commands:
+        ttychatter.bash --favorites
+        ttychatter.bash --favorite-model <model_id>
+        ttychatter.bash --unfavorite-model <model_id>
+
+    Runtime commands inside chat:
+        :favorites
+        :favorite <model_id>
+        :unfavorite <model_id>
+
+DISPLAY AND SEND CONFIGURATION
+    THEME controls the line-oriented display profile where meaningful.
+    Supported values include default, dim, high_contrast, mono, and
+    solarized_dark. Bash clients only emit ANSI styling when stdout is a
+    terminal; loopback/pipeline output remains plain text.
+
+    SEND_INPUT controls the interactive input loop.  ctrl_d keeps the classic
+    multiline Bash behavior.  enter reads one line per message.  ctrl_enter is
+    terminal-dependent and is not reliable in line-oriented Bash clients.
+
+CODE BLOCK ATTACHMENT THRESHOLD
+    CODE_ATTACHMENT_MIN_LINES controls when generated fenced code blocks are
+    saved as attachments.  Shorter blocks remain inline so ordinary short code
+    examples do not disappear from the transcript.
 
 VERSION
-    ttychatter.bash version 0.10.0-bash-only
+    ttychatter.bash version 0.12.0-bash-only

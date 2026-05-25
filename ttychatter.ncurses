@@ -74,7 +74,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-VERSION = "0.13.0"
+VERSION = "0.14.1"
 PROGRAM = "ttychatter.ncurses"
 FALLBACK_MODEL = "openrouter/auto"
 DEFAULT_MODEL_TEST_PROMPT = "Please reply with one short sentence confirming this model is available for text generation."
@@ -88,6 +88,8 @@ DEFAULT_GPG_API_KEY_FILE = Path.home() / ".config" / "ttychatter" / "openrouter"
 DEFAULT_MODEL_MIN_INPUT_TOKENS = 0
 DEFAULT_MODEL_MIN_OUTPUT_TOKENS = 0
 DEFAULT_MODEL_SORT_ORDER = "api"
+THEME_CHOICES = ["default", "dim", "high_contrast", "mono", "solarized_dark"]
+MODEL_TYPE_CHOICES = ["all", "routers", "fixed", "free", "auto"]
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +139,8 @@ class Config:
     model_min_input_tokens: int = DEFAULT_MODEL_MIN_INPUT_TOKENS
     model_min_output_tokens: int = DEFAULT_MODEL_MIN_OUTPUT_TOKENS
     model_sort_order: str = DEFAULT_MODEL_SORT_ORDER
+    model_type_filter: str = "all"
+    theme: str = "default"
     send_input: str = "enter"
     prompt_session_name: bool = True
     code_attachment_min_lines: int = 5
@@ -384,6 +388,14 @@ def load_config() -> Config:
                 elif key == "MODEL_SORT_ORDER":
                     if value:
                         cfg.model_sort_order = value
+                elif key == "MODEL_TYPE_FILTER":
+                    if value in MODEL_TYPE_CHOICES:
+                        cfg.model_type_filter = value
+                elif key == "THEME":
+                    if value in THEME_CHOICES:
+                        cfg.theme = value
+                        if value == "mono":
+                            cfg.monochrome = True
                 elif key == "MAX_ATTACHMENT_BYTES":
                     cfg.max_attachment_bytes = parse_nonnegative_int(value, cfg.max_attachment_bytes)
                 elif key == "SEND_INPUT":
@@ -456,6 +468,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume", metavar="NAME", help="resume an existing named session")
     parser.add_argument("--list", action="store_true", help="list saved sessions")
     parser.add_argument("--models", action="store_true", help="list cached OpenRouter chat models, fetching if cache is missing")
+    parser.add_argument("--routers", action="store_true", help="list cached OpenRouter router/special entries such as openrouter/auto and openrouter/free")
+    parser.add_argument("--model-type", choices=MODEL_TYPE_CHOICES, help="filter --models output by model type: all, routers, fixed, free, or auto")
     parser.add_argument("--update-models", action="store_true", help="refresh the cached OpenRouter model list and exit")
     parser.add_argument("--doctor", action="store_true", help="run diagnostics for configuration, filesystem, terminal, editor, cache, and network readiness")
     parser.add_argument("--test-model", metavar="MODEL", help="send the model-test prompt to MODEL and print the response")
@@ -1350,6 +1364,50 @@ def model_looks_preview(model: ModelInfo) -> bool:
     text = " ".join([model.model_id or "", model.display_name or "", model.api_name or "", model.description or ""]).lower()
     return any(token in text for token in ["preview", "experimental", " exp", "-exp", "_exp", " beta", "-beta", "_beta"])
 
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def model_type_label
+# OpenRouter exposes both fixed model IDs and router-like aliases.  A fixed
+# model is a concrete provider/model route, while entries such as
+# openrouter/auto and openrouter/free are routing directives.  This function
+# keeps that distinction visible in the model browser without pretending the
+# list API exposes a perfect formal type field.  Future provider ports should
+# preserve the same conceptual distinction: fixed endpoints are not the same as
+# routers, aliases, or provider-defined pools.
+# ------------------------------------------------------------
+def model_type_label(model: ModelInfo) -> str:
+    mid = (model.model_id or "").lower()
+    methods = {item.lower() for item in (model.methods or [])}
+    if mid == "openrouter/auto":
+        return "auto"
+    if mid == "openrouter/free" or mid.endswith(":free") or "free" in methods:
+        return "free"
+    if mid.startswith("openrouter/") or "router" in methods:
+        return "router"
+    return "fixed"
+
+
+# ------------------------------------------------------------
+# MAINTAINER COMMENTARY: def model_matches_type_filter
+# The model-type filter is intentionally not a pricing or quality filter.  It
+# is a navigation aid.  Users asked to distinguish router entries such as
+# openrouter/auto and openrouter/free from fixed models.  Keep this function
+# conservative and obvious; do not infer costs or hidden capabilities here.
+# ------------------------------------------------------------
+def model_matches_type_filter(model: ModelInfo, type_filter: str) -> bool:
+    kind = model_type_label(model)
+    if type_filter == "all":
+        return True
+    if type_filter == "routers":
+        return kind in {"router", "free", "auto"}
+    if type_filter == "fixed":
+        return kind == "fixed"
+    if type_filter == "free":
+        return kind == "free"
+    if type_filter == "auto":
+        return kind == "auto"
+    return True
+
+
 
 # ------------------------------------------------------------
 # MAINTAINER COMMENTARY: def sort_model_list
@@ -1366,6 +1424,8 @@ def sort_model_list(cfg: Config, models: List[ModelInfo]) -> List[ModelInfo]:
         return sorted(models, key=lambda model: (model_token_value(model.input_token_limit), model.model_id.lower()), reverse=True)
     if cfg.model_sort_order == "output-desc":
         return sorted(models, key=lambda model: (model_token_value(model.output_token_limit), model.model_id.lower()), reverse=True)
+    if cfg.model_sort_order == "type":
+        return sorted(models, key=lambda model: (model_type_label(model), model.model_id.lower()))
     return list(models)
 
 
@@ -1387,6 +1447,8 @@ def filter_model_list(cfg: Config, models: List[ModelInfo]) -> List[ModelInfo]:
         filtered = [model for model in filtered if model_token_value(model.input_token_limit) >= cfg.model_min_input_tokens]
     if cfg.model_min_output_tokens > 0:
         filtered = [model for model in filtered if model_token_value(model.output_token_limit) >= cfg.model_min_output_tokens]
+    if cfg.model_type_filter != "all":
+        filtered = [model for model in filtered if model_matches_type_filter(model, cfg.model_type_filter)]
     return sort_model_list(cfg, filtered)
 
 
@@ -1406,6 +1468,8 @@ def model_filter_summary(cfg: Config, before_count: int, after_count: int) -> st
         flags.append("hide preview/experimental")
     flags.append(f"min input:{cfg.model_min_input_tokens}")
     flags.append(f"min output:{cfg.model_min_output_tokens}")
+    if cfg.model_type_filter != "all":
+        flags.append(f"type:{cfg.model_type_filter}")
     flags.append(f"sort:{cfg.model_sort_order}")
     return f"Showing {after_count}/{before_count} models | " + ", ".join(flags)
 
@@ -1417,7 +1481,7 @@ def model_filter_summary(cfg: Config, before_count: int, after_count: int) -> st
 # compatibility, and the parallel Bash/C implementation plans.
 # ------------------------------------------------------------
 def model_badges(model: ModelInfo) -> str:
-    badges = []
+    badges = [model_type_label(model)]
     if model_supports_generate_content(model):
         badges.append("gen")
     if model_has_required_token_limits(model):
@@ -1440,6 +1504,7 @@ def print_model_rows(models: List[ModelInfo]) -> None:
             f"{model.display_name or model.model_id}\t"
             f"input:{model.input_token_limit or '?'}\t"
             f"output:{model.output_token_limit or '?'}\t"
+            f"type:{model_type_label(model)}\t"
             f"{model_badges(model)}"
         )
 
@@ -1929,26 +1994,48 @@ class AICursesApp:
     # compatibility, and the parallel Bash/C implementation plans.
     # ------------------------------------------------------------
     def dim_attr(self) -> int:
-        return 0 if self.cfg.monochrome else curses.A_DIM
+        """Return the subdued text style for the active theme.
+
+        This is not just cosmetic.  ttychatter uses dim/normal/reverse as a
+        semantic map: AI output and metadata recede, user input stays readable,
+        and selections remain obvious.  Terminals differ wildly, so this helper
+        keeps all dimming decisions in one place.  The theme names are deliberately
+        simple; they are behavior profiles rather than a promise of exact RGB
+        colors on every terminal.
+        """
+        if self.cfg.monochrome or self.cfg.theme == "mono":
+            return 0
+        if self.cfg.theme == "high_contrast":
+            return curses.A_BOLD
+        if self.cfg.theme == "solarized_dark":
+            return curses.A_DIM
+        if self.cfg.theme == "dim":
+            return curses.A_DIM
+        return curses.A_DIM
 
     # ------------------------------------------------------------
     # MAINTAINER COMMENTARY: def reverse_attr
-    # Maintainer note for reverse_attr: this routine is part of the long-term public behavior of
-    # the program. When changing it, check callers, documentation, config compatibility,
-    # session-log compatibility, and the parallel Bash/C implementation plans.
+    # Main selection/header style.  Reverse video is the most portable way to
+    # make something look selected in a text terminal because it does not depend
+    # on a particular color palette.  High-contrast mode adds bold so selected
+    # rows remain clear even on dim displays.
     # ------------------------------------------------------------
     def reverse_attr(self) -> int:
+        if self.cfg.theme == "high_contrast":
+            return curses.A_REVERSE | curses.A_BOLD
         return curses.A_REVERSE
 
     def reverse_dim_attr(self) -> int:
         """Reverse-video style used for secondary bars.
 
-        Header bars use plain reverse video. Secondary bars such as table
-        headings and function-key strips use reverse+dim when color/attribute
-        support allows it, so they do not compete visually with the title bar.
-        In monochrome mode this gracefully falls back to reverse video.
+        Header bars should be visually stronger than middle command bars or
+        table headings.  This helper gives the secondary bars a lower-weight
+        appearance when the terminal supports A_DIM.  In monochrome mode it
+        falls back to plain reverse video so information is not hidden.
         """
-        return curses.A_REVERSE if self.cfg.monochrome else (curses.A_REVERSE | curses.A_DIM)
+        if self.cfg.monochrome or self.cfg.theme in {"mono", "high_contrast"}:
+            return self.reverse_attr()
+        return curses.A_REVERSE | curses.A_DIM
 
     # ------------------------------------------------------------
     # MAINTAINER COMMENTARY: def attr_header
@@ -1977,12 +2064,20 @@ class AICursesApp:
     # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
     # ------------------------------------------------------------
     def transcript_attr_for(self, speaker: str) -> int:
-        if self.cfg.monochrome:
+        """Map transcript speakers to theme roles.
+
+        The visible conversation has two different jobs: it must be pleasant to
+        read, and it must make ownership of each message unmistakable.  The user
+        asked for the active user's messages to stay bright/normal while AI and
+        system text sits back in grey/dim.  High-contrast and mono modes keep the
+        same ownership distinction through labels even when dimming is disabled.
+        """
+        if self.cfg.monochrome or self.cfg.theme == "mono":
             return 0
         if speaker in {"OpenRouter", "AI"}:
-            return self.dim_attr()
+            return curses.A_BOLD if self.cfg.theme == "high_contrast" else self.dim_attr()
         if speaker == self.username:
-            return 0
+            return curses.A_BOLD if self.cfg.theme == "high_contrast" else 0
         if speaker == "remfan1994" or speaker == "system":
             return self.dim_attr()
         return 0
@@ -2862,6 +2957,7 @@ class AICursesApp:
                 ("c", f"Open {cached_label}", "cached"),
                 ("u", "Update model list from OpenRouter", "update"),
                 ("f", f"Model filters: {filter_label}", "filters"),
+                ("r", "Router shortcuts (openrouter/auto, openrouter/free, discovered routers)", "routers"),
                 ("t", f"Test current model: {self.model_label()}", "test-current"),
                 ("e", "Enter model ID manually", "enter"),
                 ("s", f"Save current model: {self.model_label()}", "save-current"),
@@ -2956,6 +3052,9 @@ class AICursesApp:
             if action == "filters":
                 self.open_model_filter_menu()
                 continue
+            if action == "routers":
+                self.open_router_shortcuts(models_cached if models_cached else [])
+                continue
             if action == "test-current":
                 model = ModelInfo(
                     model_id=normalize_model_id(self.cfg.effective_model),
@@ -2981,6 +3080,40 @@ class AICursesApp:
                 continue
 
     # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def open_router_shortcuts
+    # Router shortcuts are OpenRouter-specific navigation aids.  They are kept
+    # separate from ordinary fixed models because openrouter/auto and
+    # openrouter/free are not normal model IDs in the user's mental model: they
+    # are routing choices.  This screen therefore gives the user a small,
+    # explicit dropdown-style list before they dive into the full model table.
+    # The list includes the two well-known routers plus any additional cached
+    # OpenRouter router rows discovered from the model catalog.
+    # ------------------------------------------------------------
+    def open_router_shortcuts(self, cached_models: List[ModelInfo]) -> None:
+        base = ["openrouter/auto", "openrouter/free"]
+        discovered = [m.model_id for m in cached_models if model_type_label(m) in {"router", "free", "auto"}]
+        choices = []
+        for item in base + discovered:
+            if item and item not in choices:
+                choices.append(item)
+        if not choices:
+            choices = base
+        chosen = self.choice_modal(
+            "ROUTER / SPECIAL MODEL",
+            "Choose an OpenRouter router/special entry. Routers are provider-defined selection policies, not fixed models.",
+            choices,
+            self.cfg.effective_model,
+        )
+        if not chosen:
+            return
+        self.cfg.model = normalize_model_id(chosen)
+        self.transcript.append(TranscriptItem("system", f"Router/model selected: {self.cfg.model}"))
+        self.status = f"activated router/model: {self.cfg.model}"
+        if self.ask_yes_no("SAVE MODEL", f"Save MODEL={self.cfg.model} to config?", default=True):
+            set_config_value(self.cfg, "MODEL", self.cfg.model)
+            self.status = f"saved MODEL={self.cfg.model}"
+
+    # ------------------------------------------------------------
     # MAINTAINER COMMENTARY: def open_model_filter_menu
     # Maintainer note for open_model_filter_menu: this routine is part of the long-term public
     # behavior of the program. When changing it, check callers, documentation, config
@@ -2994,7 +3127,7 @@ class AICursesApp:
         model generation requests are sent from this screen.
         """
         selected = 0
-        sort_orders = ["favorites", "api", "name", "display", "input-desc", "output-desc"]
+        sort_orders = ["favorites", "type", "api", "name", "display", "input-desc", "output-desc"]
 
         while True:
             rows = [
@@ -3004,6 +3137,7 @@ class AICursesApp:
                 ("MODEL_MIN_INPUT_TOKENS", "int", "Minimum input tokens", str(self.cfg.model_min_input_tokens)),
                 ("MODEL_MIN_OUTPUT_TOKENS", "int", "Minimum output tokens", str(self.cfg.model_min_output_tokens)),
                 ("MODEL_SORT_ORDER", "choice", "Sort order", self.cfg.model_sort_order),
+                ("MODEL_TYPE_FILTER", "choice", "Model type", self.cfg.model_type_filter),
             ]
             selected = max(0, min(selected, len(rows) - 1))
             self.stdscr.erase()
@@ -3011,7 +3145,7 @@ class AICursesApp:
             visible_h = max(1, height - 6)
             self.safe_addstr(0, 0, "MODEL FILTERS", width, self.reverse_attr())
             self.safe_addstr(1, 0, "Space/Enter=toggle/cycle/edit | Esc/q=back | F-keys jump", width, self.dim_attr())
-            self.safe_addstr(2, 0, "Uses listModels metadata; does not test/probe models.", width, self.dim_attr())
+            self.safe_addstr(2, 0, "Uses OpenRouter model metadata; does not test/probe models.", width, self.dim_attr())
             self.safe_addstr(3, 0, "_" * width, width, self.dim_attr())
 
             for row in range(visible_h):
@@ -3072,10 +3206,16 @@ class AICursesApp:
                 set_config_value(self.cfg, key, "1" if new_value else "0")
                 self.status = f"saved {key}"
             elif kind == "choice":
-                current_idx = sort_orders.index(self.cfg.model_sort_order) if self.cfg.model_sort_order in sort_orders else 0
-                self.cfg.model_sort_order = sort_orders[(current_idx + 1) % len(sort_orders)]
-                set_config_value(self.cfg, key, self.cfg.model_sort_order)
-                self.status = f"saved {key}={self.cfg.model_sort_order}"
+                if key == "MODEL_SORT_ORDER":
+                    current_idx = sort_orders.index(self.cfg.model_sort_order) if self.cfg.model_sort_order in sort_orders else 0
+                    self.cfg.model_sort_order = sort_orders[(current_idx + 1) % len(sort_orders)]
+                    set_config_value(self.cfg, key, self.cfg.model_sort_order)
+                    self.status = f"saved {key}={self.cfg.model_sort_order}"
+                elif key == "MODEL_TYPE_FILTER":
+                    current_idx = MODEL_TYPE_CHOICES.index(self.cfg.model_type_filter) if self.cfg.model_type_filter in MODEL_TYPE_CHOICES else 0
+                    self.cfg.model_type_filter = MODEL_TYPE_CHOICES[(current_idx + 1) % len(MODEL_TYPE_CHOICES)]
+                    set_config_value(self.cfg, key, self.cfg.model_type_filter)
+                    self.status = f"saved {key}={self.cfg.model_type_filter}"
             else:
                 new_text = self.text_input_modal("MODEL FILTER", f"Edit {key}:", str(value))
                 if new_text is not None:
@@ -3168,7 +3308,7 @@ class AICursesApp:
             self.safe_addstr(0, 0, "MODEL BROWSER", width, self.reverse_attr())
             self.safe_addstr(1, 0, f"Source: {source_label} | Search: {search or '(none)'} | Sort: {self.cfg.model_sort_order}", width, self.dim_attr())
             self.safe_addstr(2, 0, "/=search | b=favorite | o/O=sort +/- | t=test | i=info | s=save | Enter=activate", width, self.dim_attr())
-            self.safe_addstr(3, 0, "Fav  Model                                  InTok     OutTok    Features", width, self.reverse_dim_attr())
+            self.safe_addstr(3, 0, "Fav  Type    Model                              InTok     OutTok    Features", width, self.reverse_dim_attr())
             self.safe_addstr(4, 0, "_" * width, width, self.dim_attr())
 
             if selected < top_index:
@@ -3186,8 +3326,9 @@ class AICursesApp:
                 model_text = model.model_id[:38]
                 in_tok = str(model.input_token_limit or "?")[:8]
                 out_tok = str(model.output_token_limit or "?")[:8]
+                kind = model_type_label(model)[:7]
                 badges = model_badges(model)[:24]
-                line = f" {fav}   {model_text:<38} {in_tok:>8} {out_tok:>8}  {badges}"
+                line = f" {fav}   {kind:<7} {model_text:<34} {in_tok:>8} {out_tok:>8}  {badges}"
                 attr = self.reverse_attr() if model_index == selected else 0
                 if model.model_id == current and attr == 0:
                     attr = self.dim_attr()
@@ -3545,7 +3686,9 @@ class AICursesApp:
                 {"key": "MODEL_FILTER_HIDE_PREVIEW", "label": "Model browser: hide preview/experimental", "kind": "bool", "value": self.cfg.model_filter_hide_preview},
                 {"key": "MODEL_MIN_INPUT_TOKENS", "label": "Model browser: min input tokens", "kind": "int", "value": str(self.cfg.model_min_input_tokens)},
                 {"key": "MODEL_MIN_OUTPUT_TOKENS", "label": "Model browser: min output tokens", "kind": "int", "value": str(self.cfg.model_min_output_tokens)},
-                {"key": "MODEL_SORT_ORDER", "label": "Model browser: sort order", "kind": "choice", "value": self.cfg.model_sort_order, "choices": ["favorites", "api", "name", "display", "input-desc", "output-desc"]},
+                {"key": "MODEL_SORT_ORDER", "label": "Model browser: sort order", "kind": "choice", "value": self.cfg.model_sort_order, "choices": ["favorites", "type", "api", "name", "display", "input-desc", "output-desc"]},
+                {"key": "MODEL_TYPE_FILTER", "label": "Model browser: type filter", "kind": "choice", "value": self.cfg.model_type_filter, "choices": MODEL_TYPE_CHOICES},
+                {"key": "THEME", "label": "Theme / style profile", "kind": "choice", "value": self.cfg.theme, "choices": THEME_CHOICES},
                 {"key": "MODEL_TEST_PROMPT", "label": "Model test prompt", "kind": "text", "value": self.cfg.model_test_prompt},
                 {"key": "INPUT_PLACEHOLDER", "label": "Input placeholder", "kind": "text", "value": self.cfg.input_placeholder},
                 {"key": "SEND_INPUT", "label": "Send key", "kind": "choice", "value": self.cfg.send_input, "choices": ["enter", "ctrl_g"]},
@@ -3604,9 +3747,20 @@ class AICursesApp:
                 set_config_value(self.cfg, key, str(self.cfg.model_min_output_tokens))
             elif key == "MODEL_SORT_ORDER":
                 value_text = str(value)
-                if value_text in {"favorites", "api", "name", "display", "input-desc", "output-desc"}:
+                if value_text in {"favorites", "type", "api", "name", "display", "input-desc", "output-desc"}:
                     self.cfg.model_sort_order = value_text
                     set_config_value(self.cfg, key, self.cfg.model_sort_order)
+            elif key == "MODEL_TYPE_FILTER":
+                value_text = str(value)
+                if value_text in MODEL_TYPE_CHOICES:
+                    self.cfg.model_type_filter = value_text
+                    set_config_value(self.cfg, key, self.cfg.model_type_filter)
+            elif key == "THEME":
+                value_text = str(value)
+                if value_text in THEME_CHOICES:
+                    self.cfg.theme = value_text
+                    self.cfg.monochrome = value_text == "mono"
+                    set_config_value(self.cfg, key, self.cfg.theme)
             elif key == "MODEL_TEST_PROMPT":
                 self.cfg.model_test_prompt = str(value)
                 set_config_value(self.cfg, key, self.cfg.model_test_prompt)
@@ -3919,6 +4073,21 @@ class AICursesApp:
                     current = chosen.resolve(); selected = 0; top_index = 0
                 else:
                     return chosen
+
+    # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def quick_attach_file
+    # Ctrl+T uses this helper to expose the most common file workflow without
+    # forcing the user through the full F7 file menu.  The shortcut deliberately
+    # reuses the same file picker and PendingAttachment object as F7 so the
+    # application has one attachment pipeline rather than two subtly different
+    # pipelines.  If future ports add drag/drop, paste-from-clipboard, or richer
+    # file browsers, keep them feeding this same pending-attachment list.
+    # ------------------------------------------------------------
+    def quick_attach_file(self) -> None:
+        path = self.file_picker(Path.cwd(), "ATTACH FILE")
+        if path:
+            self.pending_attachments.append(PendingAttachment(path, guess_mime(path)))
+            self.status = f"attached file for next request: {path.name}"
 
     # ------------------------------------------------------------
     # MAINTAINER COMMENTARY: def open_file_menu
@@ -4441,6 +4610,10 @@ class AICursesApp:
             self.send_current_message()
             return
 
+        if ch == 20:  # Ctrl+T = quick attach file.  Mnemonic: Transfer/Tack-on.
+            self.quick_attach_file()
+            return
+
         if ch == 17:  # Ctrl+Q
             self.should_quit = True
             return
@@ -4536,6 +4709,11 @@ def main() -> int:
     if args.list:
         list_sessions(cfg.session_dir)
         return 0
+    if args.model_type:
+        cfg.model_type_filter = args.model_type
+    if args.routers:
+        cfg.model_type_filter = "routers"
+        return print_models(cfg)
     if args.models:
         return print_models(cfg)
     if args.update_models:

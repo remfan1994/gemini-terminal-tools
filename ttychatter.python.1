@@ -6,7 +6,8 @@ NAME
 SYNOPSIS
     ttychatter.python [session]
     ttychatter.python --resume <session|session.log|/path/session.log>
-    ttychatter.python --models
+    ttychatter.python --models [--all] [--model-type TYPE]
+    ttychatter.python --routers
     ttychatter.python --update-models
     ttychatter.python --test-model <model_id>
     ttychatter.python --select-model
@@ -22,23 +23,22 @@ DESCRIPTION
     ttychatter. Bash orchestrates the user workflow and Python 3 helper snippets
     handle JSON, URL/path handling, attachment extraction, and log parsing.
 
-API KEYS
-    API keys may be loaded from:
-        OPENROUTER_API_KEY
-        TTYCHATTER_API_KEY
-        OPENROUTER_API_KEY or API_KEY in config
-        API_KEY_GPG_FILE via gpg decryption
+ROUTERS AND FIXED MODELS
+    OpenRouter model catalogs contain fixed model IDs and router-like entries.
+    Use these commands to inspect model types:
 
-    The default encrypted key file is:
-        ~/.config/ttychatter/openrouter/api-key.gpg
-
-    GPG support is optional and uses the user's external gpg command.
+        ttychatter.python --routers
+        ttychatter.python --models --model-type routers
+        ttychatter.python --models --model-type fixed
+        ttychatter.python --models --model-type free
+        ttychatter.python --models --model-type auto
 
 RUNTIME COMMAND MODE
     During interactive chat, inputs beginning with ':' are local commands rather
     than messages to OpenRouter. Examples:
         :help
         :models
+        :routers
         :select-model
         :test-model openrouter/auto
         :set CONTEXT_TURNS 20
@@ -49,20 +49,52 @@ RUNTIME COMMAND MODE
 
 LOOPBACK OUTPUT
     ttychatter.python --loopback
-        Runs the interactive chat normally, but sends prompts, status text,
-        separators, and runtime-command output to stderr while clean AI
-        responses are written to stdout. This allows the user to pipe AI
-        responses into another program without mixing user-interface text into
-        the pipe.
-
-    ttychatter.python --loopback-file <path>
-        Appends each AI response to the named file while preserving the normal
-        interactive display.
+        Sends interface text to stderr and clean AI responses to stdout so the
+        output can be piped into another program.
 
 DEMO MODE
     --demo provides local model rows and local AI responses. It is useful for
     testing sessions, command mode, and attachment extraction without making
     OpenRouter chat requests.
 
+CONFIGURATION
+    Config file:
+        ~/.config/ttychatter/openrouter/config
+
+    Model-related keys include MODEL, MODEL_TYPE_FILTER, MODEL_FAVORITES_FILE, THEME, SEND_INPUT, CODE_ATTACHMENT_MIN_LINES, MODEL_SORT_ORDER,
+    MODEL_FILTER_REQUIRE_TOKENS, MODEL_FILTER_HIDE_PREVIEW, and token-limit
+    filters.  Supported MODEL_TYPE_FILTER, MODEL_FAVORITES_FILE, THEME, SEND_INPUT, CODE_ATTACHMENT_MIN_LINES values are all, routers, fixed, free,
+    and auto.
+
+
+MODEL FAVORITES
+    Model favorites/bookmarks are stored as plain text and are shared with
+    model-list sorting/filtering where the client supports it.
+
+    Commands:
+        ttychatter.python --favorites
+        ttychatter.python --favorite-model <model_id>
+        ttychatter.python --unfavorite-model <model_id>
+
+    Runtime commands inside chat:
+        :favorites
+        :favorite <model_id>
+        :unfavorite <model_id>
+
+DISPLAY AND SEND CONFIGURATION
+    THEME controls the line-oriented display profile where meaningful.
+    Supported values include default, dim, high_contrast, mono, and
+    solarized_dark. Bash clients only emit ANSI styling when stdout is a
+    terminal; loopback/pipeline output remains plain text.
+
+    SEND_INPUT controls the interactive input loop.  ctrl_d keeps the classic
+    multiline Bash behavior.  enter reads one line per message.  ctrl_enter is
+    terminal-dependent and is not reliable in line-oriented Bash clients.
+
+CODE BLOCK ATTACHMENT THRESHOLD
+    CODE_ATTACHMENT_MIN_LINES controls when generated fenced code blocks are
+    saved as attachments.  Shorter blocks remain inline so ordinary short code
+    examples do not disappear from the transcript.
+
 VERSION
-    ttychatter.python version 3.7
+    ttychatter.python version 3.9

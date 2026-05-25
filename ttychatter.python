@@ -84,7 +84,7 @@
 set -o pipefail
 
 PROGRAM="ttychatter.python"
-VERSION="3.7"
+VERSION="3.9"
 
 CONFIG_DIR="$HOME/.config/ttychatter/openrouter"
 CONFIG_FILE="$CONFIG_DIR/config"
@@ -112,6 +112,11 @@ MODEL_FILTER_HIDE_PREVIEW=0
 MODEL_MIN_INPUT_TOKENS=0
 MODEL_MIN_OUTPUT_TOKENS=0
 MODEL_SORT_ORDER="name"
+MODEL_TYPE_FILTER="all"
+MODEL_FAVORITES_FILE="$CONFIG_DIR/model-favorites.txt"
+THEME="default"
+SEND_INPUT="ctrl_d"
+CODE_ATTACHMENT_MIN_LINES=5
 
 MAX_ATTACHMENT_BYTES=1048576
 EDITOR_CMD=""
@@ -129,6 +134,8 @@ SHOW_ALL_MODELS=0
 SESSION_NAME=""
 RESUME=0
 TEST_MODEL=""
+FAVORITE_MODEL_ARG=""
+UNFAVORITE_MODEL_ARG=""
 SET_KEY=""
 SET_VALUE=""
 UNSET_KEY=""
@@ -341,6 +348,11 @@ if [ -f "$CONFIG_READ_FILE" ]; then
       MODEL_MIN_INPUT_TOKENS) MODEL_MIN_INPUT_TOKENS="$value" ;;
       MODEL_MIN_OUTPUT_TOKENS) MODEL_MIN_OUTPUT_TOKENS="$value" ;;
       MODEL_SORT_ORDER) MODEL_SORT_ORDER="$value" ;;
+      MODEL_TYPE_FILTER) MODEL_TYPE_FILTER="$value" ;;
+      MODEL_FAVORITES_FILE) MODEL_FAVORITES_FILE="$(expand_path "$value")" ;;
+      THEME) THEME="$value" ;;
+      SEND_INPUT) SEND_INPUT="$value" ;;
+      CODE_ATTACHMENT_MIN_LINES) CODE_ATTACHMENT_MIN_LINES="$value" ;;
       MAX_ATTACHMENT_BYTES) MAX_ATTACHMENT_BYTES="$value" ;;
       EDITOR) EDITOR_CMD="$value" ;;
     esac
@@ -351,6 +363,7 @@ CONTEXT_TURNS="$(positive_int_or_default "$CONTEXT_TURNS" 12)"
 MODEL_MIN_INPUT_TOKENS="$(positive_int_or_default "$MODEL_MIN_INPUT_TOKENS" 0)"
 MODEL_MIN_OUTPUT_TOKENS="$(positive_int_or_default "$MODEL_MIN_OUTPUT_TOKENS" 0)"
 MAX_ATTACHMENT_BYTES="$(positive_int_or_default "$MAX_ATTACHMENT_BYTES" 1048576)"
+CODE_ATTACHMENT_MIN_LINES="$(positive_int_or_default "$CODE_ATTACHMENT_MIN_LINES" 5)"
 
 if [ -z "$OPENROUTER_API_KEY" ]; then
   OPENROUTER_API_KEY="$(decrypt_gpg_key_file "$API_KEY_GPG_FILE" || true)"
@@ -418,6 +431,10 @@ Core:
   STARTUP_NOTICE=$STARTUP_NOTICE
   EDITOR=$(editor_command)
   MAX_ATTACHMENT_BYTES=$MAX_ATTACHMENT_BYTES
+  THEME=$THEME
+  SEND_INPUT=$SEND_INPUT
+  CODE_ATTACHMENT_MIN_LINES=$CODE_ATTACHMENT_MIN_LINES
+  MODEL_FAVORITES_FILE=$MODEL_FAVORITES_FILE
 
 Model cache:
   MODEL_CACHE_FILE=$MODEL_CACHE_FILE
@@ -430,11 +447,67 @@ Model filters:
   MODEL_MIN_INPUT_TOKENS=$MODEL_MIN_INPUT_TOKENS
   MODEL_MIN_OUTPUT_TOKENS=$MODEL_MIN_OUTPUT_TOKENS
   MODEL_SORT_ORDER=$MODEL_SORT_ORDER
+  MODEL_TYPE_FILTER=$MODEL_TYPE_FILTER
 
 API key:
   environment/config loaded: $([ -n "$OPENROUTER_API_KEY" ] && printf yes || printf no)
 EOF
 }
+
+# ==========================================================
+# MODEL FAVORITES / BOOKMARKS
+# ----------------------------------------------------------
+# The ncurses model browser lets users bookmark models.  The Bash+Python
+# client has no clickable table, but it should still maintain the same
+# persistent list.  Favorites are stored as one model id per line so the file
+# is trivial to inspect, edit, copy, or remove.  This plain-text format also
+# lets forks and future provider backends reuse the list without reverse
+# engineering a private data structure.
+# ==========================================================
+
+ensure_favorites_dir() { mkdir -p "$(dirname "$MODEL_FAVORITES_FILE")"; }
+list_favorite_models() { [ -f "$MODEL_FAVORITES_FILE" ] && sed '/^[[:space:]]*$/d' "$MODEL_FAVORITES_FILE" || true; }
+favorite_model_command() {
+  local model="$(normalize_model_id "$1")"
+  [ -n "$model" ] || { printf '%s\n' "ERROR: model id required." >&2; return 2; }
+  ensure_favorites_dir
+  touch "$MODEL_FAVORITES_FILE"
+  if grep -Fxq "$model" "$MODEL_FAVORITES_FILE" 2>/dev/null; then
+    printf '%s is already a favorite\n' "$model"
+  else
+    printf '%s\n' "$model" >> "$MODEL_FAVORITES_FILE"
+    printf 'favorited model: %s\n' "$model"
+  fi
+}
+unfavorite_model_command() {
+  local model="$(normalize_model_id "$1")" tmp
+  [ -n "$model" ] || { printf '%s\n' "ERROR: model id required." >&2; return 2; }
+  [ -f "$MODEL_FAVORITES_FILE" ] || { printf 'favorites file not found: %s\n' "$MODEL_FAVORITES_FILE"; return 0; }
+  tmp="$(mktemp "${MODEL_FAVORITES_FILE}.tmp.XXXXXX")"
+  grep -Fxv "$model" "$MODEL_FAVORITES_FILE" > "$tmp" || true
+  mv "$tmp" "$MODEL_FAVORITES_FILE"
+  printf 'unfavorited model: %s\n' "$model"
+}
+
+# ==========================================================
+# TERMINAL STYLE HELPERS
+# ----------------------------------------------------------
+# Bash cannot offer the rich theme system of the ncurses client, but it can
+# honor the same THEME key in a conservative way.  Styling is only emitted
+# when stdout is a terminal.  Loopback/pipeline output remains plain text so
+# other programs do not receive ANSI escape codes by surprise.
+# ==========================================================
+
+ai_style_start() {
+  [ -t 1 ] || return 0
+  case "$THEME" in
+    dim|default|solarized_dark) printf '\033[2m' ;;
+    high_contrast) printf '\033[1m' ;;
+    mono) ;;
+  esac
+}
+ai_style_end() { [ -t 1 ] && [ "$THEME" != "mono" ] && printf '\033[0m' || true; }
+print_ai_output() { ai_style_start; printf '%s\n\n' "$1"; ai_style_end; }
 
 # ==========================================================
 # API KEY MANAGEMENT
@@ -604,7 +677,10 @@ USAGE
     $PROGRAM --resume <session>
     $PROGRAM --list
     $PROGRAM --rename-session OLD NEW
-    $PROGRAM --models [--all]
+    $PROGRAM --models [--all] [--model-type TYPE]
+    $PROGRAM --favorites
+    $PROGRAM --favorite-model MODEL
+    $PROGRAM --unfavorite-model MODEL
     $PROGRAM --models --sort input-tokens
     $PROGRAM --models --min-input-tokens 100000
     $PROGRAM --update-models
@@ -645,6 +721,9 @@ RUNTIME COMMAND MODE
         :help
         :rename research-notes
         :models
+        :favorites
+        :favorite openrouter/auto
+        :unfavorite openrouter/auto
         :select-model
         :test-model openrouter/auto
         :config
@@ -656,6 +735,13 @@ RUNTIME COMMAND MODE
 
     Type :help during a chat for the full runtime command list.
 
+CONFIG PARITY
+    Portable ncurses equivalents supported here include:
+        THEME
+        SEND_INPUT
+        CODE_ATTACHMENT_MIN_LINES
+        MODEL_FAVORITES_FILE
+
 LOOPBACK OUTPUT
     --loopback routes interface text to stderr and writes AI responses to stdout.
     This is for piping ttychatter output into another program.
@@ -663,7 +749,9 @@ LOOPBACK OUTPUT
     --loopback-file PATH appends each AI response to PATH.
 
 INPUT
-    Type/paste text, then press Ctrl+D to send.
+    Type/paste text, then send according to SEND_INPUT.
+    SEND_INPUT=ctrl_d keeps multiline Ctrl+D behavior.
+    SEND_INPUT=enter reads one line per message.
 
 VERSION
     $PROGRAM version $VERSION
@@ -920,6 +1008,13 @@ except Exception: min_in=0
 try: min_out=int(sys.argv[6])
 except Exception: min_out=0
 sort_order=sys.argv[7]
+fav_path=sys.argv[8]
+favorites=set()
+try:
+    with open(fav_path,"r",encoding="utf-8",errors="replace") as fh:
+        favorites={line.strip() for line in fh if line.strip()}
+except Exception:
+    pass
 raw=sys.stdin.read()
 try: data=json.loads(raw)
 except Exception as exc:
@@ -927,7 +1022,7 @@ except Exception as exc:
 if "error" in data:
     err=data["error"]
     if isinstance(err, dict):
-        print(f"ERROR: OpenRouter API error {err.get('"'"'code'"'"','"'"''"'"')}: {err.get('"'"'message'"'"','"'"''"'"')}", file=sys.stderr)
+        print(f"ERROR: OpenRouter API error {err.get('code','')}: {err.get('message','')}", file=sys.stderr)
     else:
         print(f"ERROR: OpenRouter API error: {err}", file=sys.stderr)
     sys.exit(1)
@@ -950,16 +1045,16 @@ for item in data.get("data", data.get("models", [])):
     hay=" ".join([model_id,display,desc]).lower(); preview=any(w in hay for w in ["preview","experimental"," exp ","-exp","_exp"," beta","-beta","_beta"])
     methods=["chat"]
     if "image" in modality.lower(): methods.append("image")
-    if model_id.startswith("openrouter/") or model_id.startswith("demo/"): methods.append("router")
+    if model_id in ("openrouter/auto", "openrouter/free", "demo/auto", "demo/free") or model_id.endswith(":free"): methods.append("router")
     if model_id.endswith(":free") or model_id in ("openrouter/free", "demo/free"): methods.append("free")
     if model_id.startswith("demo/"): methods.append("demo")
+    if model_id in favorites: methods.append("favorite")
     if not show_all:
         if require_tokens and input_limit <= 0: continue
         if hide_preview and preview: continue
         if input_limit < min_in: continue
         if output_limit < min_out: continue
-    badges=[]
-    badges.extend(methods)
+    badges=[]; badges.extend(methods)
     if preview: badges.append("preview")
     if input_limit<=0: badges.append("no-context-meta")
     rows.append((model_id,display,input_limit,output_limit,",".join(badges) or "-"))
@@ -970,19 +1065,46 @@ elif sort_order in ("output_desc","output"):
 elif sort_order=="display":
     rows.sort(key=lambda r:(r[1].lower(),r[0]))
 elif sort_order=="favorites":
-    rows.sort(key=lambda r:(0 if r[0].startswith(("openrouter/","demo/")) else 1, r[0].lower()))
+    rows.sort(key=lambda r:(r[0] not in favorites, r[0].lower()))
+elif sort_order=="type":
+    rows.sort(key=lambda r:("router" not in r[4], "free" not in r[4], r[0].lower()))
 else:
     rows.sort(key=lambda r:r[0].lower())
 for r in rows: print("\t".join(map(str,r)))
-' "$show_all" "$MODEL_FILTER_GENERATE_CONTENT" "$MODEL_FILTER_REQUIRE_TOKENS" "$MODEL_FILTER_HIDE_PREVIEW" "$MODEL_MIN_INPUT_TOKENS" "$MODEL_MIN_OUTPUT_TOKENS" "$MODEL_SORT_ORDER" <<< "$raw"
+' "$show_all" "$MODEL_FILTER_GENERATE_CONTENT" "$MODEL_FILTER_REQUIRE_TOKENS" "$MODEL_FILTER_HIDE_PREVIEW" "$MODEL_MIN_INPUT_TOKENS" "$MODEL_MIN_OUTPUT_TOKENS" "$MODEL_SORT_ORDER" "$MODEL_FAVORITES_FILE" <<< "$raw"
 }
 # ----------------------------------------------------------
+
+# ----------------------------------------------------------
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function model_type_filter_output
+# OpenRouter has both fixed model IDs and router-like entries such as
+# openrouter/auto and openrouter/free.  Bash has no dropdown UI, so this helper
+# gives the command line the same conceptual feature as the ncurses router
+# selector: users can ask for routers, fixed models, free routes, or auto.
+# The parser uses visible metadata columns produced by parse_models_table rather
+# than making a second network request.
+# ----------------------------------------------------------
+model_type_filter_output() {
+  local type="${MODEL_TYPE_FILTER:-all}"
+  awk -F '\t' -v t="$type" '
+    BEGIN { IGNORECASE=1 }
+    t == "all" { print; next }
+    { id=$1; badges=$5 }
+    t == "routers" && (id ~ /^openrouter\// || badges ~ /router|free/) { print; next }
+    t == "fixed" && !(id ~ /^openrouter\// || badges ~ /router|free/) { print; next }
+    t == "free" && (id == "openrouter/free" || id ~ /:free$/ || badges ~ /free/) { print; next }
+    t == "auto" && (id == "openrouter/auto") { print; next }
+  '
+}
+
 # MAINTAINER COMMENTARY: function print_models
 # print_models is a named maintenance unit. Keep behavior stable, check call
 # sites before changing it, and update man pages/help/comments when behavior
 # changes.
 # ----------------------------------------------------------
-print_models() { local json; json="$(models_json_for_display)" || return 1; printf '%s' "$json" | parse_models_table "$SHOW_ALL_MODELS"; }
+print_models() { local json; json="$(models_json_for_display)" || return 1; printf '%s' "$json" | parse_models_table "$SHOW_ALL_MODELS" | model_type_filter_output; }
 
 # ==========================================================
 # OPENROUTER GENERATION / ATTACHMENT PAYLOADS
@@ -1114,6 +1236,8 @@ Use one of these instead:
     $PROGRAM --models
     $PROGRAM --test-model <model_id>
     $PROGRAM --select-model
+    $PROGRAM --favorites
+    $PROGRAM --favorite-model openrouter/auto
 
 The Bash version no longer probes every available model automatically.
 EOF
@@ -1215,7 +1339,7 @@ build_context() {
 extract_attachments() {
   python3 -c '
 import os, re, sys
-attachment_dir=sys.argv[1]; session_name=sys.argv[2]; text=sys.stdin.read()
+attachment_dir=sys.argv[1]; session_name=sys.argv[2]; min_lines=int(sys.argv[3]); text=sys.stdin.read()
 ext_map={"bash":".sh","sh":".sh","shell":".sh","python":".py","py":".py","json":".json","yaml":".yml","yml":".yml","javascript":".js","js":".js","html":".html","css":".css","sql":".sql","c":".c","cpp":".cpp","c++":".cpp","text":".txt"}
 pattern=re.compile(r"```([A-Za-z0-9_+.#-]*)[ \t]*\n(.*?)```", re.DOTALL)
 def safe_tag(lang):
@@ -1229,12 +1353,15 @@ def next_number(lang,ext):
             if m: highest=max(highest,int(m.group(1)))
     return highest+1
 def repl(m):
+    content=m.group(2)
+    if len([line for line in content.splitlines() if line.strip()]) < min_lines:
+        return m.group(0)
     raw=(m.group(1) or "text").strip().lower(); lang=safe_tag(raw); ext=ext_map.get(raw,ext_map.get(lang,".txt")); num=next_number(lang,ext)
     filename=f"{session_name}-{lang}-{num:02d}{ext}"; path=os.path.join(attachment_dir,filename); os.makedirs(attachment_dir,exist_ok=True)
-    with open(path,"w",encoding="utf-8") as fh: fh.write(m.group(2))
+    with open(path,"w",encoding="utf-8") as fh: fh.write(content)
     return f"\n[attachment saved]\nfile: {filename}\nlocation: {attachment_dir}\n"
 print(pattern.sub(repl,text))
-' "$ATTACHMENT_DIR" "$SESSION_NAME"
+' "$ATTACHMENT_DIR" "$SESSION_NAME" "$CODE_ATTACHMENT_MIN_LINES"
 }
 
 # ==========================================================
@@ -1466,8 +1593,13 @@ handle_runtime_command() {
     rename) rename_current_session "$rest" ;;
 
     models) print_models ;;
+    routers) MODEL_TYPE_FILTER="routers"; print_models ;;
     update-models|update_models) update_models_cache ;;
+    routers) MODEL_TYPE_FILTER="routers"; print_models ;;
     select-model|select_model) select_model_command ;;
+    favorites) list_favorite_models ;;
+    favorite) favorite_model_command "$rest" ;;
+    unfavorite|unbookmark) unfavorite_model_command "$rest" ;;
     test-model|test_model)
       [ -n "$rest" ] || { printf '%s\n' "usage: :test-model MODEL"; return 0; }
       test_model_command "$rest"
@@ -1552,6 +1684,14 @@ while [ "$#" -gt 0 ]; do
     --list) ACTION="list" ;;
     --rename-session) ACTION="rename"; shift; RENAME_OLD="${1:-}"; shift; RENAME_NEW="${1:-}" ;;
     --models) ACTION="models" ;;
+    --routers) ACTION="models"; MODEL_TYPE_FILTER="routers" ;;
+    --favorites) ACTION="favorites" ;;
+    --favorite-model) ACTION="favorite"; shift; FAVORITE_MODEL_ARG="${1:-}" ;;
+    --unfavorite-model|--unbookmark-model) ACTION="unfavorite"; shift; UNFAVORITE_MODEL_ARG="${1:-}" ;;
+    --model-type) shift; MODEL_TYPE_FILTER="${1:-all}" ;;
+    --theme) shift; THEME="${1:-default}" ;;
+    --send-input) shift; SEND_INPUT="${1:-ctrl_d}" ;;
+    --code-attachment-min-lines) shift; CODE_ATTACHMENT_MIN_LINES="${1:-5}" ;;
     --update-models) ACTION="update-models" ;;
     --all) SHOW_ALL_MODELS=1 ;;
     --sort) shift; MODEL_SORT_ORDER="${1:-$MODEL_SORT_ORDER}" ;;
@@ -1592,6 +1732,9 @@ case "$ACTION" in
   list) list_sessions; exit 0 ;;
   rename) [ -n "$RENAME_OLD" ] && [ -n "$RENAME_NEW" ] || { printf '%s\n' "ERROR: --rename-session requires OLD NEW" >&2; exit 2; }; rename_session_command "$RENAME_OLD" "$RENAME_NEW"; exit $? ;;
   models) print_models; exit $? ;;
+  favorites) list_favorite_models; exit $? ;;
+  favorite) favorite_model_command "$FAVORITE_MODEL_ARG"; exit $? ;;
+  unfavorite) unfavorite_model_command "$UNFAVORITE_MODEL_ARG"; exit $? ;;
   update-models) update_models_cache; exit $? ;;
   test) test_model_command "$TEST_MODEL"; exit $? ;;
   removed-autoscan) removed_autoscan_message >&2; exit 2 ;;

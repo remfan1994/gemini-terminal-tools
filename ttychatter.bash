@@ -62,7 +62,7 @@
 set -o pipefail
 
 PROGRAM="ttychatter.bash"
-VERSION="0.10.0-bash-only"
+VERSION="0.12.0-bash-only"
 CONFIG_DIR="$HOME/.config/ttychatter/openrouter"
 CONFIG_FILE="$CONFIG_DIR/config"
 MODEL_CACHE_FILE="$CONFIG_DIR/models-cache.json"
@@ -72,6 +72,16 @@ SESSION_DIR="$HOME/.local/share/ttychatter/openrouter/sessions"
 ATTACHMENT_DIR=""
 ATTACHMENT_DIR_CONFIGURED=0
 MODEL=""
+MODEL_TYPE_FILTER="all"
+MODEL_SORT_ORDER="name"
+MODEL_MIN_INPUT_TOKENS=0
+MODEL_MIN_OUTPUT_TOKENS=0
+MODEL_FILTER_REQUIRE_TOKENS=0
+MODEL_FILTER_HIDE_PREVIEW=0
+MODEL_FAVORITES_FILE="$CONFIG_DIR/model-favorites.txt"
+THEME="default"
+SEND_INPUT="ctrl_d"
+CODE_ATTACHMENT_MIN_LINES=5
 FALLBACK_MODEL="openrouter/auto"
 CONTEXT_TURNS=8
 OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-${TTYCHATTER_API_KEY:-}}"
@@ -88,6 +98,9 @@ SESSION_NAME=""
 RESUME=0
 SAVE=0
 TEST_MODEL=""
+SET_KEY=""
+SET_VALUE=""
+UNSET_KEY=""
 RUNTIME_SEND_OVERRIDE=""
 LOOPBACK=0
 LOOPBACK_FILE=""
@@ -259,6 +272,16 @@ load_config() {
       SESSION_DIR) SESSION_DIR="${value/#\~/$HOME}" ;;
       ATTACHMENT_DIR) ATTACHMENT_DIR="${value/#\~/$HOME}"; ATTACHMENT_DIR_CONFIGURED=1 ;;
       MODEL_TEST_PROMPT) [ -n "$value" ] && MODEL_TEST_PROMPT="$value" ;;
+      MODEL_TYPE_FILTER) MODEL_TYPE_FILTER="$value" ;;
+      MODEL_SORT_ORDER) MODEL_SORT_ORDER="$value" ;;
+      MODEL_MIN_INPUT_TOKENS) MODEL_MIN_INPUT_TOKENS="$value" ;;
+      MODEL_MIN_OUTPUT_TOKENS) MODEL_MIN_OUTPUT_TOKENS="$value" ;;
+      MODEL_FILTER_REQUIRE_TOKENS) MODEL_FILTER_REQUIRE_TOKENS="$value" ;;
+      MODEL_FILTER_HIDE_PREVIEW) MODEL_FILTER_HIDE_PREVIEW="$value" ;;
+      MODEL_FAVORITES_FILE) MODEL_FAVORITES_FILE="${value/#\~/$HOME}" ;;
+      THEME) THEME="$value" ;;
+      SEND_INPUT) SEND_INPUT="$value" ;;
+      CODE_ATTACHMENT_MIN_LINES) CODE_ATTACHMENT_MIN_LINES="$value" ;;
       DEMO_MODE) DEMO_MODE="$value" ;;
       STARTUP_NOTICE) STARTUP_NOTICE="$value" ;;
     esac
@@ -284,12 +307,33 @@ save_config_value() {
   chmod 600 "$CONFIG_FILE" 2>/dev/null || true
 }
 
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function remove_config_key
+# Deletes one setting from the config file.  This is deliberately simple and
+# line-oriented because the bash-only edition must stay usable without Python
+# or structured config parsers.  It is used by --unset and by runtime colon
+# commands such as :unset and :forget-api-key.
+# ----------------------------------------------------------
+remove_config_key() {
+  local key="$1" tmp
+  [ -f "$CONFIG_FILE" ] || return 0
+  tmp="$(mktemp "${CONFIG_FILE}.tmp.XXXXXX")"
+  awk -v k="$key" '$0 !~ "^" k "=" { print }' "$CONFIG_FILE" > "$tmp"
+  mv "$tmp" "$CONFIG_FILE"
+  chmod 600 "$CONFIG_FILE" 2>/dev/null || true
+}
+
 load_config
 if [ -z "$OPENROUTER_API_KEY" ]; then
   OPENROUTER_API_KEY="$(decrypt_gpg_key_file "$API_KEY_GPG_FILE" || true)"
 fi
 case "$CONTEXT_TURNS" in ''|*[!0-9]*) CONTEXT_TURNS=8 ;; esac
 [ "$CONTEXT_TURNS" -lt 1 ] && CONTEXT_TURNS=8
+case "$MODEL_MIN_INPUT_TOKENS" in ''|*[!0-9]*) MODEL_MIN_INPUT_TOKENS=0 ;; esac
+case "$MODEL_MIN_OUTPUT_TOKENS" in ''|*[!0-9]*) MODEL_MIN_OUTPUT_TOKENS=0 ;; esac
+case "$CODE_ATTACHMENT_MIN_LINES" in ''|*[!0-9]*) CODE_ATTACHMENT_MIN_LINES=5 ;; esac
+[ "$CODE_ATTACHMENT_MIN_LINES" -lt 1 ] && CODE_ATTACHMENT_MIN_LINES=5
 [ "$ATTACHMENT_DIR_CONFIGURED" -eq 0 ] && ATTACHMENT_DIR="$SESSION_DIR/attachments"
 mkdir -p "$CONFIG_DIR" "$SESSION_DIR" "$ATTACHMENT_DIR"
 
@@ -329,7 +373,16 @@ USAGE
     $PROGRAM [session]
     $PROGRAM --resume <session>
     $PROGRAM --list
-    $PROGRAM --models
+    $PROGRAM --models [--model-type TYPE]
+    $PROGRAM --favorites
+    $PROGRAM --favorite-model MODEL
+    $PROGRAM --unfavorite-model MODEL
+    $PROGRAM --config
+    $PROGRAM --set KEY VALUE
+    $PROGRAM --unset KEY
+    $PROGRAM --theme THEME
+    $PROGRAM --send-input MODE
+    $PROGRAM --code-attachment-min-lines N
     $PROGRAM --update-models
     $PROGRAM --select-model [--save]
     $PROGRAM --test-model <model> [--save]
@@ -349,7 +402,9 @@ LOOPBACK OUTPUT
     --loopback-file PATH appends each AI response to PATH.
 
 INPUT
-    Type or paste a message, then press Ctrl+D to send.
+    Type or paste a message, then send according to SEND_INPUT.
+    SEND_INPUT=ctrl_d keeps multiline Ctrl+D behavior.
+    SEND_INPUT=enter reads one line per message.
 
 OPENROUTER HELP
     Model docs:      https://openrouter.ai/docs/models
@@ -364,6 +419,9 @@ RUNTIME COMMAND MODE
         :help
         :rename notes
         :models
+        :favorites
+        :favorite openrouter/auto
+        :unfavorite openrouter/auto
         :select-model
         :model openrouter/auto
         :memory
@@ -453,7 +511,8 @@ parse_models_basic() {
           ($m.id // $m.name // ""),
           ($m.name // $m.id // ""),
           (($m.context_length // $m.contextLength // "")|tostring),
-          (($m.max_completion_tokens // $m.maxCompletionTokens // "")|tostring)
+          (($m.max_completion_tokens // $m.maxCompletionTokens // "")|tostring),
+          (if (($m.id // $m.name // "") == "openrouter/auto" or ($m.id // $m.name // "") == "openrouter/free" or ($m.id // $m.name // "") == "demo/auto" or ($m.id // $m.name // "") == "demo/free" or (($m.id // $m.name // "") | test(":free$"))) then "router" else "" end)
         ]
       | select(.[0] != "")
       | @tsv
@@ -466,14 +525,100 @@ parse_models_basic() {
   # model IDs from common compact/pretty-printed shapes. Users who need richer
   # token metadata on a dependency-light system should install jq; the program
   # remains useful without it because model ID selection and testing still work.
-  tr ',' '\n' | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1\t\1\t\t/p'
+  tr ',' '\n' | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1\t\1\t\t\t/p'
 }
 # ----------------------------------------------------------
 # MAINTAINER COMMENTARY: function list_models
 # Shows model candidates using jq when possible and sed/grep fallback
 # otherwise. This is intentionally best-effort in bash-only.
 # ----------------------------------------------------------
-list_models() { local json; json="$(models_json_source)" || return 1; printf '%s' "$json" | parse_models_basic; }
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function model_type_filter_output
+# OpenRouter has both fixed model IDs and router-like entries such as
+# openrouter/auto and openrouter/free.  Bash has no dropdown UI, so this helper
+# gives the command line the same conceptual feature as the ncurses router
+# selector: users can ask for routers, fixed models, free routes, or auto.
+# The parser uses visible metadata columns produced by parse_models_table rather
+# than making a second network request.
+# ----------------------------------------------------------
+model_type_filter_output() {
+  local type="${MODEL_TYPE_FILTER:-all}"
+  awk -F '\t' -v t="$type" '
+    BEGIN { IGNORECASE=1 }
+    t == "all" { print; next }
+    { id=$1; badges=$5 }
+    t == "routers" && (id ~ /^openrouter\// || badges ~ /router|free/) { print; next }
+    t == "fixed" && !(id ~ /^openrouter\// || badges ~ /router|free/) { print; next }
+    t == "free" && (id == "openrouter/free" || id ~ /:free$/ || badges ~ /free/) { print; next }
+    t == "auto" && (id == "openrouter/auto") { print; next }
+  '
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function decorate_filter_sort_models
+# The ncurses model browser can show badges, bookmarks, and sort orders inside
+# a table.  The bash-only edition cannot provide a clickable table, but it can
+# still honor the same underlying choices.  This function therefore performs
+# three jobs after parse_models_basic emits tab-separated rows:
+#   1. add a "favorite" badge when the model ID appears in the favorites file;
+#   2. apply basic token and type filters without requiring Python;
+#   3. sort the rows using ordinary Unix sort where possible.
+# This gives old machines a useful approximation of the ncurses model browser
+# while preserving the low-dependency contract.
+# ----------------------------------------------------------
+decorate_filter_sort_models() {
+  awk -F '\t' -v OFS='\t' \
+      -v favfile="$MODEL_FAVORITES_FILE" \
+      -v type="${MODEL_TYPE_FILTER:-all}" \
+      -v minin="${MODEL_MIN_INPUT_TOKENS:-0}" \
+      -v minout="${MODEL_MIN_OUTPUT_TOKENS:-0}" \
+      -v require_tokens="${MODEL_FILTER_REQUIRE_TOKENS:-0}" '
+    BEGIN {
+      IGNORECASE=1
+      while ((getline line < favfile) > 0) {
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+        if (line != "") fav[line]=1
+      }
+    }
+    {
+      id=$1; inTok=$3+0; outTok=$4+0; badges=$5
+      if (fav[id]) badges=(badges=="" ? "favorite" : badges ",favorite")
+      isRouter=(id ~ /^openrouter\// || badges ~ /router|free/)
+      isFree=(id == "openrouter/free" || id ~ /:free$/ || badges ~ /free/)
+      if (type == "routers" && !isRouter) next
+      if (type == "fixed" && isRouter) next
+      if (type == "free" && !isFree) next
+      if (type == "auto" && id != "openrouter/auto") next
+      if (require_tokens ~ /^(1|yes|true|on)$/ && inTok <= 0) next
+      if (inTok < minin) next
+      if (outTok < minout) next
+      $5=badges
+      print
+    }' | sort_models_basic
+}
+
+sort_models_basic() {
+  case "$MODEL_SORT_ORDER" in
+    favorites)
+      awk -F '\t' 'BEGIN{OFS="\t"} {print (($5 ~ /favorite/) ? 0 : 1), $0}' | sort -t "$(printf '\t')" -k1,1n -k2,2 | cut -f2-
+      ;;
+    input|input-desc|input-tokens|tokens|context)
+      sort -t "$(printf '\t')" -k3,3nr -k1,1
+      ;;
+    output|output-desc)
+      sort -t "$(printf '\t')" -k4,4nr -k1,1
+      ;;
+    display)
+      sort -t "$(printf '\t')" -k2,2 -k1,1
+      ;;
+    *)
+      sort -t "$(printf '\t')" -k1,1
+      ;;
+  esac
+}
+
+list_models() { local json; json="$(models_json_source)" || return 1; printf '%s' "$json" | parse_models_basic | decorate_filter_sort_models; }
 
 # ----------------------------------------------------------
 # MAINTAINER COMMENTARY: function select_model
@@ -632,8 +777,104 @@ write_context_snapshot() { local item ts="$1"; printf '[%s] system: CONTEXT_BEGI
 # Saves generated fenced code to files when possible, keeping terminal
 # output readable.
 # ----------------------------------------------------------
-extract_code_blocks() { awk -v dir="$ATTACHMENT_DIR" -v session="$SESSION_NAME" 'BEGIN{inblock=0;count=0} /^```/ {if(!inblock){inblock=1;lang=$0;sub(/^```/,"",lang);if(lang=="")lang="text";count++;file=dir "/" session "-" lang "-" sprintf("%02d",count) ".txt";next}else{close(file);inblock=0;print "[attachment saved]\nfile: " file;next}} {if(inblock)print > file;else print}'; }
+extract_code_blocks() {
+  awk -v dir="$ATTACHMENT_DIR" -v session="$SESSION_NAME" -v min_lines="$CODE_ATTACHMENT_MIN_LINES" '
+    BEGIN { inblock=0; count=0; content=""; linecount=0; lang="text" }
+    /^```/ {
+      if (!inblock) {
+        inblock=1
+        lang=$0
+        sub(/^```/, "", lang)
+        if (lang == "") lang="text"
+        content=""
+        linecount=0
+        next
+      }
+      if (linecount < min_lines) {
+        print "```" lang
+        printf "%s", content
+        print "```"
+      } else {
+        count++
+        file=dir "/" session "-" lang "-" sprintf("%02d", count) ".txt"
+        printf "%s", content > file
+        close(file)
+        print "[attachment saved]"
+        print "file: " file
+      }
+      inblock=0
+      content=""
+      linecount=0
+      next
+    }
+    {
+      if (inblock) {
+        content = content $0 ORS
+        if (length($0) > 0) linecount++
+      } else {
+        print
+      }
+    }
+    END {
+      if (inblock) {
+        print "```" lang
+        printf "%s", content
+      }
+    }
+  '
+}
 
+
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: model favorites in bash-only
+# The dependency-light edition still needs persistent model bookmarks.  We use
+# a plain one-id-per-line file so this feature works without Python or jq.  The
+# format is intentionally boring: it can be edited with sed, cat, vi, or any
+# ancient text tool available on old systems.
+# ----------------------------------------------------------
+ensure_favorites_dir() {
+  mkdir -p "$(dirname "$MODEL_FAVORITES_FILE")" 2>/dev/null || true
+}
+
+list_favorite_models() {
+  [ -f "$MODEL_FAVORITES_FILE" ] && grep -v '^[[:space:]]*$' "$MODEL_FAVORITES_FILE" || true
+}
+
+favorite_model_command() {
+  local model="$1"
+  [ -n "$model" ] || { printf 'ERROR: model id required.\n' >&2; return 2; }
+  ensure_favorites_dir
+  touch "$MODEL_FAVORITES_FILE"
+  if ! grep -Fxq "$model" "$MODEL_FAVORITES_FILE" 2>/dev/null; then
+    printf '%s\n' "$model" >> "$MODEL_FAVORITES_FILE"
+  fi
+  printf 'favorited model: %s\n' "$model"
+}
+
+unfavorite_model_command() {
+  local model="$1" tmp
+  [ -n "$model" ] || { printf 'ERROR: model id required.\n' >&2; return 2; }
+  [ -f "$MODEL_FAVORITES_FILE" ] || return 0
+  tmp="$(mktemp "${MODEL_FAVORITES_FILE}.tmp.XXXXXX")"
+  grep -Fxv "$model" "$MODEL_FAVORITES_FILE" > "$tmp" || true
+  mv "$tmp" "$MODEL_FAVORITES_FILE"
+  printf 'unfavorited model: %s\n' "$model"
+}
+
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: bash-only style output
+# Theme support in a shell client is necessarily modest.  The goal is parity
+# with user configuration, not a fake curses renderer.  We only emit ANSI
+# styling when stdout is an interactive terminal.  This protects loopback and
+# pipeline users from receiving escape sequences in machine-consumed output.
+# ----------------------------------------------------------
+ai_style_start() { [ -t 1 ] || return 0; case "$THEME" in dim|default|solarized_dark) printf '[2m';; high_contrast) printf '[1m';; mono) ;; esac; }
+ai_style_end() { [ -t 1 ] && [ "$THEME" != "mono" ] && printf '[0m' || true; }
+print_ai_output() { ai_style_start; printf '%s
+
+' "$1"; ai_style_end; }
 
 # ==========================================================
 # RUNTIME COLON-COMMAND MODE
@@ -671,6 +912,9 @@ Models:
   :test-model MODEL       Test one model
   :model MODEL            Use MODEL for this running chat only
   :model-save MODEL       Use MODEL and save MODEL=... to config
+  :favorites              List favorite/bookmarked models
+  :favorite MODEL         Add MODEL to favorites
+  :unfavorite MODEL       Remove MODEL from favorites
 
 Config and API key:
   :config                 Print config summary
@@ -701,6 +945,13 @@ print_config_summary() {
   printf 'ATTACHMENT_DIR=%s\n' "$ATTACHMENT_DIR"
   printf 'MODEL_TEST_PROMPT=%s\n' "$MODEL_TEST_PROMPT"
   printf 'STARTUP_NOTICE=%s\n' "$STARTUP_NOTICE"
+  printf 'THEME=%s\n' "$THEME"
+  printf 'SEND_INPUT=%s\n' "$SEND_INPUT"
+  printf 'CODE_ATTACHMENT_MIN_LINES=%s\n' "$CODE_ATTACHMENT_MIN_LINES"
+  printf 'MODEL_FAVORITES_FILE=%s\n' "$MODEL_FAVORITES_FILE"
+  printf 'MODEL_SORT_ORDER=%s\n' "$MODEL_SORT_ORDER"
+  printf 'MODEL_MIN_INPUT_TOKENS=%s\n' "$MODEL_MIN_INPUT_TOKENS"
+  printf 'MODEL_MIN_OUTPUT_TOKENS=%s\n' "$MODEL_MIN_OUTPUT_TOKENS"
   if [ -n "$OPENROUTER_API_KEY" ]; then printf 'OPENROUTER_API_KEY=(loaded)\n'; else printf 'OPENROUTER_API_KEY=(not set)\n'; fi
 }
 
@@ -763,6 +1014,14 @@ ACTIVE_MODEL="$(effective_model)" ;;
     ATTACHMENT_DIR) ATTACHMENT_DIR="${value/#\~/$HOME}"; mkdir -p "$ATTACHMENT_DIR" ;;
     MODEL_TEST_PROMPT) MODEL_TEST_PROMPT="$value" ;;
     STARTUP_NOTICE) STARTUP_NOTICE="$value" ;;
+    THEME) THEME="$value" ;;
+    SEND_INPUT) SEND_INPUT="$value" ;;
+    CODE_ATTACHMENT_MIN_LINES) CODE_ATTACHMENT_MIN_LINES="$value" ;;
+    MODEL_FAVORITES_FILE) MODEL_FAVORITES_FILE="${value/#\~/$HOME}" ;;
+    MODEL_SORT_ORDER) MODEL_SORT_ORDER="$value" ;;
+    MODEL_MIN_INPUT_TOKENS) MODEL_MIN_INPUT_TOKENS="$value" ;;
+    MODEL_MIN_OUTPUT_TOKENS) MODEL_MIN_OUTPUT_TOKENS="$value" ;;
+    MODEL_FILTER_REQUIRE_TOKENS) MODEL_FILTER_REQUIRE_TOKENS="$value" ;;
   esac
 }
 
@@ -785,6 +1044,7 @@ handle_runtime_command() {
     list|sessions) list_sessions ;;
     rename) rename_current_session "$rest" ;;
     models) list_models ;;
+    routers) MODEL_TYPE_FILTER="routers"; list_models ;;
     update-models|update_models) update_models_cache ;;
     select-model|select_model) select_model ;;
     test-model|test_model) [ -n "$rest" ] && test_model "$rest" || printf '%s\n' "usage: :test-model MODEL" ;;
@@ -821,7 +1081,7 @@ ACTIVE_MODEL="$(effective_model)"; }; printf 'removed config key if present: %s\
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    -h|--help|help) ACTION=help;; --version) ACTION=version;; --demo) DEMO_MODE=1;; --loopback) LOOPBACK=1;; --loopback-file) shift; LOOPBACK_FILE="${1:-}"; [ -n "$LOOPBACK_FILE" ] || { printf 'ERROR: --loopback-file requires a path.\n' >&2; exit 2; };; --doctor) ACTION=doctor;; --credits) ACTION=credits;; --list) ACTION=list;; --models) ACTION=models;; --update-models) ACTION=update-models;; --select-model) ACTION=select;; --test-model) ACTION=test; shift; TEST_MODEL="${1:-}";; --set-api-key) ACTION=set-key;; --save) SAVE=1;; --attach) shift; ATTACH_FILES+=("${1:-}");; --resume) RESUME=1; shift; SESSION_NAME="${1:-}";; -*) printf 'unknown option: %s\n' "$1" >&2; exit 2;; *) [ -z "$SESSION_NAME" ] && SESSION_NAME="$1" || { printf 'unexpected argument: %s\n' "$1" >&2; exit 2; };;
+    -h|--help|help) ACTION=help;; --version) ACTION=version;; --demo) DEMO_MODE=1;; --loopback) LOOPBACK=1;; --loopback-file) shift; LOOPBACK_FILE="${1:-}"; [ -n "$LOOPBACK_FILE" ] || { printf 'ERROR: --loopback-file requires a path.\n' >&2; exit 2; };; --doctor) ACTION=doctor;; --credits) ACTION=credits;; --list) ACTION=list;; --models) ACTION=models;; --routers) ACTION=models; MODEL_TYPE_FILTER="routers";; --favorites) ACTION=favorites;; --favorite-model) ACTION=favorite; shift; TEST_MODEL="${1:-}";; --unfavorite-model|--unbookmark-model) ACTION=unfavorite; shift; TEST_MODEL="${1:-}";; --model-type) shift; MODEL_TYPE_FILTER="${1:-all}";; --sort) shift; MODEL_SORT_ORDER="${1:-$MODEL_SORT_ORDER}";; --min-input-tokens) shift; MODEL_MIN_INPUT_TOKENS="${1:-$MODEL_MIN_INPUT_TOKENS}";; --min-output-tokens) shift; MODEL_MIN_OUTPUT_TOKENS="${1:-$MODEL_MIN_OUTPUT_TOKENS}";; --require-tokens) MODEL_FILTER_REQUIRE_TOKENS=1;; --allow-missing-tokens) MODEL_FILTER_REQUIRE_TOKENS=0;; --theme) shift; THEME="${1:-default}";; --send-input) shift; SEND_INPUT="${1:-ctrl_d}";; --code-attachment-min-lines) shift; CODE_ATTACHMENT_MIN_LINES="${1:-5}";; --config) ACTION=config;; --set) ACTION=set-config; shift; SET_KEY="${1:-}"; shift; SET_VALUE="${1:-}";; --unset) ACTION=unset-config; shift; UNSET_KEY="${1:-}";; --update-models) ACTION=update-models;; --select-model) ACTION=select;; --test-model) ACTION=test; shift; TEST_MODEL="${1:-}";; --set-api-key) ACTION=set-key;; --save) SAVE=1;; --attach) shift; ATTACH_FILES+=("${1:-}");; --resume) RESUME=1; shift; SESSION_NAME="${1:-}";; -*) printf 'unknown option: %s\n' "$1" >&2; exit 2;; *) [ -z "$SESSION_NAME" ] && SESSION_NAME="$1" || { printf 'unexpected argument: %s\n' "$1" >&2; exit 2; };;
   esac; shift
  done
 
@@ -830,7 +1090,7 @@ while [ "$#" -gt 0 ]; do
 # This keeps command behavior easy to audit: parse flags, dispatch one action,
 # or fall through into the interactive chat loop.
 case "$ACTION" in
-  help) help_menu; exit 0;; version) printf '%s version %s\n' "$PROGRAM" "$VERSION"; exit 0;; doctor) doctor_command; exit 0;; credits) credits; exit 0;; list) list_sessions; exit 0;; models) list_models; exit $?;; update-models) update_models_cache; exit $?;; select) select_model; exit $?;; test) [ -n "$TEST_MODEL" ] || { printf 'ERROR: --test-model requires a model\n' >&2; exit 2; }; test_model "$TEST_MODEL"; [ "$SAVE" -eq 1 ] && save_config_value MODEL "$TEST_MODEL"; exit $?;; set-key) printf 'Paste OpenRouter API key: '; IFS= read -r -s key; printf '\n'; [ -n "$key" ] && save_config_value OPENROUTER_API_KEY "$key"; exit $?;;
+  help) help_menu; exit 0;; version) printf '%s version %s\n' "$PROGRAM" "$VERSION"; exit 0;; doctor) doctor_command; exit 0;; credits) credits; exit 0;; list) list_sessions; exit 0;; models) list_models; exit $?;; favorites) list_favorite_models; exit $?;; favorite) favorite_model_command "$TEST_MODEL"; exit $?;; unfavorite) unfavorite_model_command "$TEST_MODEL"; exit $?;; config) print_config_summary; exit 0;; set-config) [ -n "$SET_KEY" ] || { printf 'ERROR: --set requires KEY VALUE\n' >&2; exit 2; }; save_config_value "$SET_KEY" "$SET_VALUE"; exit $?;; unset-config) [ -n "$UNSET_KEY" ] || { printf 'ERROR: --unset requires KEY\n' >&2; exit 2; }; remove_config_key "$UNSET_KEY"; exit $?;; update-models) update_models_cache; exit $?;; select) select_model; exit $?;; test) [ -n "$TEST_MODEL" ] || { printf 'ERROR: --test-model requires a model\n' >&2; exit 2; }; test_model "$TEST_MODEL"; [ "$SAVE" -eq 1 ] && save_config_value MODEL "$TEST_MODEL"; exit $?;; set-key) printf 'Paste OpenRouter API key: '; IFS= read -r -s key; printf '\n'; [ -n "$key" ] && save_config_value OPENROUTER_API_KEY "$key"; exit $?;;
 esac
 
 # ==========================================================
@@ -885,11 +1145,28 @@ send_one_message() {
   if [ -n "$LOOPBACK_FILE" ]; then
     printf '%s\n' "$cleaned" >> "$LOOPBACK_FILE"
   fi
-  printf '%s\n\n' "$cleaned"
+  if [ "$LOOPBACK" -eq 1 ]; then printf '%s\n' "$cleaned"; else print_ai_output "$cleaned"; fi
+}
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function read_user_input
+# SEND_INPUT parity for the bash-only edition.  SEND_INPUT=enter sends one
+# physical input line each time the user presses Enter.  The default
+# SEND_INPUT=ctrl_d keeps the traditional multiline shell behavior where cat
+# reads until EOF.  Ctrl+G cannot be implemented portably in ordinary cooked
+# shell input, so it is accepted as a config idea but treated like ctrl_d here.
+# ----------------------------------------------------------
+read_user_input() {
+  if [ "$SEND_INPUT" = "enter" ]; then
+    IFS= read -r buffer
+    return $?
+  fi
+  buffer="$(cat)"
+  return 0
 }
 
 while true; do
-  ts="$(timestamp)"; printf '[%s] %s> ' "$ts" "$USER_NAME"; buffer="$(cat)"; if [ -z "$buffer" ]; then [ -t 0 ] || exit 0; continue; fi
+  ts="$(timestamp)"; printf '[%s] %s> ' "$ts" "$USER_NAME"; if ! read_user_input; then [ -t 0 ] || exit 0; continue; fi; if [ -z "$buffer" ]; then [ -t 0 ] || exit 0; continue; fi
   RUNTIME_SEND_OVERRIDE=""
   if handle_runtime_command "$buffer"; then
     continue
