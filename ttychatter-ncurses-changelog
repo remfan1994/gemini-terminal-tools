@@ -1,4 +1,26 @@
 # Changelog
+## 0.14.5
+
+### Added
+- F8 local search screen for visible transcript, current session log, and all session logs.
+- Ctrl+E compose hotkey for opening the configured external editor.
+- Search results are displayed in the same scrollable page system used by help/errors.
+
+### Changed
+- F8 is now Search instead of external-editor launch.
+- External editor launch moved to Ctrl+E and is advertised in the compose hotkey bar.
+- F1 command menu now lists F8 as Search.
+- Editor selection remains in F5 Options under the EDITOR field.
+
+### Documentation
+- Updated man page controls for F8 Search and Ctrl+E Editor.
+- Added SEARCH section to the man page.
+- Updated command/hotkey bar documentation.
+
+### Notes
+- Search is local-only. It does not contact OpenRouter and does not consume model/provider requests.
+- Search scans plain-text session logs. If encrypted logs are added later, search will need an encryption-aware companion path.
+
 ## 0.14.4
 
 ### Fixed
