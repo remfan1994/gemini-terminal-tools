@@ -1,4 +1,38 @@
 # Changelog
+## 0.14.2
+
+### Added
+- Fully integrated GPG API-key storage into the F3 API-key screen.
+- API-key entry now includes a tickable `encrypt with gpg` option directly under the key input field.
+- F3 API-key screen now displays `gpg not found` when the external gpg command is unavailable.
+- API-key save flow can now remove stale plaintext OPENROUTER_API_KEY entries after successful encrypted storage.
+
+### Changed
+- Plaintext API-key warning now appears only when plaintext saving is selected.
+- GPG storage is now presented where the API key is entered, not only in the options screen.
+- API-key storage wording now distinguishes runtime-only, GPG-encrypted, and plaintext behavior.
+
+### Documentation
+- Updated man page API-key storage section.
+- Updated GPG notes to clarify use of the external gpg command.
+
+## 0.14.2
+
+### Added
+- First-class GPG encrypted API-key storage on the F3 API-key screen.
+- "Encrypt with gpg" checkbox directly beneath the masked API-key input field.
+- Visible "gpg not found" indication on the API-key screen when gpg is unavailable.
+- Visible "gpg not found" indication in the options menu GPG file entry.
+- GPG encryption helper that saves API keys into API_KEY_GPG_FILE without logging secrets.
+
+### Changed
+- Plaintext API-key saving now shows the plaintext warning only on the plaintext save path.
+- Saving an encrypted API key removes old plaintext OPENROUTER_API_KEY / TTYCHATTER_API_KEY config entries.
+- F3 API-key workflow now matches the options-menu GPG support instead of treating GPG as a hidden afterthought.
+
+### Documentation
+- Updated man page API-key/GPG storage section.
+- Expanded maintainer comments around encrypted API-key storage and terminal/GPG handoff behavior.
 ## 0.14.1
 
 ### Notes
