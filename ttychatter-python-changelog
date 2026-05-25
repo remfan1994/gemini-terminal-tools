@@ -1,4 +1,20 @@
 # Changelog## 
+## 3.12
+
+### Added
+- `--search QUERY` command for searching session logs without contacting OpenRouter.
+- `--all-sessions` search scope flag.
+- Runtime `:search TEXT` command for the current session log.
+- Runtime `:search-all TEXT` command for all saved session logs.
+
+### Changed
+- Search is implemented as a local plain-text log operation, preserving ttychatter's user-owned-file philosophy.
+
+### Documentation
+- Updated man page with SEARCH section and runtime search commands.
+
+### Notes
+- Search does not send prompts, contact OpenRouter, or consume provider requests.
 ## 3.10
 
 ### Added
