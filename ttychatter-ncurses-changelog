@@ -1,4 +1,10 @@
 # Changelog
+## 0.14.1
+
+### Notes
+- No ncurses runtime behavior changed in this Bash parity patch.
+- This entry exists so the combined changelog clearly records that ncurses was audited while Bash clients caught up on portable equivalents.
+
 0.14.0
 - Added THEME config support: default, dim, high_contrast, mono, solarized_dark.
 - Added theme/style role handling for AI/user/system transcript rendering.
