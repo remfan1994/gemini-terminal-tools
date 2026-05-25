@@ -1,4 +1,34 @@
 # ttychatter.bash changelog
+## 0.13.0-bash-only
+
+### Added
+- `--set-api-key` now exposes runtime-only, GPG-encrypted, and plaintext storage choices.
+- API-key entry reports `gpg not found` when encrypted storage is unavailable.
+- Encrypted API-key saving uses external gpg and API_KEY_GPG_FILE when available.
+
+### Changed
+- Plaintext API-key storage now requires explicit selection and confirmation.
+- GPG failure no longer falls through to plaintext automatically.
+
+### Documentation
+- Updated man page API-key storage section.
+
+## 0.13.0-bash-only
+
+### Added
+- GPG encrypted API-key save option in --set-api-key / :set-api-key flow.
+- "gpg not found" indication when encrypted storage is unavailable.
+- API_KEY_GPG_FILE / OPENROUTER_API_KEY_GPG_FILE documentation in man page.
+
+### Changed
+- API-key setup now mirrors the security choices of the ncurses and Python-helper clients.
+- Plaintext config storage now appears only after an explicit warning.
+- Encrypted save removes old plaintext API-key config entries when successful.
+
+### Documentation
+- Updated man page API-key/GPG storage section.
+- Expanded comments around dependency-light GPG handling.
+
 ## 0.12.0
 
 ### Added
