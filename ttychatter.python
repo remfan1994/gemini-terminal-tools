@@ -84,11 +84,12 @@
 set -o pipefail
 
 PROGRAM="ttychatter.python"
-VERSION="3.4"
+VERSION="3.7"
 
 CONFIG_DIR="$HOME/.config/ttychatter/openrouter"
 CONFIG_FILE="$CONFIG_DIR/config"
 MODEL_CACHE_FILE="$CONFIG_DIR/models-cache.json"
+API_KEY_GPG_FILE="$CONFIG_DIR/api-key.gpg"
 CONFIG_READ_FILE="$CONFIG_FILE"
 
 SESSION_DIR="$HOME/.local/share/ttychatter/openrouter/sessions"
@@ -100,6 +101,7 @@ MODEL=""
 CONTEXT_TURNS=12
 CONTEXT_TURNS_EXPLICIT=0
 MODEL_TEST_PROMPT="Please reply with a short sentence confirming this model is available for text generation."
+DEMO_MODE=0
 STARTUP_NOTICE=1
 PROJECT_LEAD_NAME="remfan1994"
 PROJECT_LEAD_NOTICE="I strongly encourage everyone to get cruetly-free VEGETARIAN food and remember the 'bloodguilt' curse from the Bible.  -Project Lead, remfan1994"
@@ -135,6 +137,8 @@ RENAME_NEW=""
 MEMORY_SESSION=""
 EDITOR_PROMPT=0
 RUNTIME_SEND_OVERRIDE=""
+LOOPBACK=0
+LOOPBACK_FILE=""
 
 # ==========================================================
 # SMALL UTILITY FUNCTIONS
@@ -295,6 +299,22 @@ editor_command() {
 }
 
 # ==========================================================
+# GPG API KEY SUPPORT
+# ----------------------------------------------------------
+# GPG support is optional. It is implemented by shelling out to the user's
+# existing gpg command instead of embedding cryptography in a shell script.
+# This keeps keyring ownership and passphrase prompting in the user's normal
+# Unix environment. The decrypted key is never printed.
+# ==========================================================
+
+decrypt_gpg_key_file() {
+  local path="$1"
+  [ -f "$path" ] || return 1
+  command -v gpg >/dev/null 2>&1 || return 1
+  gpg --quiet --decrypt "$path" 2>/dev/null | tr -d '\r' | sed '/^[[:space:]]*$/d' | head -n 1
+}
+
+# ==========================================================
 # CONFIG FILE SUPPORT
 # ==========================================================
 
@@ -309,9 +329,11 @@ if [ -f "$CONFIG_READ_FILE" ]; then
       CONTEXT_TURNS) CONTEXT_TURNS="$value"; CONTEXT_TURNS_EXPLICIT=1 ;;
       HISTORY_LIMIT) if [ "$CONTEXT_TURNS_EXPLICIT" -eq 0 ]; then CONTEXT_TURNS="$value"; fi ;;
       OPENROUTER_API_KEY|API_KEY) OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-$value}" ;;
+      API_KEY_GPG_FILE|OPENROUTER_API_KEY_GPG_FILE) API_KEY_GPG_FILE="$value" ;;
       SESSION_DIR) SESSION_DIR="$(expand_path "$value")" ;;
       ATTACHMENT_DIR) ATTACHMENT_DIR="$(expand_path "$value")"; ATTACHMENT_DIR_CONFIGURED=1 ;;
       MODEL_TEST_PROMPT) [ -n "$value" ] && MODEL_TEST_PROMPT="$value" ;;
+      DEMO_MODE) DEMO_MODE="$value" ;;
       STARTUP_NOTICE) STARTUP_NOTICE="$value" ;;
       MODEL_FILTER_GENERATE_CONTENT) MODEL_FILTER_GENERATE_CONTENT="$value" ;;
       MODEL_FILTER_REQUIRE_TOKENS) MODEL_FILTER_REQUIRE_TOKENS="$value" ;;
@@ -329,6 +351,10 @@ CONTEXT_TURNS="$(positive_int_or_default "$CONTEXT_TURNS" 12)"
 MODEL_MIN_INPUT_TOKENS="$(positive_int_or_default "$MODEL_MIN_INPUT_TOKENS" 0)"
 MODEL_MIN_OUTPUT_TOKENS="$(positive_int_or_default "$MODEL_MIN_OUTPUT_TOKENS" 0)"
 MAX_ATTACHMENT_BYTES="$(positive_int_or_default "$MAX_ATTACHMENT_BYTES" 1048576)"
+
+if [ -z "$OPENROUTER_API_KEY" ]; then
+  OPENROUTER_API_KEY="$(decrypt_gpg_key_file "$API_KEY_GPG_FILE" || true)"
+fi
 
 if [ "$ATTACHMENT_DIR_CONFIGURED" -eq 0 ]; then ATTACHMENT_DIR="$SESSION_DIR/attachments"; fi
 
@@ -421,6 +447,9 @@ EOF
 # behavior changes.
 # ----------------------------------------------------------
 require_api_key() {
+  if truthy "$DEMO_MODE"; then
+    return 0
+  fi
   if [ -z "$OPENROUTER_API_KEY" ]; then
     printf '%s\n' "ERROR: OPENROUTER_API_KEY not set." >&2
     printf '%s\n' "Set it with: export OPENROUTER_API_KEY=your_key" >&2
@@ -505,7 +534,9 @@ doctor_command() {
     if command -v "$cmd" >/dev/null 2>&1; then doctor_status OK "command $cmd" "$(command -v "$cmd")"; else doctor_status FAIL "command $cmd" "not found"; fi
   done
   [ -f "$CONFIG_FILE" ] && doctor_status OK "config file" "$CONFIG_FILE present" || doctor_status WARN "config file" "not found: $CONFIG_FILE"
-  [ -n "$OPENROUTER_API_KEY" ] && doctor_status OK "API key" "loaded" || doctor_status WARN "API key" "not loaded"
+  [ -n "$OPENROUTER_API_KEY" ] && doctor_status OK "API key" "loaded from env/config/gpg" || doctor_status WARN "API key" "not loaded"
+  command -v gpg >/dev/null 2>&1 && doctor_status OK gpg "$(command -v gpg)" || doctor_status WARN gpg "not found; encrypted key unavailable"
+  [ -f "$API_KEY_GPG_FILE" ] && doctor_status OK "api-key.gpg" "$API_KEY_GPG_FILE present" || doctor_status WARN "api-key.gpg" "not found: $API_KEY_GPG_FILE"
   detail="$(check_writable_dir "$SESSION_DIR")"; status=$?; doctor_status $([ "$status" -eq 0 ] && printf OK || printf FAIL) "session dir" "$detail"
   detail="$(check_writable_dir "$ATTACHMENT_DIR")"; status=$?; doctor_status $([ "$status" -eq 0 ] && printf OK || printf FAIL) "attachment dir" "$detail"
   detail="$(check_writable_dir "$(dirname "$MODEL_CACHE_FILE")")"; status=$?; doctor_status $([ "$status" -eq 0 ] && printf OK || printf FAIL) "model cache dir" "$detail"
@@ -589,6 +620,8 @@ USAGE
     $PROGRAM --clear-memory <session>
     $PROGRAM --editor-prompt [session]
     $PROGRAM --attach FILE [session]
+    $PROGRAM --loopback [session]
+    $PROGRAM --loopback-file PATH [session]
     $PROGRAM --credits
     $PROGRAM --doctor
     $PROGRAM --version
@@ -622,6 +655,12 @@ RUNTIME COMMAND MODE
         :credits
 
     Type :help during a chat for the full runtime command list.
+
+LOOPBACK OUTPUT
+    --loopback routes interface text to stderr and writes AI responses to stdout.
+    This is for piping ttychatter output into another program.
+
+    --loopback-file PATH appends each AI response to PATH.
 
 INPUT
     Type/paste text, then press Ctrl+D to send.
@@ -805,6 +844,20 @@ clear_memory_command() {
   printf 'cleared memory snapshot for session: %s\n' "$name"
 }
 
+demo_models_json() {
+  cat <<'JSON'
+{"data":[{"id":"demo/auto","name":"Demo Auto Router","description":"Local demo model. No network request is made.","context_length":8192,"architecture":{"modality":"text"}}, {"id":"demo/free","name":"Demo Free Route","description":"Local demo route for UI testing.","context_length":4096,"architecture":{"modality":"text"}}, {"id":"demo/code-helper","name":"Demo Code Helper","description":"Local demo row for code-block and attachment testing.","context_length":32768,"architecture":{"modality":"text"}}]}
+JSON
+}
+
+demo_ai_response() {
+  local prompt="$1"
+  printf '%s\n' "Demo mode is active; no OpenRouter request was made."
+  printf 'Prompt excerpt: %s\n' "$(printf '%s' "$prompt" | tr '\n' ' ' | cut -c 1-140)"
+  printf '\nShort inline code block:\n```text\nok\n```\n'
+  printf '\nLong code block for attachment-threshold testing:\n```sh\necho ttychatter demo mode\necho no provider request was made\necho long code blocks should become attachments\necho done\n```\n'
+}
+
 # ==========================================================
 # MODEL CACHE / FILTERING
 # ==========================================================
@@ -816,6 +869,7 @@ clear_memory_command() {
 # ----------------------------------------------------------
 fetch_models_live_json() {
   local url response curl_status
+  if truthy "$DEMO_MODE"; then demo_models_json; return 0; fi
   require_api_key || return 1
   url="https://openrouter.ai/api/v1/models"
   response="$(curl -sS --max-time 60 -H "Authorization: Bearer $OPENROUTER_API_KEY" "$url" 2>&1)"; curl_status=$?
@@ -843,6 +897,7 @@ update_models_cache() {
 # when behavior changes.
 # ----------------------------------------------------------
 models_json_for_display() {
+  if truthy "$DEMO_MODE"; then demo_models_json; return 0; fi
   if [ -f "$MODEL_CACHE_FILE" ]; then cat "$MODEL_CACHE_FILE"; else update_models_cache >/dev/null || return 1; cat "$MODEL_CACHE_FILE"; fi
 }
 
@@ -853,7 +908,9 @@ models_json_for_display() {
 # ----------------------------------------------------------
 parse_models_table() {
   local show_all="$1"
-  python3 - "$show_all" "$MODEL_FILTER_GENERATE_CONTENT" "$MODEL_FILTER_REQUIRE_TOKENS" "$MODEL_FILTER_HIDE_PREVIEW" "$MODEL_MIN_INPUT_TOKENS" "$MODEL_MIN_OUTPUT_TOKENS" "$MODEL_SORT_ORDER" <<'PYMODEL'
+  local raw
+  raw="$(cat)"
+  python3 -c '
 import json, sys
 show_all=sys.argv[1]=="1"
 truth=lambda v: str(v).lower() in ("1","yes","true","on","y")
@@ -870,7 +927,7 @@ except Exception as exc:
 if "error" in data:
     err=data["error"]
     if isinstance(err, dict):
-        print(f"ERROR: OpenRouter API error {err.get('code','')}: {err.get('message','')}", file=sys.stderr)
+        print(f"ERROR: OpenRouter API error {err.get('"'"'code'"'"','"'"''"'"')}: {err.get('"'"'message'"'"','"'"''"'"')}", file=sys.stderr)
     else:
         print(f"ERROR: OpenRouter API error: {err}", file=sys.stderr)
     sys.exit(1)
@@ -893,8 +950,9 @@ for item in data.get("data", data.get("models", [])):
     hay=" ".join([model_id,display,desc]).lower(); preview=any(w in hay for w in ["preview","experimental"," exp ","-exp","_exp"," beta","-beta","_beta"])
     methods=["chat"]
     if "image" in modality.lower(): methods.append("image")
-    if model_id.startswith("openrouter/"): methods.append("router")
-    if model_id.endswith(":free") or model_id == "openrouter/free": methods.append("free")
+    if model_id.startswith("openrouter/") or model_id.startswith("demo/"): methods.append("router")
+    if model_id.endswith(":free") or model_id in ("openrouter/free", "demo/free"): methods.append("free")
+    if model_id.startswith("demo/"): methods.append("demo")
     if not show_all:
         if require_tokens and input_limit <= 0: continue
         if hide_preview and preview: continue
@@ -912,11 +970,11 @@ elif sort_order in ("output_desc","output"):
 elif sort_order=="display":
     rows.sort(key=lambda r:(r[1].lower(),r[0]))
 elif sort_order=="favorites":
-    rows.sort(key=lambda r:(0 if r[0].startswith("openrouter/") else 1, r[0].lower()))
+    rows.sort(key=lambda r:(0 if r[0].startswith(("openrouter/","demo/")) else 1, r[0].lower()))
 else:
     rows.sort(key=lambda r:r[0].lower())
 for r in rows: print("\t".join(map(str,r)))
-PYMODEL
+' "$show_all" "$MODEL_FILTER_GENERATE_CONTENT" "$MODEL_FILTER_REQUIRE_TOKENS" "$MODEL_FILTER_HIDE_PREVIEW" "$MODEL_MIN_INPUT_TOKENS" "$MODEL_MIN_OUTPUT_TOKENS" "$MODEL_SORT_ORDER" <<< "$raw"
 }
 # ----------------------------------------------------------
 # MAINTAINER COMMENTARY: function print_models
@@ -1008,6 +1066,7 @@ PYRESP
 call_openrouter_model() {
   local model="$1" prompt="$2" timeout="${3:-120}"; shift 3 || true
   local attachments=("$@") clean_model response curl_status output parse_status
+  if truthy "$DEMO_MODE"; then demo_ai_response "$prompt"; return 0; fi
   require_api_key || return 1
   clean_model="$(normalize_model_id "$model")"
   response="$(printf '%s' "$prompt" | make_openrouter_payload "$clean_model" "${attachments[@]}" | curl -sS --max-time "$timeout" -H "Content-Type: application/json" -H "Authorization: Bearer $OPENROUTER_API_KEY" -H "HTTP-Referer: https://github.com/remfan1994/ttychatter" -H "X-Title: ttychatter" -d @- "https://openrouter.ai/api/v1/chat/completions" 2>&1)"
@@ -1246,6 +1305,7 @@ Config and API key:
   :set KEY VALUE                Save config KEY=VALUE
   :unset KEY                    Remove KEY from config
   :set-api-key                  Prompt and save OPENROUTER_API_KEY
+    API_KEY_GPG_FILE
   :forget-api-key               Remove OPENROUTER_API_KEY from config
 
 Memory:
@@ -1352,7 +1412,8 @@ apply_runtime_config_change() {
   case "$key" in
     MODEL)
       MODEL="$(normalize_model_id "$value")"
-      ACTIVE_MODEL="$(effective_model)"
+      if truthy "$DEMO_MODE" && [ -z "$MODEL" ]; then MODEL="demo/auto"; fi
+ACTIVE_MODEL="$(effective_model)"
       ;;
     CONTEXT_TURNS)
       CONTEXT_TURNS="$(positive_int_or_default "$value" "$CONTEXT_TURNS")"
@@ -1414,13 +1475,15 @@ handle_runtime_command() {
     model)
       [ -n "$rest" ] || { printf 'active model: %s\n' "$(model_label)"; return 0; }
       MODEL="$(normalize_model_id "$rest")"
-      ACTIVE_MODEL="$(effective_model)"
+      if truthy "$DEMO_MODE" && [ -z "$MODEL" ]; then MODEL="demo/auto"; fi
+ACTIVE_MODEL="$(effective_model)"
       printf 'active model for this chat: %s\n' "$ACTIVE_MODEL"
       ;;
     model-save)
       [ -n "$rest" ] || { printf '%s\n' "usage: :model-save MODEL"; return 0; }
       MODEL="$(normalize_model_id "$rest")"
-      ACTIVE_MODEL="$(effective_model)"
+      if truthy "$DEMO_MODE" && [ -z "$MODEL" ]; then MODEL="demo/auto"; fi
+ACTIVE_MODEL="$(effective_model)"
       set_config_value "MODEL" "$ACTIVE_MODEL"
       printf 'active model saved: %s\n' "$ACTIVE_MODEL"
       ;;
@@ -1437,7 +1500,8 @@ handle_runtime_command() {
     unset)
       [ -n "$rest" ] || { printf '%s\n' "usage: :unset KEY"; return 0; }
       remove_config_key "$rest"
-      [ "$rest" = "MODEL" ] && { MODEL=""; ACTIVE_MODEL="$(effective_model)"; }
+      [ "$rest" = "MODEL" ] && { MODEL=""; if truthy "$DEMO_MODE" && [ -z "$MODEL" ]; then MODEL="demo/auto"; fi
+ACTIVE_MODEL="$(effective_model)"; }
       printf 'removed config key if present: %s\n' "$rest"
       ;;
     set-api-key|api-key) set_api_key_command ;;
@@ -1480,6 +1544,9 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     -h|--help|help) ACTION="help" ;;
     --version) ACTION="version" ;;
+    --demo) DEMO_MODE=1 ;;
+    --loopback) LOOPBACK=1 ;;
+    --loopback-file) shift; LOOPBACK_FILE="${1:-}"; [ -n "$LOOPBACK_FILE" ] || { printf '%s\n' "ERROR: --loopback-file requires a path." >&2; exit 2; } ;;
     --credits) ACTION="credits" ;;
     --doctor) ACTION="doctor" ;;
     --list) ACTION="list" ;;
@@ -1554,6 +1621,7 @@ SESSION_WAS_EMPTY=1; [ -s "$SESSION" ] && SESSION_WAS_EMPTY=0
 if [ "$RESUME" -eq 1 ] && [ ! -f "$SESSION" ]; then printf 'ERROR: session not found: %s\n' "$SESSION_NAME" >&2; exit 1; fi
 
 rebuild_context_from_session
+if truthy "$DEMO_MODE" && [ -z "$MODEL" ]; then MODEL="demo/auto"; fi
 ACTIVE_MODEL="$(effective_model)"
 NOTICE_VISIBLE=0
 if truthy "$STARTUP_NOTICE" && [ "$SESSION_WAS_EMPTY" -eq 1 ]; then NOTICE_VISIBLE=1; fi
@@ -1609,8 +1677,33 @@ send_one_message() {
   cleaned_output="$(printf '%s' "$output" | extract_attachments)"
   add_to_context "Assistant: $cleaned_output"
   write_context_snapshot "$(timestamp)"
+  if [ "$LOOPBACK" -eq 1 ]; then
+    printf '%s\n' "$cleaned_output" >&3
+  fi
+  if [ -n "$LOOPBACK_FILE" ]; then
+    printf '%s\n' "$cleaned_output" >> "$LOOPBACK_FILE"
+  fi
   printf '%s\n\n' "$cleaned_output"
 }
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: loopback output routing
+# Loopback is for users who want to pipe AI responses from the running
+# terminal client into another program.  A normal interactive chat prints
+# prompts, status lines, separators, and responses to stdout.  That is useful
+# for a human, but bad for pipelines because the receiving program cannot
+# distinguish interface chrome from the actual AI text.
+#
+# The Bash editions solve this by duplicating the original stdout onto fd 3,
+# then redirecting ordinary stdout to stderr when --loopback is active.  The
+# interface remains visible in the terminal, while the clean AI response is
+# written to fd 3.  This keeps the client interactive without forcing a
+# separate batch mode.
+# ----------------------------------------------------------
+exec 3>&1
+if [ "$LOOPBACK" -eq 1 ]; then
+  exec 1>&2
+fi
 
 print_chat_header
 [ "$NOTICE_VISIBLE" -eq 1 ] && print_project_lead_notice

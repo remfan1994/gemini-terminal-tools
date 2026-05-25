@@ -12,7 +12,9 @@ SYNOPSIS
     ttychatter.ncurses --update-models
     ttychatter.ncurses --test-model <model_id>
     ttychatter.ncurses --doctor
+    ttychatter.ncurses --demo
     ttychatter.ncurses --version
+    ttychatter.ncurses --loopback-file <path>
     ttychatter.ncurses --help
 
 DESCRIPTION
@@ -20,13 +22,54 @@ DESCRIPTION
     ttychatter project. It is designed to make browser interfaces unnecessary
     for text-message-style AI work from a terminal. It talks to OpenRouter by
     default, uses cached model metadata, stores sessions as plain text logs,
-    and saves large code blocks as local attachments.
+    and saves long code blocks as local attachments.
+
+LOOPBACK OUTPUT
+    ttychatter.ncurses --loopback-file <path>
+        Appends each AI response to the named file while the full-screen
+        ncurses interface remains active.
+
+        The ncurses client owns the terminal display, so direct stdout piping
+        of the full-screen interface is not recommended. File-based loopback
+        is the curses-safe way to let another process consume responses.
+
+DEMO MODE
+    --demo runs ttychatter.ncurses without OpenRouter network calls.
+
+    Demo mode supplies local model metadata and local AI responses. It is
+    intended for release-candidate testing, UI testing, model-browser testing,
+    attachment extraction testing, session testing, and first-time exploration
+    without spending OpenRouter credits or sending fake prompts to
+    openrouter/free.
+
+    In demo mode the header displays a visible marker:
+
+        ttychatter.ncurses ~DEMO~
+
+    In demo mode:
+        - no OpenRouter API key is required
+        - no chat-completions request is made
+        - the model list comes from local demo rows
+        - model tests return local demo responses
+        - the demo response includes short and long code blocks so attachment
+          extraction can be tested without provider traffic
+
+LIVE REQUEST CONFIRMATION
+    When CONFIRM_LIVE_SEND is enabled, the first non-demo send asks for
+    confirmation before making a real OpenRouter chat request.
+
+    This exists because ttychatter has many UI features that can be tested
+    offline. Users who are trying menus, model browsers, or attachment handling
+    should use --demo when they do not intend to spend provider requests.
 
 USAGE
-    First run:
+    First run with a real provider:
         ttychatter.ncurses
         Press F3 to enter an OpenRouter API key.
         Press F2 to use/update the cached model list or enter a model ID.
+
+    Local no-network test run:
+        ttychatter.ncurses --demo
 
     Resume with shell tab completion:
         ttychatter.ncurses --resume notes.log
@@ -45,10 +88,7 @@ CONTROLS
     F10       Quit.
 
     Enter     Sends by default when SEND_INPUT=enter.
-    Ctrl+G    Always sends.
-    Ctrl+Enter
-              May send when SEND_INPUT=ctrl_enter, if the terminal emulator
-              reports Ctrl+Enter as a distinct key. Many terminals do not.
+    Ctrl+G    Reliable alternate send key.
     j/k       Move in menus, lists, model browser, memory, files, and editor
               screens.
 
@@ -69,14 +109,39 @@ MODEL BROWSER
         Enter   Activate highlighted model for the current run.
         j/k     Move down/up.
 
+API KEY STORAGE
+    API keys can come from several places. The preferred order is:
+
+        1. OPENROUTER_API_KEY environment variable
+        2. TTYCHATTER_API_KEY environment variable
+        3. OPENROUTER_API_KEY or API_KEY in config
+        4. GPG-encrypted api-key.gpg file
+        5. F3 runtime API-key entry
+
+    Optional encrypted storage uses an external gpg command. The default file is:
+
+        ~/.config/ttychatter/openrouter/api-key.gpg
+
+    A custom encrypted-key file can be configured with:
+
+        API_KEY_GPG_FILE=/path/to/api-key.gpg
+
+    The program never prints the decrypted key. The --doctor screen reports
+    whether gpg exists and whether the encrypted key file exists, but it does
+    not display secret values.
+
 CONFIGURATION
     Config file:
         ~/.config/ttychatter/openrouter/config
 
     Important keys:
         OPENROUTER_API_KEY
+        TTYCHATTER_API_KEY
+        API_KEY_GPG_FILE
+        CONFIRM_LIVE_SEND=1|0
         MODEL
-        SEND_INPUT=enter|ctrl_g|ctrl_enter
+        DEMO_MODE=1|0
+        SEND_INPUT=enter|ctrl_g
         PROMPT_SESSION_NAME=1|0
         CONTEXT_TURNS
         SESSION_DIR
@@ -92,7 +157,6 @@ CONFIGURATION
             Sort order used by the model browser. Common values include
             favorites, api, name, display, input-desc, and output-desc.
 
-
 DEFAULT DIRECTORIES
     config:      ~/.config/ttychatter/openrouter/config
     sessions:    ~/.local/share/ttychatter/openrouter/sessions/
@@ -105,7 +169,10 @@ ATTACHMENTS
 
 LIMITATIONS
     Media support depends on OpenRouter model capability. Terminal mouse and
-    key behavior depend on terminal emulator support.
+    key behavior depend on terminal emulator support. Demo mode is local and
+    proves the ttychatter UI path, not provider quality. Ctrl+Enter is not
+    documented as a primary send key because many terminal emulators do not
+    report it distinctly from Enter.
 
 VERSION
-    ttychatter.ncurses version 0.11.0
+    ttychatter.ncurses version 0.13.0

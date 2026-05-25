@@ -74,7 +74,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-VERSION = "0.11.0"
+VERSION = "0.13.0"
 PROGRAM = "ttychatter.ncurses"
 FALLBACK_MODEL = "openrouter/auto"
 DEFAULT_MODEL_TEST_PROMPT = "Please reply with one short sentence confirming this model is available for text generation."
@@ -84,6 +84,7 @@ INPUT_PLACEHOLDER_DEFAULT = "Type your chat message here... (Enter/Ctrl+G sends)
 MOUSE_SCROLL_LINES = 3
 MAX_INLINE_ATTACHMENT_BYTES = 20 * 1024 * 1024
 DEFAULT_MODEL_CACHE_FILE = Path.home() / ".cache" / "ttychatter" / "openrouter" / "models.json"
+DEFAULT_GPG_API_KEY_FILE = Path.home() / ".config" / "ttychatter" / "openrouter" / "api-key.gpg"
 DEFAULT_MODEL_MIN_INPUT_TOKENS = 0
 DEFAULT_MODEL_MIN_OUTPUT_TOKENS = 0
 DEFAULT_MODEL_SORT_ORDER = "api"
@@ -117,6 +118,9 @@ class Config:
     model: str = ""
     context_turns: int = 12
     api_key: str = ""
+    api_key_gpg_file: Optional[Path] = None
+    confirm_live_send: bool = True
+    live_send_confirmed: bool = False
     session_dir: Path = field(default_factory=lambda: Path.home() / ".local" / "share" / "ttychatter" / "openrouter" / "sessions")
     attachment_dir: Optional[Path] = None
     editor: str = ""
@@ -138,6 +142,8 @@ class Config:
     code_attachment_min_lines: int = 5
     model_favorites_file: Optional[Path] = None
     max_attachment_bytes: int = MAX_INLINE_ATTACHMENT_BYTES
+    demo_mode: bool = False
+    loopback_file: Optional[Path] = None
 
     @property
     # ------------------------------------------------------------
@@ -148,6 +154,20 @@ class Config:
     # ------------------------------------------------------------
     def effective_model(self) -> str:
         return self.model or FALLBACK_MODEL
+
+    @property
+    def effective_api_key_gpg_file(self) -> Path:
+        """Return the encrypted API-key file path.
+
+        This path is separate from the simple KEY=VALUE config file because
+        GPG ciphertext can be armored, multi-line, or handled by external GPG
+        tooling. Keeping it in its own file makes encrypted key storage usable
+        across the ncurses, Python-helper Bash, Bash-only, and future C tracks
+        without changing the config parser into a full structured-data reader.
+        """
+        if self.api_key_gpg_file is not None:
+            return self.api_key_gpg_file
+        return DEFAULT_GPG_API_KEY_FILE
 
     @property
     # ------------------------------------------------------------
@@ -250,6 +270,36 @@ def parse_bool(value: str, default: bool = False) -> bool:
     return default
 
 
+def decrypt_gpg_file(path: Path) -> str:
+    """Attempt to decrypt an OpenRouter API key from a GPG file.
+
+    The program deliberately shells out to the user's existing `gpg` command
+    instead of embedding cryptography. That keeps ttychatter aligned with Unix
+    user control: the user's keyring, pinentry program, and trust model remain
+    outside ttychatter. If decryption fails, we return an empty string and let
+    normal runtime/API-key prompts handle the situation.
+
+    This helper must never log or print the decrypted key. Diagnostic screens
+    may say whether gpg exists and whether the file exists, but the secret value
+    stays out of the terminal transcript, session logs, and error messages.
+    """
+    if not path.exists() or shutil.which("gpg") is None:
+        return ""
+    try:
+        proc = subprocess.run(
+            ["gpg", "--quiet", "--decrypt", str(path)],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except Exception:
+        return ""
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout.strip()
+
+
 # ------------------------------------------------------------
 # MAINTAINER COMMENTARY: def load_config
 # Reads the shared KEY=VALUE config file. This is deliberately not TOML/YAML/JSON because Bash-
@@ -297,6 +347,10 @@ def load_config() -> Config:
                         cfg.context_turns = parse_positive_int(value, cfg.context_turns)
                 elif key in {"OPENROUTER_API_KEY", "API_KEY"}:
                     cfg.api_key = env_api_key or value
+                elif key in {"API_KEY_GPG_FILE", "OPENROUTER_API_KEY_GPG_FILE"}:
+                    cfg.api_key_gpg_file = expand_path(value)
+                elif key == "CONFIRM_LIVE_SEND":
+                    cfg.confirm_live_send = parse_bool(value, cfg.confirm_live_send)
                 elif key == "SESSION_DIR":
                     cfg.session_dir = expand_path(value)
                 elif key == "ATTACHMENT_DIR":
@@ -344,9 +398,16 @@ def load_config() -> Config:
                     cfg.code_attachment_min_lines = parse_positive_int(value, cfg.code_attachment_min_lines)
                 elif key == "MODEL_FAVORITES_FILE":
                     cfg.model_favorites_file = expand_path(value)
+                elif key == "DEMO_MODE":
+                    cfg.demo_mode = parse_bool(value, cfg.demo_mode)
+                elif key == "LOOPBACK_FILE":
+                    cfg.loopback_file = expand_path(value)
 
     if env_api_key:
         cfg.api_key = env_api_key
+
+    if not cfg.api_key:
+        cfg.api_key = decrypt_gpg_file(cfg.effective_api_key_gpg_file)
 
     return cfg
 
@@ -398,6 +459,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--update-models", action="store_true", help="refresh the cached OpenRouter model list and exit")
     parser.add_argument("--doctor", action="store_true", help="run diagnostics for configuration, filesystem, terminal, editor, cache, and network readiness")
     parser.add_argument("--test-model", metavar="MODEL", help="send the model-test prompt to MODEL and print the response")
+    parser.add_argument("--demo", action="store_true", help="run without OpenRouter network calls using local demo responses and demo model metadata")
+    parser.add_argument("--loopback-file", metavar="PATH", help="append each AI response to PATH while the ncurses UI remains interactive")
     parser.add_argument("--version", action="store_true", help="show version information")
     return parser.parse_args()
 
@@ -574,7 +637,10 @@ def doctor_report(cfg: Config) -> List[DoctorResult]:
     add("OK" if term else "WARN", "TERM", term or "TERM is not set")
     size = shutil.get_terminal_size(fallback=(0, 0))
     add("OK" if size.columns >= 40 and size.lines >= 12 else "WARN", "terminal-size", f"{size.columns}x{size.lines}")
-    add("OK" if cfg.api_key else "WARN", "api-key", "loaded from environment/config" if cfg.api_key else "not loaded; F3 or OPENROUTER_API_KEY required")
+    add("OK" if cfg.api_key else "WARN", "api-key", "loaded from env/config/gpg/runtime" if cfg.api_key else "not loaded; F3, OPENROUTER_API_KEY, TTYCHATTER_API_KEY, or api-key.gpg required")
+    gpg_path = cfg.effective_api_key_gpg_file
+    add("OK" if shutil.which("gpg") else "WARN", "gpg", "available" if shutil.which("gpg") else "not found; encrypted API-key loading unavailable")
+    add("OK" if gpg_path.exists() else "WARN", "api-key.gpg", f"present: {gpg_path}" if gpg_path.exists() else f"not found: {gpg_path}")
 
     ok, detail = check_writable_directory(cfg.session_dir)
     add("OK" if ok else "FAIL", "session-dir", detail)
@@ -652,6 +718,76 @@ class ModelInfo:
     input_token_limit: Optional[int] = None
     output_token_limit: Optional[int] = None
     methods: List[str] = field(default_factory=list)
+
+
+def demo_model_list() -> List[ModelInfo]:
+    """Return a small local model catalog for no-network testing.
+
+    This is deliberately not a fake provider abstraction. It is a user-facing
+    safety feature: maintainers and users can test model-browser rendering,
+    search, favorites, sorting, sessions, and message flow without spending
+    OpenRouter requests or touching openrouter/free. Keep these rows obviously
+    marked as demo rows so nobody confuses them with the live OpenRouter catalog.
+    """
+    return [
+        ModelInfo(
+            model_id="demo/auto",
+            api_name="demo/auto",
+            display_name="Demo Auto Router",
+            description="Local demo model. No network request is made.",
+            input_token_limit=8192,
+            output_token_limit=1024,
+            methods=["chat.completions", "router", "demo"],
+        ),
+        ModelInfo(
+            model_id="demo/free",
+            api_name="demo/free",
+            display_name="Demo Free Route",
+            description="Local demo row that behaves like a free/router-style model for UI testing.",
+            input_token_limit=4096,
+            output_token_limit=512,
+            methods=["chat.completions", "router", "free", "demo"],
+        ),
+        ModelInfo(
+            model_id="demo/code-helper",
+            api_name="demo/code-helper",
+            display_name="Demo Code Helper",
+            description="Local demo row that returns short and long code blocks for attachment testing.",
+            input_token_limit=32768,
+            output_token_limit=4096,
+            methods=["chat.completions", "demo"],
+        ),
+    ]
+
+
+def demo_ai_response(prompt_text: str, attachments: List[PendingAttachment]) -> str:
+    """Return a local response without contacting OpenRouter.
+
+    The response intentionally includes one short code block and one long code
+    block. That makes demo mode useful for the exact kind of release-candidate
+    testing the project needs: users can verify transcript rendering, code-block
+    threshold behavior, attachment extraction, session logging, and memory updates
+    without sending fake prompts to OpenRouter.
+    """
+    attachment_note = ""
+    if attachments:
+        names = ", ".join(item.path.name for item in attachments)
+        attachment_note = f"\n\nQueued attachment(s) seen locally: {names}."
+    prompt_excerpt = prompt_text.strip().replace("\n", " ")[:140]
+    return (
+        "Demo mode is active; no OpenRouter request was made. "
+        f"I received this local prompt excerpt: {prompt_excerpt!r}."
+        + attachment_note
+        + "\n\nShort inline code block:\n```text\nok\n```"
+        + "\n\nLong code block for attachment-threshold testing:\n"
+        + "```python\n"
+        + "def demo():\n"
+        + "    print('ttychatter demo mode')\n"
+        + "    print('no provider request was made')\n"
+        + "    print('longer code blocks should become attachments')\n"
+        + "    return True\n"
+        + "```"
+    )
 
 
 @dataclass
@@ -821,6 +957,9 @@ def generate_with_model(
     request or response schema, patch this function and the model-list parser
     first before touching the UI state machine.
     """
+    if cfg.demo_mode:
+        return True, demo_ai_response(prompt_text, attachments or [])
+
     if not cfg.api_key:
         return False, "No OpenRouter API key loaded. Press F3 to paste an API key."
 
@@ -887,6 +1026,9 @@ def fetch_models(cfg: Config) -> Tuple[List[ModelInfo], Optional[str]]:
     information. The UI should prefer cached metadata and only refresh the list
     when the user explicitly asks, because catalog refreshes are network actions.
     """
+    if cfg.demo_mode:
+        return demo_model_list(), None
+
     if not cfg.api_key:
         return [], "No OpenRouter API key loaded. Press F3 to paste an API key."
 
@@ -1532,7 +1674,16 @@ def next_attachment_number(attachment_dir: Path, session_name: str, lang: str, e
 
 
 # ------------------------------------------------------------
-# MAINTAINER COMMENTARY: def extract_code_attachments(text: str, attachment_dir: Path, session_name: str, min_lines: int = 5) -> str:
+# MAINTAINER COMMENTARY: def extract_code_attachments
+# This function is the boundary between raw model text and display-safe transcript text.
+# It is deliberately conservative: the session log keeps the original response, while the
+# visible transcript receives either the original fenced code block for short examples or
+# a small attachment notice for long blocks.  The function exists so demo mode and real
+# provider mode follow the same path; otherwise a bug could hide until a user sends an
+# actual network request.  Maintainers should be careful not to make the regex greedy,
+# because a greedy fence parser can swallow normal prose after a code block.
+# ------------------------------------------------------------
+def extract_code_attachments(text: str, attachment_dir: Path, session_name: str, min_lines: int = 5) -> str:
     """Extract only long fenced code blocks into attachment files.
 
     Short code snippets are often part of normal prose and should remain in the
@@ -1937,7 +2088,8 @@ class AICursesApp:
     def draw_header(self, width: int) -> None:
         key_state = "key:loaded" if self.cfg.api_key else "key:missing"
         attach_state = f" files:{len(self.pending_attachments)}" if self.pending_attachments else ""
-        header = f"{PROGRAM} | {self.session_name} | {self.model_label()} | {key_state}{attach_state}"
+        mode_state = " ~DEMO~" if self.cfg.demo_mode else ""
+        header = f"{PROGRAM}{mode_state} | {self.session_name} | {self.model_label()} | {key_state}{attach_state}"
         self.safe_addstr(0, 0, header, width, self.reverse_attr())
         self.safe_addstr(1, 0, "_" * width, width, self.dim_attr())
 
@@ -2014,13 +2166,22 @@ class AICursesApp:
     # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
     # ------------------------------------------------------------
     def draw_command_bar(self, y: int, width: int) -> None:
-        # This compact command strip sits between transcript and input. It is
-        # intentionally clipped to the available terminal width; only visible
-        # labels are clickable. F1 opens the full command menu for all actions.
+        # The command bar must remain useful even on narrow terminal windows.
+        # Earlier versions tried to print every F-key label on one line and
+        # simply clipped the text. That worked on wide terminals but looked
+        # broken on Chromebook/Crostini windows with large fonts. The command
+        # bar now has a compact fallback: on narrow screens it shows only the
+        # essentials (F1 help, the configured send key, and F10 quit). F1 then
+        # acts as the complete command launcher. Visible labels remain clickable
+        # so mouse users are not punished for the compact layout.
         self.command_click_targets = []
         self.safe_addstr(y, 0, "_" * width, width, self.dim_attr())
+        if width < 72:
+            items = [("F1 Menu", "help"), (f"Send:{self.cfg.send_input}", "send"), ("F10 Quit", "quit")]
+        else:
+            items = self.command_bar_items()
         x = 0
-        for idx, (label, action) in enumerate(self.command_bar_items()):
+        for idx, (label, action) in enumerate(items):
             text = label if idx == 0 else " | " + label
             if x + len(text) >= width:
                 if x + 4 < width:
@@ -3387,11 +3548,14 @@ class AICursesApp:
                 {"key": "MODEL_SORT_ORDER", "label": "Model browser: sort order", "kind": "choice", "value": self.cfg.model_sort_order, "choices": ["favorites", "api", "name", "display", "input-desc", "output-desc"]},
                 {"key": "MODEL_TEST_PROMPT", "label": "Model test prompt", "kind": "text", "value": self.cfg.model_test_prompt},
                 {"key": "INPUT_PLACEHOLDER", "label": "Input placeholder", "kind": "text", "value": self.cfg.input_placeholder},
-                {"key": "SEND_INPUT", "label": "Send key", "kind": "choice", "value": self.cfg.send_input, "choices": ["enter", "ctrl_g", "ctrl_enter"]},
+                {"key": "SEND_INPUT", "label": "Send key", "kind": "choice", "value": self.cfg.send_input, "choices": ["enter", "ctrl_g"]},
                 {"key": "PROMPT_SESSION_NAME", "label": "Prompt for session name", "kind": "bool", "value": self.cfg.prompt_session_name},
                 {"key": "CODE_ATTACHMENT_MIN_LINES", "label": "Code block attachment min lines", "kind": "int", "value": str(self.cfg.code_attachment_min_lines)},
                 {"key": "MONOCHROME", "label": "Monochrome mode", "kind": "bool", "value": self.cfg.monochrome},
                 {"key": "STARTUP_NOTICE", "label": "Startup Project Lead notice", "kind": "bool", "value": self.cfg.startup_notice},
+                {"key": "DEMO_MODE", "label": "Demo mode", "kind": "bool", "value": self.cfg.demo_mode},
+                {"key": "CONFIRM_LIVE_SEND", "label": "Confirm first live send", "kind": "bool", "value": self.cfg.confirm_live_send},
+                {"key": "API_KEY_GPG_FILE", "label": "GPG API-key file", "kind": "text", "value": str(self.cfg.effective_api_key_gpg_file)},
             ]
 
         # ------------------------------------------------------------
@@ -3464,6 +3628,15 @@ class AICursesApp:
             elif key == "STARTUP_NOTICE":
                 self.cfg.startup_notice = bool(value)
                 set_config_value(self.cfg, key, "1" if self.cfg.startup_notice else "0")
+            elif key == "DEMO_MODE":
+                self.cfg.demo_mode = bool(value)
+                set_config_value(self.cfg, key, "1" if self.cfg.demo_mode else "0")
+            elif key == "CONFIRM_LIVE_SEND":
+                self.cfg.confirm_live_send = bool(value)
+                set_config_value(self.cfg, key, "1" if self.cfg.confirm_live_send else "0")
+            elif key == "API_KEY_GPG_FILE":
+                self.cfg.api_key_gpg_file = expand_path(str(value))
+                set_config_value(self.cfg, key, str(self.cfg.api_key_gpg_file))
             self.status = f"saved option: {key}"
 
         while True:
@@ -4121,6 +4294,16 @@ class AICursesApp:
         if not message.strip() and self.pending_attachments:
             message = "Please review the attached file(s)."
 
+        if (not self.cfg.demo_mode) and self.cfg.confirm_live_send and (not self.cfg.live_send_confirmed):
+            if not self.ask_yes_no(
+                "LIVE OPENROUTER REQUEST",
+                "This will send a real chat request to OpenRouter. Use --demo to test the interface without network chat calls. Continue?",
+                default=False,
+            ):
+                self.status = "live send cancelled; run with --demo for offline testing"
+                return
+            self.cfg.live_send_confirmed = True
+
         user_time = now_time()
         attachment_note = ""
         if self.pending_attachments:
@@ -4143,6 +4326,14 @@ class AICursesApp:
         openrouter_time = now_time()
         append_log(self.session_path, "AI", raw_output, openrouter_time)
         cleaned_output = extract_code_attachments(raw_output, self.attachment_dir, self.session_name, self.cfg.code_attachment_min_lines)
+        if self.cfg.loopback_file is not None:
+            try:
+                self.cfg.loopback_file.parent.mkdir(parents=True, exist_ok=True)
+                with self.cfg.loopback_file.open("a", encoding="utf-8") as loopback_fh:
+                    loopback_fh.write(cleaned_output + "\n")
+            except OSError as exc:
+                self.status = f"loopback file write failed: {exc}"
+
         self.context_buffer.append("Assistant: " + cleaned_output)
         self.trim_context_buffer()
         self.save_context_snapshot()
@@ -4333,6 +4524,12 @@ def main() -> int:
         return 0
 
     cfg = load_config()
+    if args.demo:
+        cfg.demo_mode = True
+        if not cfg.model:
+            cfg.model = "demo/auto"
+    if args.loopback_file:
+        cfg.loopback_file = expand_path(args.loopback_file)
     cfg.session_dir.mkdir(parents=True, exist_ok=True)
     cfg.effective_attachment_dir.mkdir(parents=True, exist_ok=True)
 

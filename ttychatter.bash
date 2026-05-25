@@ -62,10 +62,11 @@
 set -o pipefail
 
 PROGRAM="ttychatter.bash"
-VERSION="0.7.0-bash-only"
+VERSION="0.10.0-bash-only"
 CONFIG_DIR="$HOME/.config/ttychatter/openrouter"
 CONFIG_FILE="$CONFIG_DIR/config"
 MODEL_CACHE_FILE="$CONFIG_DIR/models-cache.json"
+API_KEY_GPG_FILE="$CONFIG_DIR/api-key.gpg"
 CONFIG_READ_FILE="$CONFIG_FILE"
 SESSION_DIR="$HOME/.local/share/ttychatter/openrouter/sessions"
 ATTACHMENT_DIR=""
@@ -75,6 +76,7 @@ FALLBACK_MODEL="openrouter/auto"
 CONTEXT_TURNS=8
 OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-${TTYCHATTER_API_KEY:-}}"
 MODEL_TEST_PROMPT="Please reply with a short sentence confirming this model is available for text generation."
+DEMO_MODE=0
 STARTUP_NOTICE=1
 PROJECT_LEAD_NAME="remfan1994"
 PROJECT_LEAD_NOTICE="I strongly encourage everyone to get cruetly-free VEGETARIAN food and remember the 'bloodguilt' curse from the Bible.  -Project Lead, remfan1994"
@@ -87,6 +89,8 @@ RESUME=0
 SAVE=0
 TEST_MODEL=""
 RUNTIME_SEND_OVERRIDE=""
+LOOPBACK=0
+LOOPBACK_FILE=""
 
 # ==========================================================
 # BASIC HELPERS
@@ -134,6 +138,21 @@ json_escape_stream() { awk 'BEGIN{first=1;ORS=""}{gsub(/\\/,"\\\\");gsub(/\"/,"\
 # ----------------------------------------------------------
 json_unescape_basic() { sed 's/\\n/\
 /g; s/\\t/	/g; s/\\"/"/g; s/\\\\/\\/g'; }
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function decrypt_gpg_key_file
+# Optional GPG key loading keeps encrypted API-key storage available even in
+# the dependency-light Bash edition. This function intentionally invokes the
+# user's normal gpg command instead of trying to implement cryptography in
+# shell. If gpg is missing or decryption fails, the function simply returns
+# failure and the normal API-key error path explains what is missing.
+# ----------------------------------------------------------
+decrypt_gpg_key_file() {
+  local path="$1"
+  [ -f "$path" ] || return 1
+  command -v gpg >/dev/null 2>&1 || return 1
+  gpg --quiet --decrypt "$path" 2>/dev/null | tr -d '\r' | sed '/^[[:space:]]*$/d' | head -n 1
+}
 # ----------------------------------------------------------
 # MAINTAINER COMMENTARY: function clear_screen
 # clear_screen is part of the dependency-light client behavior. Changes
@@ -207,7 +226,9 @@ doctor_command() {
   command -v base64 >/dev/null 2>&1 && doctor_status OK "command base64" "$(command -v base64)" || doctor_status WARN "command base64" "not found; binary attachments limited"
   command -v file >/dev/null 2>&1 && doctor_status OK "command file" "$(command -v file)" || doctor_status WARN "command file" "not found; MIME detection falls back to extension"
   [ -f "$CONFIG_FILE" ] && doctor_status OK "config file" "$CONFIG_FILE present" || doctor_status WARN "config file" "not found: $CONFIG_FILE"
-  [ -n "$OPENROUTER_API_KEY" ] && doctor_status OK "API key" loaded || doctor_status WARN "API key" "not loaded"
+  [ -n "$OPENROUTER_API_KEY" ] && doctor_status OK "API key" "loaded from env/config/gpg" || doctor_status WARN "API key" "not loaded"
+  command -v gpg >/dev/null 2>&1 && doctor_status OK gpg "$(command -v gpg)" || doctor_status WARN gpg "not found; encrypted key unavailable"
+  [ -f "$API_KEY_GPG_FILE" ] && doctor_status OK "api-key.gpg" "$API_KEY_GPG_FILE present" || doctor_status WARN "api-key.gpg" "not found: $API_KEY_GPG_FILE"
   d="$(check_writable_dir "$SESSION_DIR")"; st=$?; doctor_status $([ "$st" -eq 0 ] && printf OK || printf FAIL) "session dir" "$d"
   d="$(check_writable_dir "$ATTACHMENT_DIR")"; st=$?; doctor_status $([ "$st" -eq 0 ] && printf OK || printf FAIL) "attachment dir" "$d"
   d="$(check_writable_dir "$(dirname "$MODEL_CACHE_FILE")")"; st=$?; doctor_status $([ "$st" -eq 0 ] && printf OK || printf FAIL) "model cache dir" "$d"
@@ -234,9 +255,11 @@ load_config() {
       MODEL) MODEL="$(normalize_model_id "$value")" ;;
       CONTEXT_TURNS|HISTORY_LIMIT) CONTEXT_TURNS="$value" ;;
       OPENROUTER_API_KEY|API_KEY) OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-$value}" ;;
+      API_KEY_GPG_FILE|OPENROUTER_API_KEY_GPG_FILE) API_KEY_GPG_FILE="$value" ;;
       SESSION_DIR) SESSION_DIR="${value/#\~/$HOME}" ;;
       ATTACHMENT_DIR) ATTACHMENT_DIR="${value/#\~/$HOME}"; ATTACHMENT_DIR_CONFIGURED=1 ;;
       MODEL_TEST_PROMPT) [ -n "$value" ] && MODEL_TEST_PROMPT="$value" ;;
+      DEMO_MODE) DEMO_MODE="$value" ;;
       STARTUP_NOTICE) STARTUP_NOTICE="$value" ;;
     esac
   done < "$CONFIG_READ_FILE"
@@ -262,6 +285,9 @@ save_config_value() {
 }
 
 load_config
+if [ -z "$OPENROUTER_API_KEY" ]; then
+  OPENROUTER_API_KEY="$(decrypt_gpg_key_file "$API_KEY_GPG_FILE" || true)"
+fi
 case "$CONTEXT_TURNS" in ''|*[!0-9]*) CONTEXT_TURNS=8 ;; esac
 [ "$CONTEXT_TURNS" -lt 1 ] && CONTEXT_TURNS=8
 [ "$ATTACHMENT_DIR_CONFIGURED" -eq 0 ] && ATTACHMENT_DIR="$SESSION_DIR/attachments"
@@ -274,6 +300,9 @@ mkdir -p "$CONFIG_DIR" "$SESSION_DIR" "$ATTACHMENT_DIR"
 # changes.
 # ----------------------------------------------------------
 require_api_key() {
+  if truthy "$DEMO_MODE"; then
+    return 0
+  fi
   if [ -z "$OPENROUTER_API_KEY" ]; then
     printf '%s\n' "ERROR: OPENROUTER_API_KEY not set." >&2
     printf '%s\n' "Set it with: export OPENROUTER_API_KEY=your_key" >&2
@@ -306,10 +335,18 @@ USAGE
     $PROGRAM --test-model <model> [--save]
     $PROGRAM --set-api-key
     $PROGRAM --attach FILE [session]
+    $PROGRAM --loopback [session]
+    $PROGRAM --loopback-file PATH [session]
     $PROGRAM --credits
     $PROGRAM --doctor
     $PROGRAM --version
     $PROGRAM --help
+
+LOOPBACK OUTPUT
+    --loopback routes interface text to stderr and writes AI responses to stdout.
+    This is for piping ttychatter output into another program.
+
+    --loopback-file PATH appends each AI response to PATH.
 
 INPUT
     Type or paste a message, then press Ctrl+D to send.
@@ -362,6 +399,20 @@ Project Lead notice:
 EOF
 }
 
+demo_models_json() {
+  cat <<'JSON'
+{"data":[{"id":"demo/auto","name":"Demo Auto Router","description":"Local demo model. No network request is made.","context_length":8192,"architecture":{"modality":"text"}},{"id":"demo/free","name":"Demo Free Route","description":"Local demo route for UI testing.","context_length":4096,"architecture":{"modality":"text"}},{"id":"demo/code-helper","name":"Demo Code Helper","description":"Local demo row for code-block and attachment testing.","context_length":32768,"architecture":{"modality":"text"}}]}
+JSON
+}
+
+demo_ai_response() {
+  local prompt="$1"
+  printf '%s\n' "Demo mode is active; no OpenRouter request was made."
+  printf 'Prompt excerpt: %s\n' "$(printf '%s' "$prompt" | tr '\n' ' ' | cut -c 1-140)"
+  printf '\nShort inline code block:\n```text\nok\n```\n'
+  printf '\nLong code block for attachment-threshold testing:\n```sh\necho ttychatter demo mode\necho no provider request was made\necho long code blocks should become attachments\necho done\n```\n'
+}
+
 # ==========================================================
 # MODEL LIST / CACHE
 # ==========================================================
@@ -372,7 +423,7 @@ EOF
 # should preserve old-system usability and update docs/comments if behavior
 # changes.
 # ----------------------------------------------------------
-fetch_models_json() { require_api_key || return 1; curl -sS --max-time 60 -H "Authorization: Bearer $OPENROUTER_API_KEY" "https://openrouter.ai/api/v1/models"; }
+fetch_models_json() { if truthy "$DEMO_MODE"; then demo_models_json; return 0; fi; require_api_key || return 1; curl -sS --max-time 60 -H "Authorization: Bearer $OPENROUTER_API_KEY" "https://openrouter.ai/api/v1/models"; }
 # ----------------------------------------------------------
 # MAINTAINER COMMENTARY: function update_models_cache
 # update_models_cache is part of the dependency-light client behavior.
@@ -386,7 +437,7 @@ update_models_cache() { local json; json="$(fetch_models_json)" || return 1; pri
 # Changes should preserve old-system usability and update docs/comments if
 # behavior changes.
 # ----------------------------------------------------------
-models_json_source() { if [ -f "$MODEL_CACHE_FILE" ]; then cat "$MODEL_CACHE_FILE"; else fetch_models_json; fi; }
+models_json_source() { if truthy "$DEMO_MODE"; then demo_models_json; return 0; fi; if [ -f "$MODEL_CACHE_FILE" ]; then cat "$MODEL_CACHE_FILE"; else fetch_models_json; fi; }
 # ----------------------------------------------------------
 # MAINTAINER COMMENTARY: function parse_models_basic
 # parse_models_basic is part of the dependency-light client behavior.
@@ -514,6 +565,7 @@ extract_openrouter_text() {
 # ----------------------------------------------------------
 call_model() {
   local model="$1" prompt="$2" full_prompt payload response text status
+  if truthy "$DEMO_MODE"; then demo_ai_response "$prompt"; return 0; fi
   require_api_key || return 1
   full_prompt="$(build_prompt_with_attachments "$prompt")"
   payload="$(build_openrouter_payload "$(normalize_model_id "$model")" "$full_prompt")"
@@ -704,7 +756,8 @@ list_attachments_runtime() {
 apply_runtime_config_change() {
   local key="$1" value="$2"
   case "$key" in
-    MODEL) MODEL="$(normalize_model_id "$value")"; ACTIVE_MODEL="$(effective_model)" ;;
+    MODEL) MODEL="$(normalize_model_id "$value")"; if truthy "$DEMO_MODE" && [ -z "$MODEL" ]; then MODEL="demo/auto"; fi
+ACTIVE_MODEL="$(effective_model)" ;;
     CONTEXT_TURNS|HISTORY_LIMIT) CONTEXT_TURNS="$value" ;;
     SESSION_DIR) SESSION_DIR="${value/#\~/$HOME}"; mkdir -p "$SESSION_DIR" ;;
     ATTACHMENT_DIR) ATTACHMENT_DIR="${value/#\~/$HOME}"; mkdir -p "$ATTACHMENT_DIR" ;;
@@ -735,15 +788,18 @@ handle_runtime_command() {
     update-models|update_models) update_models_cache ;;
     select-model|select_model) select_model ;;
     test-model|test_model) [ -n "$rest" ] && test_model "$rest" || printf '%s\n' "usage: :test-model MODEL" ;;
-    model) [ -n "$rest" ] && { MODEL="$(normalize_model_id "$rest")"; ACTIVE_MODEL="$(effective_model)"; printf 'active model: %s\n' "$ACTIVE_MODEL"; } || printf 'active model: %s\n' "$(model_label)" ;;
-    model-save) [ -n "$rest" ] && { MODEL="$(normalize_model_id "$rest")"; ACTIVE_MODEL="$(effective_model)"; save_config_value MODEL "$ACTIVE_MODEL"; printf 'saved MODEL=%s\n' "$ACTIVE_MODEL"; } || printf '%s\n' "usage: :model-save MODEL" ;;
+    model) [ -n "$rest" ] && { MODEL="$(normalize_model_id "$rest")"; if truthy "$DEMO_MODE" && [ -z "$MODEL" ]; then MODEL="demo/auto"; fi
+ACTIVE_MODEL="$(effective_model)"; printf 'active model: %s\n' "$ACTIVE_MODEL"; } || printf 'active model: %s\n' "$(model_label)" ;;
+    model-save) [ -n "$rest" ] && { MODEL="$(normalize_model_id "$rest")"; if truthy "$DEMO_MODE" && [ -z "$MODEL" ]; then MODEL="demo/auto"; fi
+ACTIVE_MODEL="$(effective_model)"; save_config_value MODEL "$ACTIVE_MODEL"; printf 'saved MODEL=%s\n' "$ACTIVE_MODEL"; } || printf '%s\n' "usage: :model-save MODEL" ;;
     config) print_config_summary ;;
     set)
       key="${rest%%[[:space:]]*}"; if [ "$key" = "$rest" ]; then value=""; else value="${rest#*[[:space:]]}"; fi
       [ -n "$key" ] || { printf '%s\n' "usage: :set KEY VALUE"; return 0; }
       save_config_value "$key" "$value"; apply_runtime_config_change "$key" "$value"; printf 'set %s=%s\n' "$key" "$value"
       ;;
-    unset) [ -n "$rest" ] && { remove_config_key "$rest"; [ "$rest" = "MODEL" ] && { MODEL=""; ACTIVE_MODEL="$(effective_model)"; }; printf 'removed config key if present: %s\n' "$rest"; } || printf '%s\n' "usage: :unset KEY" ;;
+    unset) [ -n "$rest" ] && { remove_config_key "$rest"; [ "$rest" = "MODEL" ] && { MODEL=""; if truthy "$DEMO_MODE" && [ -z "$MODEL" ]; then MODEL="demo/auto"; fi
+ACTIVE_MODEL="$(effective_model)"; }; printf 'removed config key if present: %s\n' "$rest"; } || printf '%s\n' "usage: :unset KEY" ;;
     set-api-key|api-key) printf 'Paste OpenRouter API key: '; IFS= read -r -s key; printf '\n'; [ -n "$key" ] && { OPENROUTER_API_KEY="$key"; save_config_value OPENROUTER_API_KEY "$key"; } ;;
     forget-api-key) remove_config_key OPENROUTER_API_KEY; printf '%s\n' "removed OPENROUTER_API_KEY from config if present" ;;
     memory|show-memory) show_current_memory_runtime ;;
@@ -765,7 +821,7 @@ handle_runtime_command() {
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    -h|--help|help) ACTION=help;; --version) ACTION=version;; --doctor) ACTION=doctor;; --credits) ACTION=credits;; --list) ACTION=list;; --models) ACTION=models;; --update-models) ACTION=update-models;; --select-model) ACTION=select;; --test-model) ACTION=test; shift; TEST_MODEL="${1:-}";; --set-api-key) ACTION=set-key;; --save) SAVE=1;; --attach) shift; ATTACH_FILES+=("${1:-}");; --resume) RESUME=1; shift; SESSION_NAME="${1:-}";; -*) printf 'unknown option: %s\n' "$1" >&2; exit 2;; *) [ -z "$SESSION_NAME" ] && SESSION_NAME="$1" || { printf 'unexpected argument: %s\n' "$1" >&2; exit 2; };;
+    -h|--help|help) ACTION=help;; --version) ACTION=version;; --demo) DEMO_MODE=1;; --loopback) LOOPBACK=1;; --loopback-file) shift; LOOPBACK_FILE="${1:-}"; [ -n "$LOOPBACK_FILE" ] || { printf 'ERROR: --loopback-file requires a path.\n' >&2; exit 2; };; --doctor) ACTION=doctor;; --credits) ACTION=credits;; --list) ACTION=list;; --models) ACTION=models;; --update-models) ACTION=update-models;; --select-model) ACTION=select;; --test-model) ACTION=test; shift; TEST_MODEL="${1:-}";; --set-api-key) ACTION=set-key;; --save) SAVE=1;; --attach) shift; ATTACH_FILES+=("${1:-}");; --resume) RESUME=1; shift; SESSION_NAME="${1:-}";; -*) printf 'unknown option: %s\n' "$1" >&2; exit 2;; *) [ -z "$SESSION_NAME" ] && SESSION_NAME="$1" || { printf 'unexpected argument: %s\n' "$1" >&2; exit 2; };;
   esac; shift
  done
 
@@ -786,9 +842,25 @@ require_api_key || exit 1
 SESSION="$(resolve_session_path "$SESSION_NAME")"
 [ "$RESUME" -eq 1 ] && [ ! -f "$SESSION" ] && { printf 'session not found: %s\n' "$SESSION_NAME" >&2; exit 1; }
 load_context
+if truthy "$DEMO_MODE" && [ -z "$MODEL" ]; then MODEL="demo/auto"; fi
 ACTIVE_MODEL="$(effective_model)"
 NOTICE_VISIBLE=0
 truthy "$STARTUP_NOTICE" && [ ! -s "$SESSION" ] && NOTICE_VISIBLE=1
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: loopback output routing
+# Loopback is for terminal users who want to pipe AI responses to another
+# program while still seeing the normal ttychatter interface. A normal chat
+# client prints prompts, separators, and status text; that output is useful to
+# humans but contaminates pipelines. When --loopback is active, fd 3 preserves
+# the original stdout for clean AI text, while ordinary interface output is
+# redirected to stderr.
+# ----------------------------------------------------------
+exec 3>&1
+if [ "$LOOPBACK" -eq 1 ]; then
+  exec 1>&2
+fi
+
 printf '%s (bash-only)\n' "$PROGRAM"; printf 'session: %s\n' "$SESSION"; printf 'model: %s\n' "$(model_label)"; printf 'Ctrl+D to send, :help for commands, Ctrl+C to exit\n\n'
 if [ "$NOTICE_VISIBLE" -eq 1 ]; then printf '[%s] %s: %s\n' "$(timestamp)" "$PROJECT_LEAD_NAME" "$PROJECT_LEAD_NOTICE"; printf '[%s] system: This is the message list window. The notice above will disappear when you send your first message, and messages to and from AI will appear here.\n\n' "$(timestamp)"; fi
 send_one_message() {
@@ -807,9 +879,13 @@ send_one_message() {
 ' "$output" | extract_code_blocks)"
   add_context "Assistant: $cleaned"
   write_context_snapshot "$(timestamp)"
-  printf '%s
-
-' "$cleaned"
+  if [ "$LOOPBACK" -eq 1 ]; then
+    printf '%s\n' "$cleaned" >&3
+  fi
+  if [ -n "$LOOPBACK_FILE" ]; then
+    printf '%s\n' "$cleaned" >> "$LOOPBACK_FILE"
+  fi
+  printf '%s\n\n' "$cleaned"
 }
 
 while true; do

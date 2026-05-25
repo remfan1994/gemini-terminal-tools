@@ -1,17 +1,67 @@
-TTYCHATTER.BASH(1)        User Commands        TTYCHATTER.BASH(1)
+TTYCHATTER.BASH(1)          User Commands          TTYCHATTER.BASH(1)
 
 NAME
-    ttychatter.bash - terminal chat client track in the ttychatter project
+    ttychatter.bash - dependency-light Bash-only terminal client
 
 SYNOPSIS
     ttychatter.bash [session]
-    ttychatter.bash --help
+    ttychatter.bash --resume <session|session.log|/path/session.log>
+    ttychatter.bash --models
+    ttychatter.bash --update-models
+    ttychatter.bash --test-model <model_id>
+    ttychatter.bash --select-model
+    ttychatter.bash --doctor
+    ttychatter.bash --demo
     ttychatter.bash --version
+    ttychatter.bash --loopback
+    ttychatter.bash --loopback-file <path>
+    ttychatter.bash --help
 
 DESCRIPTION
-    This flat-layout release keeps the Bash track available while the ncurses
-    track receives the OpenRouter-first model-browser work. The Bash clients
-    remain terminal-oriented, session-capable, and documented in the README.
+    ttychatter.bash is the Bash-only edition of ttychatter. It avoids Python and
+    remains dependency-light while still providing an end-user interactive chat
+    client with sessions, model tools, memory, logs, and attachment attempts.
+
+API KEYS
+    API keys may be loaded from:
+        OPENROUTER_API_KEY
+        TTYCHATTER_API_KEY
+        OPENROUTER_API_KEY or API_KEY in config
+        API_KEY_GPG_FILE via external gpg decryption
+
+    The default encrypted key file is:
+        ~/.config/ttychatter/openrouter/api-key.gpg
+
+    GPG support is optional. If gpg is missing or decryption fails, normal API
+    key prompts/errors are used.
+
+RUNTIME COMMAND MODE
+    During interactive chat, inputs beginning with ':' are local commands rather
+    than messages to OpenRouter. Examples:
+        :help
+        :models
+        :select-model
+        :test-model openrouter/auto
+        :memory
+        :attach ./notes.txt
+        :credits
+        :quit
+
+LOOPBACK OUTPUT
+    ttychatter.bash --loopback
+        Runs the interactive chat normally, but sends prompts, status text,
+        separators, and runtime-command output to stderr while clean AI
+        responses are written to stdout. This allows the user to pipe AI
+        responses into another program without mixing user-interface text into
+        the pipe.
+
+    ttychatter.bash --loopback-file <path>
+        Appends each AI response to the named file while preserving the normal
+        interactive display.
+
+DEMO MODE
+    --demo provides local model rows and local AI responses so the client can be
+    tested without making OpenRouter chat requests.
 
 VERSION
-    ttychatter.bash version 0.7.0-bash-only
+    ttychatter.bash version 0.10.0-bash-only
