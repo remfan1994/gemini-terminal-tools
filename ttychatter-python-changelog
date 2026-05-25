@@ -1,4 +1,56 @@
 # Changelog## 
+3.8
+- Added --routers and --model-type model-list filters.
+- Added MODEL_TYPE_FILTER config support.
+- Added runtime :routers command for OpenRouter router/special entries.
+- Added router/fixed/free/auto filtering parity with ttychatter.ncurses where practical.
+- Updated documentation for router vs fixed model behavior.
+
+## 3.7
+
+### Added
+- `--loopback` mode for piping AI responses from an interactive chat to another program.
+- `--loopback-file <path>` for appending AI responses to a file.
+- LOOPBACK_FILE config support.
+
+### Changed
+- In `--loopback` mode, interface text is routed to stderr while clean AI responses are written to stdout.
+
+### Documentation
+- Added LOOPBACK OUTPUT documentation to the man page and help text.
+
+## 3.6
+
+### Added
+- Optional GPG-encrypted API-key loading through `api-key.gpg`.
+- `API_KEY_GPG_FILE` / `OPENROUTER_API_KEY_GPG_FILE` config key support.
+- GPG availability and encrypted-key presence checks in `--doctor`.
+
+### Changed
+- API-key loading now checks environment, config, and optional GPG encrypted file.
+
+### Documentation
+- Updated man page with GPG API-key storage behavior.
+
+### Notes
+- GPG support shells out to the user's `gpg` command and never prints the decrypted key.
+
+## 3.6
+
+### Added
+- Optional GPG-encrypted API-key loading through `api-key.gpg`.
+- `API_KEY_GPG_FILE` / `OPENROUTER_API_KEY_GPG_FILE` config key support.
+- GPG availability and encrypted-key presence checks in `--doctor`.
+
+### Changed
+- API-key loading now checks environment, config, and optional GPG encrypted file.
+
+### Documentation
+- Updated man page with GPG API-key storage behavior.
+
+### Notes
+- GPG support shells out to the user's `gpg` command and never prints the decrypted key.
+
 3.5
 
 ### Added
