@@ -1,4 +1,34 @@
 # Changelog## 
+## 3.10
+
+### Added
+- `--set-api-key` now offers runtime-only, GPG-encrypted, and plaintext storage choices.
+- GPG status is shown during API-key entry.
+- Encrypted key saving writes to API_KEY_GPG_FILE when gpg is available.
+
+### Changed
+- Plaintext API-key saving now appears only after the user explicitly chooses plaintext storage.
+- Failed or unavailable GPG storage falls back to runtime-only key use instead of silently using plaintext.
+
+### Documentation
+- Updated man page API-key storage section.
+
+## 3.10
+
+### Added
+- GPG encrypted API-key save option in --set-api-key / :set-api-key flow.
+- "gpg not found" status when encrypted storage is unavailable.
+- API_KEY_GPG_FILE / OPENROUTER_API_KEY_GPG_FILE documentation in man page.
+
+### Changed
+- API-key setup now offers runtime-only, encrypted GPG, and plaintext config storage paths.
+- Plaintext config storage now appears only after an explicit warning.
+- Encrypted save removes old plaintext API-key config entries when successful.
+
+### Documentation
+- Updated man page API-key/GPG storage section.
+- Expanded comments around GPG handling and plaintext fallback rules.
+
 ## 3.9
 
 ### Added
