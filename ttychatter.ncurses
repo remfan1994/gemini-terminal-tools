@@ -74,7 +74,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-VERSION = "0.14.1"
+VERSION = "0.14.2"
 PROGRAM = "ttychatter.ncurses"
 FALLBACK_MODEL = "openrouter/auto"
 DEFAULT_MODEL_TEST_PROMPT = "Please reply with one short sentence confirming this model is available for text generation."
@@ -304,6 +304,72 @@ def decrypt_gpg_file(path: Path) -> str:
     return proc.stdout.strip()
 
 
+def save_gpg_encrypted_api_key(key: str, path: Path) -> Tuple[bool, str]:
+    """Encrypt an API key into a dedicated GPG file.
+
+    This routine is intentionally verbose because it is a security-sensitive
+    bridge between ttychatter's terminal UI and the user's external GPG setup.
+    ttychatter does not implement cryptography itself. Instead it writes the
+    pasted key to a temporary file with private permissions, temporarily yields
+    the curses display so that GPG/pinentry can interact with the user, and asks
+    the user's local `gpg` program to create an armored symmetric ciphertext.
+
+    Maintainers should preserve several invariants:
+      * never print the API key;
+      * never log the API key;
+      * delete the temporary plaintext file even if GPG fails;
+      * do not silently fall back to plaintext if GPG is missing;
+      * keep this as an explicit user choice, not a surprise side effect.
+
+    The function returns (ok, message). The message is safe to display because
+    it contains paths/status only, never the secret value.
+    """
+    if shutil.which("gpg") is None:
+        return False, "gpg not found; encrypted API-key storage is unavailable"
+
+    path = expand_path(str(path))
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    tmp_path: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, prefix="ttychatter-api-key-", suffix=".txt") as tmp:
+            tmp.write(key.strip() + "\n")
+            tmp_path = Path(tmp.name)
+        try:
+            os.chmod(tmp_path, 0o600)
+        except OSError:
+            pass
+
+        # GPG may need to prompt through pinentry or the terminal. Running it
+        # while curses owns the screen can hide the prompt or garble the UI, so
+        # we temporarily restore the terminal. curses.wrapper will restore
+        # normal screen handling after this helper returns to the UI loop.
+        try:
+            curses.endwin()
+        except curses.error:
+            pass
+        print(f"ttychatter: encrypting API key with gpg -> {path}", file=sys.stderr)
+        proc = subprocess.run([
+            "gpg", "--yes", "--armor", "--symmetric", "--cipher-algo", "AES256",
+            "--output", str(path), str(tmp_path)
+        ], check=False)
+        if proc.returncode != 0:
+            return False, "gpg encryption failed; API key was not saved"
+
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        return True, f"encrypted API key saved to {path}"
+    finally:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
+
+
 # ------------------------------------------------------------
 # MAINTAINER COMMENTARY: def load_config
 # Reads the shared KEY=VALUE config file. This is deliberately not TOML/YAML/JSON because Bash-
@@ -443,6 +509,45 @@ def set_config_value(cfg: Config, key: str, value: str) -> None:
         new_lines.append(f"{key}={value}")
 
     cfg.config_file.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    try:
+        os.chmod(cfg.config_file, 0o600)
+    except OSError:
+        pass
+
+
+def remove_config_key(cfg: Config, key: str) -> None:
+    """Remove one KEY=VALUE entry from the config file if it exists.
+
+    This small helper matters for secret hygiene.  When the user chooses GPG
+    encrypted key storage, keeping an older plaintext OPENROUTER_API_KEY line
+    would silently defeat the point.  Deleting the plaintext key is therefore
+    part of the encrypted-save workflow, not a cosmetic cleanup.
+    """
+    if not cfg.config_file.exists():
+        return
+    lines = cfg.config_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    new_lines = [line for line in lines if not line.strip().startswith(f"{key}=")]
+    cfg.config_file.write_text("\n".join(new_lines) + ("\n" if new_lines else ""), encoding="utf-8")
+    try:
+        os.chmod(cfg.config_file, 0o600)
+    except OSError:
+        pass
+
+
+def remove_config_key(cfg: Config, key: str) -> None:
+    """Remove a KEY=VALUE entry from the config file if present.
+
+    The encrypted-key workflow uses this to clean up plaintext API-key entries
+    after successfully writing api-key.gpg.  Keeping the removal helper small
+    and explicit prevents a common security footgun: users select encrypted
+    storage but an older plaintext OPENROUTER_API_KEY line remains in the config
+    and silently takes precedence on the next launch.
+    """
+    if not cfg.config_file.exists():
+        return
+    lines = cfg.config_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    kept = [line for line in lines if not line.strip().startswith(f"{key}=")]
+    cfg.config_file.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
     try:
         os.chmod(cfg.config_file, 0o600)
     except OSError:
@@ -1987,6 +2092,28 @@ class AICursesApp:
     # Curses drawing and style helpers
     # ------------------------------------------------------------------
 
+    def normal_attr(self) -> int:
+        """Return ordinary foreground text attributes for the current theme.
+
+        Keeping even "normal" in a helper matters because future ports and
+        theme work need a single semantic vocabulary: normal user-visible text,
+        dim metadata, reverse selections, and warning emphasis.  Calling
+        curses.A_NORMAL directly throughout the program would make it harder
+        for a maintainer to change the visual language consistently.
+        """
+        return curses.A_NORMAL
+
+    def warning_attr(self) -> int:
+        """Return an attention-drawing style for security warnings.
+
+        API-key storage is one of the few places where ttychatter can affect a
+        user's real-world security posture.  Plaintext warnings should therefore
+        be visible even in monochrome terminals.  We use bold rather than color
+        because color pairs are terminal-dependent and the program must remain
+        usable on low-feature terminals.
+        """
+        return curses.A_BOLD
+
     # ------------------------------------------------------------
     # MAINTAINER COMMENTARY: def dim_attr
     # Maintainer note for dim_attr: this routine is part of the long-term public behavior of the
@@ -2648,6 +2775,96 @@ class AICursesApp:
                 cursor += 1
 
     # ------------------------------------------------------------
+    # MAINTAINER COMMENTARY: def api_key_entry_modal
+    #
+    # This is intentionally not just a generic text field.  API-key storage is
+    # a security-sensitive choice, so the UI must show the storage mode at the
+    # exact moment the user pastes the key.  Earlier builds hid GPG support in
+    # the options menu while the API-key dialog still talked only about
+    # plaintext storage.  That was misleading: the place where the user decides
+    # what happens to the secret is the API-key entry screen itself.
+    #
+    # The checkbox is a visual ncurses approximation of a GUI tick box.  Space
+    # toggles it when GPG is available; if GPG is missing, the line explicitly
+    # says "gpg not found" and cannot be enabled.  The returned boolean means
+    # "encrypt this key using external gpg before saving."  If the user leaves
+    # the checkbox off, the caller may still offer plaintext saving, but the
+    # plaintext warning must appear only for that plaintext path.
+    # ------------------------------------------------------------
+    def api_key_entry_modal(self) -> Tuple[Optional[str], bool]:
+        value = ""
+        cursor = 0
+        use_gpg = False
+        gpg_available = shutil.which("gpg") is not None
+
+        while True:
+            self.stdscr.erase()
+            height, width = self.stdscr.getmaxyx()
+            box_w = min(width - 4, 88)
+            box_h = 13
+            top = max(0, (height - box_h) // 2)
+            left = max(0, (width - box_w) // 2)
+            field_w = box_w - 6
+            masked = "*" * max(0, len(value) - 4) + value[-4:]
+            shown = masked[max(0, cursor - field_w + 1):][:field_w]
+
+            self.safe_addstr(top, left, "+" + "-" * (box_w - 2) + "+", attr=self.reverse_attr())
+            self.safe_addstr(top + 1, left, "|" + "API KEY".center(box_w - 2) + "|", attr=self.reverse_attr())
+            self.safe_addstr(top + 2, left, "+" + "-" * (box_w - 2) + "+", attr=self.reverse_attr())
+            self.safe_addstr(top + 3, left + 2, "Paste OpenRouter API key. Enter=accept. Esc=cancel.", box_w - 4)
+            self.safe_addstr(top + 5, left + 2, " " * field_w, field_w, self.reverse_attr())
+            self.safe_addstr(top + 5, left + 2, shown, field_w, self.reverse_attr())
+
+            if gpg_available:
+                checkbox = "[x] encrypt with gpg" if use_gpg else "[ ] encrypt with gpg"
+                attr = self.reverse_dim_attr() if use_gpg else self.dim_attr()
+            else:
+                checkbox = "[ ] encrypt with gpg (gpg not found)"
+                attr = self.dim_attr()
+            self.safe_addstr(top + 7, left + 2, checkbox, box_w - 4, attr)
+
+            if use_gpg:
+                hint = f"GPG file: {self.cfg.effective_api_key_gpg_file}"
+            elif gpg_available:
+                hint = "Space toggles GPG encryption. If left unticked, plaintext saving will warn you."
+            else:
+                hint = "Install gpg to enable encrypted API-key storage."
+            self.safe_addstr(top + 8, left + 2, hint, box_w - 4, self.dim_attr())
+            self.safe_addstr(top + 10, left + 2, "Space=toggle GPG | Enter=accept | Esc=cancel | Backspace=edit", box_w - 4, self.dim_attr())
+            self.safe_addstr(top + 12, left, "+" + "-" * (box_w - 2) + "+", attr=self.reverse_attr())
+            self.stdscr.refresh()
+
+            ch = self.stdscr.getch()
+            if self.handle_global_hotkey(ch):
+                return None, False
+            if ch in (10, 13, curses.KEY_ENTER):
+                return value.strip() or None, use_gpg
+            if ch == 27:
+                return None, False
+            if ch == 32:
+                if gpg_available:
+                    use_gpg = not use_gpg
+                continue
+            if ch in (curses.KEY_BACKSPACE, 127, 8):
+                if cursor > 0:
+                    value = value[: cursor - 1] + value[cursor:]
+                    cursor -= 1
+            elif ch == curses.KEY_DC:
+                if cursor < len(value):
+                    value = value[:cursor] + value[cursor + 1:]
+            elif ch == curses.KEY_LEFT:
+                cursor = max(0, cursor - 1)
+            elif ch == curses.KEY_RIGHT:
+                cursor = min(len(value), cursor + 1)
+            elif ch == curses.KEY_HOME:
+                cursor = 0
+            elif ch == curses.KEY_END:
+                cursor = len(value)
+            elif 32 <= ch <= 126:
+                value = value[:cursor] + chr(ch) + value[cursor:]
+                cursor += 1
+
+    # ------------------------------------------------------------
     # MAINTAINER COMMENTARY: def run_external_editor
     # Maintainer note for run_external_editor: this routine is part of the long-term public
     # behavior of the program. When changing it, check callers, documentation, config
@@ -2880,19 +3097,114 @@ class AICursesApp:
     # compatibility, session-log compatibility, and the parallel Bash/C implementation plans.
     # ------------------------------------------------------------
     def open_api_key_input(self) -> None:
-        key = self.text_input_modal("API KEY", "Paste OpenRouter API key. It is used for this run unless you choose to save it.", secret=True)
-        if not key:
-            self.status = "API key entry cancelled"
-            return
-        self.cfg.api_key = key
-        if self.ask_yes_no("SAVE API KEY", "Save OPENROUTER_API_KEY to config? This stores it in plaintext. Default is no.", default=False):
-            set_config_value(self.cfg, "OPENROUTER_API_KEY", key)
-            self.status = "API key saved to config"
-        else:
-            self.status = "API key active for this run only"
-        if self.ask_yes_no("FORGET API KEY", "Forget the runtime API key now? Default is no.", default=False):
-            self.cfg.api_key = ""
-            self.status = "API key forgotten for this run"
+        """Open the first-class API-key entry workflow.
+
+        Earlier builds treated GPG as a background config option while the F3
+        API-key screen still looked like a plaintext-only workflow. That was a
+        UX mismatch: users should see the storage choice at the moment they are
+        pasting the secret. This screen therefore keeps the actual key input and
+        the "Encrypt with GPG" checkbox together. If gpg is not installed, the
+        checkbox is replaced by a visible "gpg not found" line so users do not
+        waste time searching the options menu for a feature their system cannot
+        currently use.
+
+        Important terminal mechanics: the key is edited in-memory, masked on
+        screen, and never appended to the transcript. Enter accepts. Space
+        toggles the GPG checkbox if available. Function keys remain global so
+        the user can escape to another feature screen without first pressing
+        Esc. Saving with GPG may temporarily leave curses mode so GPG/pinentry
+        can display its own prompt.
+        """
+        key = ""
+        cursor = 0
+        encrypt_with_gpg = False
+        gpg_path = shutil.which("gpg")
+
+        while True:
+            self.stdscr.erase()
+            height, width = self.stdscr.getmaxyx()
+            box_w = min(width - 4, 86)
+            box_h = 14
+            top = max(0, (height - box_h) // 2)
+            left = max(0, (width - box_w) // 2)
+            field_w = max(8, box_w - 8)
+
+            masked = ("*" * max(0, len(key) - 4) + key[-4:]) if key else ""
+            field_left = max(0, min(cursor - field_w + 1, max(0, len(masked) - field_w)))
+            shown = masked[field_left:field_left + field_w]
+
+            self.safe_addstr(top, left, "+" + "-" * (box_w - 2) + "+", attr=self.reverse_attr())
+            self.safe_addstr(top + 1, left, "|" + "API KEY".center(box_w - 2) + "|", attr=self.reverse_attr())
+            self.safe_addstr(top + 2, left, "+" + "-" * (box_w - 2) + "+", attr=self.reverse_attr())
+            self.safe_addstr(top + 3, left + 2, "Paste OpenRouter API key. Runtime use is immediate; storage is your choice.", box_w - 4)
+            self.safe_addstr(top + 5, left + 2, "Key:", box_w - 4)
+            self.safe_addstr(top + 6, left + 2, " " * field_w, field_w, self.reverse_attr())
+            self.safe_addstr(top + 6, left + 2, shown, field_w, self.reverse_attr())
+
+            if gpg_path:
+                checkbox = "[x]" if encrypt_with_gpg else "[ ]"
+                self.safe_addstr(top + 8, left + 2, f"{checkbox} encrypt with gpg", box_w - 4, self.dim_attr() if not encrypt_with_gpg else self.normal_attr())
+                self.safe_addstr(top + 9, left + 2, f"GPG: {gpg_path}", box_w - 4, self.dim_attr())
+            else:
+                self.safe_addstr(top + 8, left + 2, "[ ] encrypt with gpg  (gpg not found)", box_w - 4, self.dim_attr())
+                self.safe_addstr(top + 9, left + 2, "Install gpg or set API_KEY_GPG_FILE manually after creating a key file.", box_w - 4, self.dim_attr())
+
+            self.safe_addstr(top + 11, left + 2, "Space=toggle GPG | Enter=accept | Esc=cancel | Backspace=edit", box_w - 4, self.dim_attr())
+            self.safe_addstr(top + 12, left + 2, "Plaintext save warns separately; encrypted save writes api-key.gpg.", box_w - 4, self.dim_attr())
+            self.safe_addstr(top + 13, left, "+" + "-" * (box_w - 2) + "+", attr=self.reverse_attr())
+            self.stdscr.refresh()
+
+            ch = self.stdscr.getch()
+            if self.handle_global_hotkey(ch):
+                return
+            if ch == ord(" "):
+                if gpg_path:
+                    encrypt_with_gpg = not encrypt_with_gpg
+                else:
+                    self.status = "gpg not found; encrypted API-key storage unavailable"
+                continue
+            if ch in (10, 13, curses.KEY_ENTER):
+                key = key.strip()
+                if not key:
+                    self.status = "API key entry cancelled: empty key"
+                    return
+                self.cfg.api_key = key
+                if encrypt_with_gpg:
+                    ok, message = save_gpg_encrypted_api_key(key, self.cfg.effective_api_key_gpg_file)
+                    if ok:
+                        set_config_value(self.cfg, "API_KEY_GPG_FILE", str(self.cfg.effective_api_key_gpg_file))
+                        remove_config_key(self.cfg, "OPENROUTER_API_KEY")
+                        remove_config_key(self.cfg, "TTYCHATTER_API_KEY")
+                    self.status = message
+                    return
+
+                if self.ask_yes_no("SAVE PLAINTEXT API KEY", "Key stored in plaintext if saved. Save OPENROUTER_API_KEY to config? Default is no.", default=False):
+                    set_config_value(self.cfg, "OPENROUTER_API_KEY", key)
+                    self.status = "API key saved to config in plaintext"
+                else:
+                    self.status = "API key active for this run only"
+                return
+            if ch == 27:
+                self.status = "API key entry cancelled"
+                return
+            if ch in (curses.KEY_BACKSPACE, 127, 8):
+                if cursor > 0:
+                    key = key[: cursor - 1] + key[cursor:]
+                    cursor -= 1
+            elif ch == curses.KEY_DC:
+                if cursor < len(key):
+                    key = key[:cursor] + key[cursor + 1:]
+            elif ch == curses.KEY_LEFT:
+                cursor = max(0, cursor - 1)
+            elif ch == curses.KEY_RIGHT:
+                cursor = min(len(key), cursor + 1)
+            elif ch == curses.KEY_HOME:
+                cursor = 0
+            elif ch == curses.KEY_END:
+                cursor = len(key)
+            elif 32 <= ch <= 126:
+                key = key[:cursor] + chr(ch) + key[cursor:]
+                cursor += 1
 
     # ------------------------------------------------------------
     # MAINTAINER COMMENTARY: def show_model_info
@@ -3698,7 +4010,7 @@ class AICursesApp:
                 {"key": "STARTUP_NOTICE", "label": "Startup Project Lead notice", "kind": "bool", "value": self.cfg.startup_notice},
                 {"key": "DEMO_MODE", "label": "Demo mode", "kind": "bool", "value": self.cfg.demo_mode},
                 {"key": "CONFIRM_LIVE_SEND", "label": "Confirm first live send", "kind": "bool", "value": self.cfg.confirm_live_send},
-                {"key": "API_KEY_GPG_FILE", "label": "GPG API-key file", "kind": "text", "value": str(self.cfg.effective_api_key_gpg_file)},
+                {"key": "API_KEY_GPG_FILE", "label": "GPG API-key file" + ("" if shutil.which("gpg") else " (gpg not found)"), "kind": "text", "value": str(self.cfg.effective_api_key_gpg_file)},
             ]
 
         # ------------------------------------------------------------

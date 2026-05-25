@@ -1,100 +1,78 @@
-TTYCHATTER.PYTHON(1)        User Commands        TTYCHATTER.PYTHON(1)
+TTYCHATTER.PYTHON(1)       User Commands       TTYCHATTER.PYTHON(1)
 
 NAME
-    ttychatter.python - Bash terminal client with Python 3 helper routines
+    ttychatter.python - Bash OpenRouter chat client with Python 3 helpers
 
 SYNOPSIS
     ttychatter.python [session]
-    ttychatter.python --resume <session|session.log|/path/session.log>
-    ttychatter.python --models [--all] [--model-type TYPE]
+    ttychatter.python --demo [session]
+    ttychatter.python --models
     ttychatter.python --routers
-    ttychatter.python --update-models
-    ttychatter.python --test-model <model_id>
-    ttychatter.python --select-model
+    ttychatter.python --test-model MODEL
+    ttychatter.python --set-api-key
+    ttychatter.python --forget-api-key
     ttychatter.python --doctor
-    ttychatter.python --demo
     ttychatter.python --version
-    ttychatter.python --loopback
-    ttychatter.python --loopback-file <path>
     ttychatter.python --help
 
 DESCRIPTION
-    ttychatter.python is the full line-oriented terminal client for
-    ttychatter. Bash orchestrates the user workflow and Python 3 helper snippets
-    handle JSON, URL/path handling, attachment extraction, and log parsing.
+    ttychatter.python is the practical line-oriented Bash client. It uses Bash
+    for orchestration, curl for OpenRouter HTTPS calls, and Python 3 helper
+    snippets for JSON, URL escaping, path expansion, and safer parsing.
 
-ROUTERS AND FIXED MODELS
-    OpenRouter model catalogs contain fixed model IDs and router-like entries.
-    Use these commands to inspect model types:
+RUNTIME COMMANDS
+    During interactive chat, colon commands are local ttychatter commands and
+    are not sent to the AI model:
 
-        ttychatter.python --routers
-        ttychatter.python --models --model-type routers
-        ttychatter.python --models --model-type fixed
-        ttychatter.python --models --model-type free
-        ttychatter.python --models --model-type auto
-
-RUNTIME COMMAND MODE
-    During interactive chat, inputs beginning with ':' are local commands rather
-    than messages to OpenRouter. Examples:
         :help
         :models
         :routers
         :select-model
-        :test-model openrouter/auto
-        :set CONTEXT_TURNS 20
+        :test-model MODEL
+        :favorites
+        :favorite MODEL
+        :unfavorite MODEL
+        :config
+        :set KEY VALUE
+        :unset KEY
+        :set-api-key
+        :forget-api-key
         :memory
-        :attach ./notes.txt
+        :attach FILE
+        :editor
         :credits
+        :doctor
         :quit
 
-LOOPBACK OUTPUT
-    ttychatter.python --loopback
-        Sends interface text to stderr and clean AI responses to stdout so the
-        output can be piped into another program.
+API KEY STORAGE
+    --set-api-key now presents storage choices:
 
-DEMO MODE
-    --demo provides local model rows and local AI responses. It is useful for
-    testing sessions, command mode, and attachment extraction without making
-    OpenRouter chat requests.
+        1) runtime only
+        2) encrypted with gpg
+        3) plaintext config
+
+    If gpg is not installed, the command prints "gpg not found" and keeps the
+    key runtime-only when encrypted storage is requested.
+
+    Plaintext storage is still supported, but only after an explicit warning.
 
 CONFIGURATION
-    Config file:
+    Default config file:
         ~/.config/ttychatter/openrouter/config
 
-    Model-related keys include MODEL, MODEL_TYPE_FILTER, MODEL_FAVORITES_FILE, THEME, SEND_INPUT, CODE_ATTACHMENT_MIN_LINES, MODEL_SORT_ORDER,
-    MODEL_FILTER_REQUIRE_TOKENS, MODEL_FILTER_HIDE_PREVIEW, and token-limit
-    filters.  Supported MODEL_TYPE_FILTER, MODEL_FAVORITES_FILE, THEME, SEND_INPUT, CODE_ATTACHMENT_MIN_LINES values are all, routers, fixed, free,
-    and auto.
-
-
-MODEL FAVORITES
-    Model favorites/bookmarks are stored as plain text and are shared with
-    model-list sorting/filtering where the client supports it.
-
-    Commands:
-        ttychatter.python --favorites
-        ttychatter.python --favorite-model <model_id>
-        ttychatter.python --unfavorite-model <model_id>
-
-    Runtime commands inside chat:
-        :favorites
-        :favorite <model_id>
-        :unfavorite <model_id>
-
-DISPLAY AND SEND CONFIGURATION
-    THEME controls the line-oriented display profile where meaningful.
-    Supported values include default, dim, high_contrast, mono, and
-    solarized_dark. Bash clients only emit ANSI styling when stdout is a
-    terminal; loopback/pipeline output remains plain text.
-
-    SEND_INPUT controls the interactive input loop.  ctrl_d keeps the classic
-    multiline Bash behavior.  enter reads one line per message.  ctrl_enter is
-    terminal-dependent and is not reliable in line-oriented Bash clients.
-
-CODE BLOCK ATTACHMENT THRESHOLD
-    CODE_ATTACHMENT_MIN_LINES controls when generated fenced code blocks are
-    saved as attachments.  Shorter blocks remain inline so ordinary short code
-    examples do not disappear from the transcript.
+    Relevant keys:
+        OPENROUTER_API_KEY
+        API_KEY_GPG_FILE
+        THEME
+        SEND_INPUT
+        MODEL
+        MODEL_TYPE_FILTER
+        MODEL_SORT_ORDER
+        CONTEXT_TURNS
+        SESSION_DIR
+        ATTACHMENT_DIR
+        MODEL_CACHE_FILE
+        CODE_ATTACHMENT_MIN_LINES
 
 VERSION
-    ttychatter.python version 3.9
+    ttychatter.python version 3.10

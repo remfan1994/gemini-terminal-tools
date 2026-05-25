@@ -1,145 +1,119 @@
-TTYCHATTER.NCURSES(1)        User Commands        TTYCHATTER.NCURSES(1)
+TTYCHATTER.NCURSES(1)      User Commands      TTYCHATTER.NCURSES(1)
 
 NAME
-    ttychatter.ncurses - full-screen terminal chat client for OpenRouter
+    ttychatter.ncurses - full-screen ncurses OpenRouter chat client
 
 SYNOPSIS
-    ttychatter.ncurses
-    ttychatter.ncurses <session_name>
-    ttychatter.ncurses --resume <session|session.log|/path/session.log>
-    ttychatter.ncurses --list
-    ttychatter.ncurses --models [--model-type TYPE]
+    ttychatter.ncurses [session]
+    ttychatter.ncurses --demo [session]
+    ttychatter.ncurses --resume SESSION_OR_LOG
+    ttychatter.ncurses --models
     ttychatter.ncurses --routers
-    ttychatter.ncurses --update-models
-    ttychatter.ncurses --test-model <model_id>
+    ttychatter.ncurses --test-model MODEL
     ttychatter.ncurses --doctor
-    ttychatter.ncurses --demo
     ttychatter.ncurses --version
-    ttychatter.ncurses --loopback-file <path>
     ttychatter.ncurses --help
 
 DESCRIPTION
-    ttychatter.ncurses is the primary full-screen terminal interface for the
-    ttychatter project. It is designed to make browser interfaces unnecessary
-    for text-message-style AI work from a terminal. It talks to OpenRouter by
-    default, uses cached model metadata, stores sessions as plain text logs,
-    and saves long code blocks as local attachments.
+    ttychatter.ncurses is the full-screen terminal interface for ttychatter.
+    It is OpenRouter-first and is intended to provide a browser-free chat
+    client with sessions, model browsing, favorites, attachments, themes,
+    diagnostics, GPG-aware API-key storage, and mouse/key-driven terminal UI.
 
-DEMO MODE
-    --demo runs ttychatter.ncurses without OpenRouter network calls.
+USAGE
+    Start in normal mode:
+        ttychatter.ncurses
 
-    Demo mode supplies local model metadata and local AI responses. It is
-    intended for release-candidate testing, UI testing, model-browser testing,
-    attachment extraction testing, session testing, and first-time exploration
-    without spending OpenRouter credits or sending fake prompts.
+    Test without network chat calls:
+        ttychatter.ncurses --demo
 
-MODEL BROWSER
-    The model browser is table-like. It supports typed search, favorites,
-    metadata filters, model tests, and sorting. Cached model lists are preferred.
-    Updating the model list contacts OpenRouter only after confirmation.
-
-    Keys inside the browser:
-        /       Search by typed string.
-        b       Toggle favorite/bookmark for the highlighted model.
-        o       Cycle model sort method forward.
-        O       Cycle model sort method backward.
-        f       Open model filter/options screen.
-        t       Test highlighted model.
-        i       Show model metadata.
-        s       Save highlighted model to config.
-        Enter   Activate highlighted model for the current run.
-        j/k     Move down/up.
-
-ROUTERS AND FIXED MODELS
-    OpenRouter exposes both fixed model IDs and router-like entries.  A fixed
-    model is a concrete model route.  Entries such as openrouter/auto and
-    openrouter/free are provider-defined routing choices.
-
-    In the model menu, choose Router shortcuts to open a dropdown containing:
-        openrouter/auto
-        openrouter/free
-        other cached OpenRouter router entries, when present
-
-    Command-line equivalents:
-        ttychatter.ncurses --routers
-        ttychatter.ncurses --models --model-type routers
-        ttychatter.ncurses --models --model-type fixed
-        ttychatter.ncurses --models --model-type free
-        ttychatter.ncurses --models --model-type auto
-
-THEMES
-    ttychatter.ncurses supports theme/style profiles through the options menu
-    and config file:
-
-        THEME=default
-        THEME=dim
-        THEME=high_contrast
-        THEME=mono
-        THEME=solarized_dark
-
-    Themes are terminal-attribute profiles. They cannot guarantee exact colors
-    on every terminal emulator, but they centralize how user text, AI text,
-    placeholders, command bars, headers, and selections are emphasized.
+    Resume a session by name, .log filename, or path:
+        ttychatter.ncurses --resume notes
+        ttychatter.ncurses --resume notes.log
+        ttychatter.ncurses --resume ~/.local/share/ttychatter/openrouter/sessions/notes.log
 
 CONTROLS
-    F1        Help / command menu.
-    F2        Model menu and model browser.
-    F3        API key tools.
-    F4        Sessions: switch, new chat, rename, delete.
-    F5        Options.
-    F6        Memory.
-    F7        Files / attachments.
-    F8        External editor.
-    F9        Credits.
-    F10       Quit.
+    F1      Help / command menu
+    F2      Model browser
+    F3      API-key manager
+    F4      Session browser
+    F5      Options
+    F6      Memory
+    F7      Files / attachments
+    F8      Editor
+    F9      Credits
+    F10     Quit
 
-    Enter     Sends by default when SEND_INPUT=enter.
-    Ctrl+G    Reliable alternate send key.
-    Ctrl+T    Quick attach file for the next request.
-    j/k       Move in menus, lists, model browser, memory, files, and editor
-              screens.
+    Enter   Send or newline depending on SEND_INPUT
+    Ctrl+G  Send where configured/available
+    Ctrl+T  Quick attach file
+    j/k     Move down/up in menu and list screens
+
+API KEY STORAGE
+    The F3 API-key screen supports three practical storage modes:
+
+        runtime only
+            The key is active only for the current run.
+
+        encrypt with gpg
+            The API-key entry screen shows a tickable "encrypt with gpg"
+            option.  If gpg is installed, ticking this option stores the key in
+            API_KEY_GPG_FILE using the external gpg command.
+
+        plaintext config
+            If the GPG checkbox is not ticked and the user chooses to save,
+            ttychatter warns that the key will be stored in plaintext.
+
+    If gpg is not installed, the API-key screen and options screen indicate:
+
+        gpg not found
+
+    Environment variables remain preferred for unattended use:
+
+        OPENROUTER_API_KEY
+        TTYCHATTER_API_KEY
 
 CONFIGURATION
-    Config file:
+    Default config file:
         ~/.config/ttychatter/openrouter/config
 
     Important keys:
         OPENROUTER_API_KEY
-        TTYCHATTER_API_KEY
         API_KEY_GPG_FILE
-        CONFIRM_LIVE_SEND=1|0
+        THEME
+        SEND_INPUT
         MODEL
-        DEMO_MODE=1|0
-        THEME=default|dim|high_contrast|mono|solarized_dark
-        SEND_INPUT=enter|ctrl_g|ctrl_enter
-        PROMPT_SESSION_NAME=1|0
+        MODEL_TYPE_FILTER
+        MODEL_SORT_ORDER
         CONTEXT_TURNS
         SESSION_DIR
         ATTACHMENT_DIR
         MODEL_CACHE_FILE
         CODE_ATTACHMENT_MIN_LINES
-        MODEL_FILTER_CHAT_COMPLETIONS
-        MODEL_FILTER_REQUIRE_TOKENS
-        MODEL_FILTER_HIDE_PREVIEW
-        MODEL_TYPE_FILTER=all|routers|fixed|free|auto
-        MODEL_MIN_INPUT_TOKENS
-        MODEL_MIN_OUTPUT_TOKENS
-        MODEL_SORT_ORDER=favorites|type|api|name|display|input-desc|output-desc
+        CONFIRM_LIVE_SEND
 
-DEFAULT DIRECTORIES
-    config:      ~/.config/ttychatter/openrouter/config
-    sessions:    ~/.local/share/ttychatter/openrouter/sessions/
-    attachments: ~/.local/share/ttychatter/openrouter/attachments/
-    cache:       ~/.cache/ttychatter/openrouter/models.json
+GPG NOTES
+    GPG support is optional. ttychatter uses the external gpg command instead
+    of implementing cryptography internally. The decrypted API key is never
+    printed in diagnostics, logs, or transcripts.
 
-ATTACHMENTS
-    Short fenced code blocks remain inline. Long fenced code blocks are saved
-    into ATTACHMENT_DIR once they meet CODE_ATTACHMENT_MIN_LINES.
+MODEL BROWSER
+    The F2 model browser supports cached OpenRouter model lists, search,
+    sorting, favorites/bookmarks, router/fixed/free/auto filters, and explicit
+    user-controlled network refresh.
 
-LOOPBACK OUTPUT
-    ttychatter.ncurses --loopback-file <path>
-        Appends each AI response to the named file while the full-screen
-        ncurses interface remains active.
+FILES
+    Sessions:
+        ~/.local/share/ttychatter/openrouter/sessions/
+
+    Attachments:
+        ~/.local/share/ttychatter/openrouter/attachments/
+
+    Model cache:
+        ~/.cache/ttychatter/openrouter/models.json
+
+    GPG API key:
+        ~/.config/ttychatter/openrouter/api-key.gpg
 
 VERSION
-    ttychatter.ncurses version 0.14.0
+    ttychatter.ncurses version 0.14.2

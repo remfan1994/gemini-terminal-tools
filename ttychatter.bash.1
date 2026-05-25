@@ -1,87 +1,73 @@
-TTYCHATTER.BASH(1)          User Commands          TTYCHATTER.BASH(1)
+TTYCHATTER.BASH(1)         User Commands         TTYCHATTER.BASH(1)
 
 NAME
-    ttychatter.bash - dependency-light Bash-only terminal client
+    ttychatter.bash - dependency-light Bash-only OpenRouter chat client
 
 SYNOPSIS
     ttychatter.bash [session]
-    ttychatter.bash --resume <session|session.log|/path/session.log>
-    ttychatter.bash --models [--model-type TYPE]
+    ttychatter.bash --demo [session]
+    ttychatter.bash --models
     ttychatter.bash --routers
-    ttychatter.bash --update-models
-    ttychatter.bash --test-model <model_id>
-    ttychatter.bash --select-model
+    ttychatter.bash --test-model MODEL
+    ttychatter.bash --set-api-key
+    ttychatter.bash --forget-api-key
     ttychatter.bash --doctor
-    ttychatter.bash --demo
     ttychatter.bash --version
-    ttychatter.bash --loopback
-    ttychatter.bash --loopback-file <path>
     ttychatter.bash --help
 
 DESCRIPTION
-    ttychatter.bash is the Bash-only edition of ttychatter. It avoids Python and
-    remains dependency-light while still providing an end-user interactive chat
-    client with sessions, model tools, memory, logs, and attachment attempts.
+    ttychatter.bash is the Bash-only implementation. It avoids Python and keeps
+    dependencies light while still providing sessions, model tools, attachments,
+    loopback, GPG-aware API-key storage, and local colon commands.
 
-ROUTERS AND FIXED MODELS
-    The Bash-only edition can filter model-list output by OpenRouter type:
+RUNTIME COMMANDS
+    Colon commands typed at the chat prompt are handled locally and are not sent
+    to the AI model:
 
-        ttychatter.bash --routers
-        ttychatter.bash --models --model-type routers
-        ttychatter.bash --models --model-type fixed
-        ttychatter.bash --models --model-type free
-        ttychatter.bash --models --model-type auto
-
-    Without jq, model metadata parsing is best-effort. The client remains
-    usable because exact model IDs can still be entered and tested.
-
-RUNTIME COMMAND MODE
-    Inputs beginning with ':' are local commands rather than messages to
-    OpenRouter. Examples:
         :help
         :models
         :routers
         :select-model
-        :test-model openrouter/auto
+        :test-model MODEL
+        :config
+        :set KEY VALUE
+        :unset KEY
+        :set-api-key
+        :forget-api-key
         :memory
-        :attach ./notes.txt
+        :attach FILE
+        :editor
         :credits
+        :doctor
         :quit
 
-LOOPBACK OUTPUT
-    ttychatter.bash --loopback
-        Sends interface text to stderr and clean AI responses to stdout so the
-        output can be piped into another program.
+API KEY STORAGE
+    --set-api-key presents storage choices:
 
+        runtime only
+        encrypted with gpg
+        plaintext config
 
-MODEL FAVORITES
-    Model favorites/bookmarks are stored as plain text and are shared with
-    model-list sorting/filtering where the client supports it.
+    If gpg is unavailable, the command says "gpg not found" and keeps the key
+    runtime-only when encrypted storage is requested. Plaintext storage requires
+    explicit confirmation.
 
-    Commands:
-        ttychatter.bash --favorites
-        ttychatter.bash --favorite-model <model_id>
-        ttychatter.bash --unfavorite-model <model_id>
+CONFIGURATION
+    Default config file:
+        ~/.config/ttychatter/openrouter/config
 
-    Runtime commands inside chat:
-        :favorites
-        :favorite <model_id>
-        :unfavorite <model_id>
-
-DISPLAY AND SEND CONFIGURATION
-    THEME controls the line-oriented display profile where meaningful.
-    Supported values include default, dim, high_contrast, mono, and
-    solarized_dark. Bash clients only emit ANSI styling when stdout is a
-    terminal; loopback/pipeline output remains plain text.
-
-    SEND_INPUT controls the interactive input loop.  ctrl_d keeps the classic
-    multiline Bash behavior.  enter reads one line per message.  ctrl_enter is
-    terminal-dependent and is not reliable in line-oriented Bash clients.
-
-CODE BLOCK ATTACHMENT THRESHOLD
-    CODE_ATTACHMENT_MIN_LINES controls when generated fenced code blocks are
-    saved as attachments.  Shorter blocks remain inline so ordinary short code
-    examples do not disappear from the transcript.
+    Relevant keys:
+        OPENROUTER_API_KEY
+        API_KEY_GPG_FILE
+        THEME
+        SEND_INPUT
+        MODEL
+        MODEL_TYPE_FILTER
+        CONTEXT_TURNS
+        SESSION_DIR
+        ATTACHMENT_DIR
+        MODEL_CACHE_FILE
+        CODE_ATTACHMENT_MIN_LINES
 
 VERSION
-    ttychatter.bash version 0.12.0-bash-only
+    ttychatter.bash version 0.13.0-bash-only

@@ -6,7 +6,7 @@
 # Bash + Python 3 helper terminal OpenRouter AI interface.
 #
 # VERSION
-#   3.2
+#   3.10
 #
 # DESIGN ROLE
 #   This Bash edition is the lightweight, line-oriented version of
@@ -84,7 +84,7 @@
 set -o pipefail
 
 PROGRAM="ttychatter.python"
-VERSION="3.9"
+VERSION="3.10"
 
 CONFIG_DIR="$HOME/.config/ttychatter/openrouter"
 CONFIG_FILE="$CONFIG_DIR/config"
@@ -321,6 +321,55 @@ decrypt_gpg_key_file() {
   gpg --quiet --decrypt "$path" 2>/dev/null | tr -d '\r' | sed '/^[[:space:]]*$/d' | head -n 1
 }
 
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function encrypt_gpg_key_file
+# This helper is the Bash-family equivalent of the ncurses F3 checkbox labeled
+# "encrypt with gpg". It is intentionally not silent and not automatic. The user
+# chooses encrypted storage, ttychatter writes the pasted API key into a private
+# temporary file, then hands that file to the user's installed gpg command. The
+# external gpg program owns encryption, passphrase prompting, pinentry behavior,
+# and trust policy. ttychatter should never print, log, or echo the key.
+#
+# Maintaining this routine correctly matters because it is security-sensitive:
+#   * if gpg is missing, say so and do not fall back to plaintext;
+#   * delete the temporary plaintext file on every path;
+#   * chmod the resulting ciphertext where possible;
+#   * keep plaintext saving as a separate warning path.
+# ----------------------------------------------------------
+encrypt_gpg_key_file() {
+  local path="$1"
+  local secret="$2"
+  local tmp
+  local status
+
+  if ! command -v gpg >/dev/null 2>&1; then
+    printf '%s\n' "gpg not found; encrypted API-key storage unavailable" >&2
+    return 1
+  fi
+
+  mkdir -p "$(dirname "$path")"
+  tmp="$(mktemp "${TMPDIR:-/tmp}/ttychatter-api-key.XXXXXX")" || return 1
+  chmod 600 "$tmp" 2>/dev/null || true
+  printf '%s\n' "$secret" > "$tmp"
+
+  if gpg --symmetric --armor --yes --output "$path" "$tmp"; then
+    status=0
+    chmod 600 "$path" 2>/dev/null || true
+  else
+    status=$?
+  fi
+
+  rm -f "$tmp"
+  if [ "$status" -eq 0 ]; then
+    printf 'encrypted API key saved to %s\n' "$path"
+    return 0
+  fi
+
+  printf '%s\n' "gpg encryption failed; API key was not saved encrypted" >&2
+  return "$status"
+}
+
 # ==========================================================
 # CONFIG FILE SUPPORT
 # ==========================================================
@@ -539,18 +588,66 @@ require_api_key() {
 # when behavior changes.
 # ----------------------------------------------------------
 set_api_key_command() {
-  local answer key
-  printf '%s\n' "This will save OPENROUTER_API_KEY in plaintext:"
-  printf '  %s\n\n' "$CONFIG_FILE"
-  printf 'Continue? [y/N] '
-  IFS= read -r answer
-  case "$answer" in y|Y|yes|YES) ;; *) printf '%s\n' "Cancelled."; return 1 ;; esac
+  local key mode answer
+
   printf 'Paste OpenRouter API key: '
   IFS= read -r -s key
-  printf '%s\n' ""
+  printf '\n'
   [ -n "$key" ] || { printf '%s\n' "No key entered."; return 1; }
-  set_config_value "OPENROUTER_API_KEY" "$key"
-  printf 'saved OPENROUTER_API_KEY to %s\n' "$CONFIG_FILE"
+
+  printf '%s\n' "How should ttychatter store this API key?"
+  printf '%s\n' "  1) runtime only (do not store)"
+  printf '%s\n' "  2) encrypted with gpg"
+  printf '%s\n' "  3) plaintext config"
+  if command -v gpg >/dev/null 2>&1; then
+    printf '%s\n' "gpg status: available"
+  else
+    printf '%s\n' "gpg status: gpg not found (encrypted storage unavailable)"
+  fi
+  printf 'Choice [1]: '
+  IFS= read -r mode
+  mode="${mode:-1}"
+
+  case "$mode" in
+    1)
+      OPENROUTER_API_KEY="$key"
+      printf '%s\n' "API key active for this run only."
+      ;;
+    2)
+      if ! command -v gpg >/dev/null 2>&1; then
+        OPENROUTER_API_KEY="$key"
+        printf '%s\n' "gpg not found; key active for this run only."
+        return 0
+      fi
+      printf 'Encrypt API key with gpg and save to %s? [y/N] ' "$API_KEY_GPG_FILE"
+      IFS= read -r answer
+      case "$answer" in y|Y|yes|YES) ;; *) OPENROUTER_API_KEY="$key"; printf '%s\n' "Cancelled; key active for this run only."; return 0 ;; esac
+      if encrypt_gpg_key_file "$API_KEY_GPG_FILE" "$key"; then
+        OPENROUTER_API_KEY="$key"
+        set_config_value "API_KEY_GPG_FILE" "$API_KEY_GPG_FILE"
+        remove_config_key "OPENROUTER_API_KEY"
+        remove_config_key "API_KEY"
+        printf 'encrypted API key saved to %s\n' "$API_KEY_GPG_FILE"
+      else
+        OPENROUTER_API_KEY="$key"
+        printf '%s\n' "GPG encryption failed; key active for this run only."
+      fi
+      ;;
+    3)
+      printf '%s\n' "WARNING: key will be stored in plaintext:"
+      printf '  %s\n' "$CONFIG_FILE"
+      printf 'Continue? [y/N] '
+      IFS= read -r answer
+      case "$answer" in y|Y|yes|YES) ;; *) OPENROUTER_API_KEY="$key"; printf '%s\n' "Cancelled; key active for this run only."; return 0 ;; esac
+      OPENROUTER_API_KEY="$key"
+      set_config_value "OPENROUTER_API_KEY" "$key"
+      printf 'saved OPENROUTER_API_KEY to %s\n' "$CONFIG_FILE"
+      ;;
+    *)
+      OPENROUTER_API_KEY="$key"
+      printf '%s\n' "Unknown choice; key active for this run only."
+      ;;
+  esac
 }
 
 # ----------------------------------------------------------
@@ -559,7 +656,11 @@ set_api_key_command() {
 # check call sites before changing it, and update man pages/help/comments
 # when behavior changes.
 # ----------------------------------------------------------
-forget_api_key_command() { remove_config_key "OPENROUTER_API_KEY"; printf 'removed OPENROUTER_API_KEY from config if present\n'; }
+forget_api_key_command() {
+  remove_config_key "OPENROUTER_API_KEY"
+  remove_config_key "TTYCHATTER_API_KEY"
+  printf 'removed plaintext API-key config entries if present\n'
+}
 
 
 # ==========================================================
@@ -702,6 +803,11 @@ USAGE
     $PROGRAM --doctor
     $PROGRAM --version
     $PROGRAM --help
+
+GPG API KEY STORAGE
+    --set-api-key offers runtime-only, GPG-encrypted, or plaintext config storage.
+    If gpg is not installed, the command says "gpg not found" and skips encrypted storage.
+    Plaintext saves warn before writing OPENROUTER_API_KEY to config.
 
 MODEL HELP
     Official OpenRouter model documentation:

@@ -62,7 +62,7 @@
 set -o pipefail
 
 PROGRAM="ttychatter.bash"
-VERSION="0.12.0-bash-only"
+VERSION="0.13.0-bash-only"
 CONFIG_DIR="$HOME/.config/ttychatter/openrouter"
 CONFIG_FILE="$CONFIG_DIR/config"
 MODEL_CACHE_FILE="$CONFIG_DIR/models-cache.json"
@@ -166,87 +166,38 @@ decrypt_gpg_key_file() {
   command -v gpg >/dev/null 2>&1 || return 1
   gpg --quiet --decrypt "$path" 2>/dev/null | tr -d '\r' | sed '/^[[:space:]]*$/d' | head -n 1
 }
-# ----------------------------------------------------------
-# MAINTAINER COMMENTARY: function clear_screen
-# clear_screen is part of the dependency-light client behavior. Changes
-# should preserve old-system usability and update docs/comments if behavior
-# changes.
-# ----------------------------------------------------------
-clear_screen() { [ -t 1 ] && printf '\033[H\033[J'; }
-# ----------------------------------------------------------
-# MAINTAINER COMMENTARY: function sanitize_session_name
-# sanitize_session_name is part of the dependency-light client behavior.
-# Changes should preserve old-system usability and update docs/comments if
-# behavior changes.
-# ----------------------------------------------------------
-sanitize_session_name() { printf '%s' "$1" | sed 's/[^A-Za-z0-9._-]/_/g; s/^[._-]*//; s/[._-]*$//' | awk '{print ($0==""?"session":$0)}'; }
-# ----------------------------------------------------------
-# MAINTAINER COMMENTARY: function effective_model
-# effective_model is part of the dependency-light client behavior. Changes
-# should preserve old-system usability and update docs/comments if behavior
-# changes.
-# ----------------------------------------------------------
-effective_model() { if [ -n "$MODEL" ]; then normalize_model_id "$MODEL"; else printf '%s\n' "$FALLBACK_MODEL"; fi; }
-# ----------------------------------------------------------
-# MAINTAINER COMMENTARY: function model_label
-# model_label is part of the dependency-light client behavior. Changes
-# should preserve old-system usability and update docs/comments if behavior
-# changes.
-# ----------------------------------------------------------
-model_label() { if [ -n "$MODEL" ]; then normalize_model_id "$MODEL"; else printf '%s (fallback; no MODEL configured)\n' "$FALLBACK_MODEL"; fi; }
 
 
-# ==========================================================
-# DIAGNOSTICS / DOCTOR
 # ----------------------------------------------------------
-# The bash-only edition intentionally avoids Python. Its doctor command uses
-# only shell builtins and common Unix commands to check whether the dependency-
-# light client has enough tools, storage access, and network access to run.
-# ==========================================================
+# MAINTAINER COMMENTARY: function encrypt_gpg_key_file
+# Bash-only encrypted API-key storage. This function uses the external gpg
+# command as the cryptographic engine because implementing encryption in Bash
+# would be both insecure and contrary to the purpose of using the user's normal
+# Unix tools. The temporary plaintext file is chmod 0600 where possible and is
+# always removed after gpg returns. If gpg is unavailable or fails, callers must
+# not silently save plaintext; they should leave the key runtime-only or ask the
+# user explicitly.
+# ----------------------------------------------------------
+encrypt_gpg_key_file() {
+  local path="$1"
+  local secret="$2"
+  local tmp
+  local status
 
-# ----------------------------------------------------------
-# MAINTAINER COMMENTARY: function doctor_status
-# doctor_status is part of the dependency-light client behavior. Changes
-# should preserve old-system usability and update docs/comments if behavior
-# changes.
-# ----------------------------------------------------------
-doctor_status() { printf '[%-4s] %s: %s\n' "$1" "$2" "$3"; }
-# ----------------------------------------------------------
-# MAINTAINER COMMENTARY: function check_cmd
-# check_cmd is part of the dependency-light client behavior. Changes should
-# preserve old-system usability and update docs/comments if behavior
-# changes.
-# ----------------------------------------------------------
-check_cmd() { if command -v "$1" >/dev/null 2>&1; then doctor_status OK "command $1" "$(command -v "$1")"; else doctor_status FAIL "command $1" "not found"; fi; }
-# ----------------------------------------------------------
-# MAINTAINER COMMENTARY: function check_writable_dir
-# check_writable_dir is part of the dependency-light client behavior.
-# Changes should preserve old-system usability and update docs/comments if
-# behavior changes.
-# ----------------------------------------------------------
-check_writable_dir() { mkdir -p "$1" 2>/dev/null || { printf 'not creatable: %s' "$1"; return 1; }; f="$1/.ttychatter.bash-write-test-$$"; if printf ok > "$f" 2>/dev/null; then rm -f "$f"; printf 'writable: %s' "$1"; return 0; fi; printf 'not writable: %s' "$1"; return 1; }
+  command -v gpg >/dev/null 2>&1 || { printf '%s\n' "gpg not found; encrypted API-key storage unavailable" >&2; return 1; }
+  mkdir -p "$(dirname "$path")"
+  tmp="$(mktemp "${TMPDIR:-/tmp}/ttychatter-api-key.XXXXXX")" || return 1
+  chmod 600 "$tmp" 2>/dev/null || true
+  printf '%s\n' "$secret" > "$tmp"
 
-# ----------------------------------------------------------
-# MAINTAINER COMMENTARY: function doctor_command
-# Basic diagnostics for constrained systems. It should never leak API keys
-# or require network generation calls.
-# ----------------------------------------------------------
-doctor_command() {
-  printf '%s\n\n' "${PROGRAM} bash-only diagnostics"
-  doctor_status OK program "$PROGRAM version $VERSION"
-  doctor_status OK shell "${BASH_VERSION:-unknown bash}"
-  for cmd in bash curl sed awk grep tr mktemp printf; do check_cmd "$cmd"; done
-  command -v base64 >/dev/null 2>&1 && doctor_status OK "command base64" "$(command -v base64)" || doctor_status WARN "command base64" "not found; binary attachments limited"
-  command -v file >/dev/null 2>&1 && doctor_status OK "command file" "$(command -v file)" || doctor_status WARN "command file" "not found; MIME detection falls back to extension"
-  [ -f "$CONFIG_FILE" ] && doctor_status OK "config file" "$CONFIG_FILE present" || doctor_status WARN "config file" "not found: $CONFIG_FILE"
-  [ -n "$OPENROUTER_API_KEY" ] && doctor_status OK "API key" "loaded from env/config/gpg" || doctor_status WARN "API key" "not loaded"
-  command -v gpg >/dev/null 2>&1 && doctor_status OK gpg "$(command -v gpg)" || doctor_status WARN gpg "not found; encrypted key unavailable"
-  [ -f "$API_KEY_GPG_FILE" ] && doctor_status OK "api-key.gpg" "$API_KEY_GPG_FILE present" || doctor_status WARN "api-key.gpg" "not found: $API_KEY_GPG_FILE"
-  d="$(check_writable_dir "$SESSION_DIR")"; st=$?; doctor_status $([ "$st" -eq 0 ] && printf OK || printf FAIL) "session dir" "$d"
-  d="$(check_writable_dir "$ATTACHMENT_DIR")"; st=$?; doctor_status $([ "$st" -eq 0 ] && printf OK || printf FAIL) "attachment dir" "$d"
-  d="$(check_writable_dir "$(dirname "$MODEL_CACHE_FILE")")"; st=$?; doctor_status $([ "$st" -eq 0 ] && printf OK || printf FAIL) "model cache dir" "$d"
-  [ -f "$MODEL_CACHE_FILE" ] && doctor_status OK "model cache" "$MODEL_CACHE_FILE present" || doctor_status WARN "model cache" "missing; run --update-models"
-  curl -sS --max-time 10 https://openrouter.ai/api/v1/models -H "Authorization: Bearer ${OPENROUTER_API_KEY:-dummy}" >/dev/null 2>&1 && doctor_status OK network "OpenRouter reachable" || doctor_status WARN network "OpenRouter not reachable or API key missing"
+  gpg --symmetric --armor --yes --output "$path" "$tmp"
+  status=$?
+  rm -f "$tmp"
+  if [ "$status" -eq 0 ]; then
+    chmod 600 "$path" 2>/dev/null || true
+    return 0
+  fi
+  return "$status"
 }
 
 # ==========================================================
@@ -324,6 +275,66 @@ remove_config_key() {
   chmod 600 "$CONFIG_FILE" 2>/dev/null || true
 }
 
+
+# ----------------------------------------------------------
+# MAINTAINER COMMENTARY: function set_api_key_command
+# Provides the dependency-light client with the same security choice as the
+# ncurses GUI: runtime-only by default, optional GPG-encrypted storage when gpg
+# exists, and plaintext storage only after a clear warning.  This is deliberately
+# interactive because secrets should not be written because of an accidental
+# command-line flag.  The bash-only edition cannot show a checkbox, but the
+# sequence of prompts mirrors the GUI decision points.
+# ----------------------------------------------------------
+set_api_key_command() {
+  local key encrypt_answer answer gpg_path
+
+  printf 'Paste OpenRouter API key: '
+  IFS= read -r -s key
+  printf '\n'
+  [ -n "$key" ] || { printf '%s\n' "No key entered."; return 1; }
+  OPENROUTER_API_KEY="$key"
+
+  if command -v gpg >/dev/null 2>&1; then
+    printf 'Encrypt with gpg? [y/N] '
+    IFS= read -r encrypt_answer
+    case "$encrypt_answer" in
+      y|Y|yes|YES)
+        gpg_path="$API_KEY_GPG_FILE"
+        if encrypt_gpg_key_file "$gpg_path" "$key"; then
+          save_config_value "API_KEY_GPG_FILE" "$gpg_path"
+          remove_config_key "OPENROUTER_API_KEY"
+          remove_config_key "TTYCHATTER_API_KEY"
+          printf 'saved encrypted API key to %s\n' "$gpg_path"
+          return 0
+        fi
+        printf '%s\n' "Encrypted save failed; key is active for this run only."
+        return 1
+        ;;
+    esac
+  else
+    printf '%s\n' "gpg not found; encrypted API-key storage unavailable."
+  fi
+
+  printf '%s\n' "WARNING: key stored in plaintext if saved to config."
+  printf 'Save plaintext OPENROUTER_API_KEY to %s? [y/N] ' "$CONFIG_FILE"
+  IFS= read -r answer
+  case "$answer" in
+    y|Y|yes|YES)
+      save_config_value "OPENROUTER_API_KEY" "$key"
+      printf 'saved OPENROUTER_API_KEY to %s\n' "$CONFIG_FILE"
+      ;;
+    *)
+      printf '%s\n' "API key active for this run only."
+      ;;
+  esac
+}
+
+forget_api_key_command() {
+  remove_config_key OPENROUTER_API_KEY
+  remove_config_key TTYCHATTER_API_KEY
+  printf '%s\n' "removed plaintext API-key config entries if present"
+}
+
 load_config
 if [ -z "$OPENROUTER_API_KEY" ]; then
   OPENROUTER_API_KEY="$(decrypt_gpg_key_file "$API_KEY_GPG_FILE" || true)"
@@ -394,6 +405,11 @@ USAGE
     $PROGRAM --doctor
     $PROGRAM --version
     $PROGRAM --help
+
+GPG API KEY STORAGE
+    --set-api-key offers runtime-only, GPG-encrypted, or plaintext config storage.
+    If gpg is not installed, the command says "gpg not found" and skips encrypted storage.
+    Plaintext saves warn before writing OPENROUTER_API_KEY to config.
 
 LOOPBACK OUTPUT
     --loopback routes interface text to stderr and writes AI responses to stdout.
@@ -1060,8 +1076,8 @@ ACTIVE_MODEL="$(effective_model)"; save_config_value MODEL "$ACTIVE_MODEL"; prin
       ;;
     unset) [ -n "$rest" ] && { remove_config_key "$rest"; [ "$rest" = "MODEL" ] && { MODEL=""; if truthy "$DEMO_MODE" && [ -z "$MODEL" ]; then MODEL="demo/auto"; fi
 ACTIVE_MODEL="$(effective_model)"; }; printf 'removed config key if present: %s\n' "$rest"; } || printf '%s\n' "usage: :unset KEY" ;;
-    set-api-key|api-key) printf 'Paste OpenRouter API key: '; IFS= read -r -s key; printf '\n'; [ -n "$key" ] && { OPENROUTER_API_KEY="$key"; save_config_value OPENROUTER_API_KEY "$key"; } ;;
-    forget-api-key) remove_config_key OPENROUTER_API_KEY; printf '%s\n' "removed OPENROUTER_API_KEY from config if present" ;;
+    set-api-key|api-key) set_api_key_command ;;
+    forget-api-key) forget_api_key_command ;;
     memory|show-memory) show_current_memory_runtime ;;
     clear-memory) CONTEXT_BUFFER=(); write_context_snapshot "$(timestamp)"; printf '%s\n' "current memory cleared" ;;
     attach) [ -n "$rest" ] && { ATTACH_FILES+=("$rest"); printf 'queued attachment: %s\n' "$rest"; } || printf '%s\n' "usage: :attach FILE" ;;
@@ -1081,7 +1097,7 @@ ACTIVE_MODEL="$(effective_model)"; }; printf 'removed config key if present: %s\
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    -h|--help|help) ACTION=help;; --version) ACTION=version;; --demo) DEMO_MODE=1;; --loopback) LOOPBACK=1;; --loopback-file) shift; LOOPBACK_FILE="${1:-}"; [ -n "$LOOPBACK_FILE" ] || { printf 'ERROR: --loopback-file requires a path.\n' >&2; exit 2; };; --doctor) ACTION=doctor;; --credits) ACTION=credits;; --list) ACTION=list;; --models) ACTION=models;; --routers) ACTION=models; MODEL_TYPE_FILTER="routers";; --favorites) ACTION=favorites;; --favorite-model) ACTION=favorite; shift; TEST_MODEL="${1:-}";; --unfavorite-model|--unbookmark-model) ACTION=unfavorite; shift; TEST_MODEL="${1:-}";; --model-type) shift; MODEL_TYPE_FILTER="${1:-all}";; --sort) shift; MODEL_SORT_ORDER="${1:-$MODEL_SORT_ORDER}";; --min-input-tokens) shift; MODEL_MIN_INPUT_TOKENS="${1:-$MODEL_MIN_INPUT_TOKENS}";; --min-output-tokens) shift; MODEL_MIN_OUTPUT_TOKENS="${1:-$MODEL_MIN_OUTPUT_TOKENS}";; --require-tokens) MODEL_FILTER_REQUIRE_TOKENS=1;; --allow-missing-tokens) MODEL_FILTER_REQUIRE_TOKENS=0;; --theme) shift; THEME="${1:-default}";; --send-input) shift; SEND_INPUT="${1:-ctrl_d}";; --code-attachment-min-lines) shift; CODE_ATTACHMENT_MIN_LINES="${1:-5}";; --config) ACTION=config;; --set) ACTION=set-config; shift; SET_KEY="${1:-}"; shift; SET_VALUE="${1:-}";; --unset) ACTION=unset-config; shift; UNSET_KEY="${1:-}";; --update-models) ACTION=update-models;; --select-model) ACTION=select;; --test-model) ACTION=test; shift; TEST_MODEL="${1:-}";; --set-api-key) ACTION=set-key;; --save) SAVE=1;; --attach) shift; ATTACH_FILES+=("${1:-}");; --resume) RESUME=1; shift; SESSION_NAME="${1:-}";; -*) printf 'unknown option: %s\n' "$1" >&2; exit 2;; *) [ -z "$SESSION_NAME" ] && SESSION_NAME="$1" || { printf 'unexpected argument: %s\n' "$1" >&2; exit 2; };;
+    -h|--help|help) ACTION=help;; --version) ACTION=version;; --demo) DEMO_MODE=1;; --loopback) LOOPBACK=1;; --loopback-file) shift; LOOPBACK_FILE="${1:-}"; [ -n "$LOOPBACK_FILE" ] || { printf 'ERROR: --loopback-file requires a path.\n' >&2; exit 2; };; --doctor) ACTION=doctor;; --credits) ACTION=credits;; --list) ACTION=list;; --models) ACTION=models;; --routers) ACTION=models; MODEL_TYPE_FILTER="routers";; --favorites) ACTION=favorites;; --favorite-model) ACTION=favorite; shift; TEST_MODEL="${1:-}";; --unfavorite-model|--unbookmark-model) ACTION=unfavorite; shift; TEST_MODEL="${1:-}";; --model-type) shift; MODEL_TYPE_FILTER="${1:-all}";; --sort) shift; MODEL_SORT_ORDER="${1:-$MODEL_SORT_ORDER}";; --min-input-tokens) shift; MODEL_MIN_INPUT_TOKENS="${1:-$MODEL_MIN_INPUT_TOKENS}";; --min-output-tokens) shift; MODEL_MIN_OUTPUT_TOKENS="${1:-$MODEL_MIN_OUTPUT_TOKENS}";; --require-tokens) MODEL_FILTER_REQUIRE_TOKENS=1;; --allow-missing-tokens) MODEL_FILTER_REQUIRE_TOKENS=0;; --theme) shift; THEME="${1:-default}";; --send-input) shift; SEND_INPUT="${1:-ctrl_d}";; --code-attachment-min-lines) shift; CODE_ATTACHMENT_MIN_LINES="${1:-5}";; --config) ACTION=config;; --set) ACTION=set-config; shift; SET_KEY="${1:-}"; shift; SET_VALUE="${1:-}";; --unset) ACTION=unset-config; shift; UNSET_KEY="${1:-}";; --update-models) ACTION=update-models;; --select-model) ACTION=select;; --test-model) ACTION=test; shift; TEST_MODEL="${1:-}";; --set-api-key) ACTION=set-key;; --forget-api-key) ACTION=forget-key;; --save) SAVE=1;; --attach) shift; ATTACH_FILES+=("${1:-}");; --resume) RESUME=1; shift; SESSION_NAME="${1:-}";; -*) printf 'unknown option: %s\n' "$1" >&2; exit 2;; *) [ -z "$SESSION_NAME" ] && SESSION_NAME="$1" || { printf 'unexpected argument: %s\n' "$1" >&2; exit 2; };;
   esac; shift
  done
 
@@ -1090,7 +1106,7 @@ while [ "$#" -gt 0 ]; do
 # This keeps command behavior easy to audit: parse flags, dispatch one action,
 # or fall through into the interactive chat loop.
 case "$ACTION" in
-  help) help_menu; exit 0;; version) printf '%s version %s\n' "$PROGRAM" "$VERSION"; exit 0;; doctor) doctor_command; exit 0;; credits) credits; exit 0;; list) list_sessions; exit 0;; models) list_models; exit $?;; favorites) list_favorite_models; exit $?;; favorite) favorite_model_command "$TEST_MODEL"; exit $?;; unfavorite) unfavorite_model_command "$TEST_MODEL"; exit $?;; config) print_config_summary; exit 0;; set-config) [ -n "$SET_KEY" ] || { printf 'ERROR: --set requires KEY VALUE\n' >&2; exit 2; }; save_config_value "$SET_KEY" "$SET_VALUE"; exit $?;; unset-config) [ -n "$UNSET_KEY" ] || { printf 'ERROR: --unset requires KEY\n' >&2; exit 2; }; remove_config_key "$UNSET_KEY"; exit $?;; update-models) update_models_cache; exit $?;; select) select_model; exit $?;; test) [ -n "$TEST_MODEL" ] || { printf 'ERROR: --test-model requires a model\n' >&2; exit 2; }; test_model "$TEST_MODEL"; [ "$SAVE" -eq 1 ] && save_config_value MODEL "$TEST_MODEL"; exit $?;; set-key) printf 'Paste OpenRouter API key: '; IFS= read -r -s key; printf '\n'; [ -n "$key" ] && save_config_value OPENROUTER_API_KEY "$key"; exit $?;;
+  help) help_menu; exit 0;; version) printf '%s version %s\n' "$PROGRAM" "$VERSION"; exit 0;; doctor) doctor_command; exit 0;; credits) credits; exit 0;; list) list_sessions; exit 0;; models) list_models; exit $?;; favorites) list_favorite_models; exit $?;; favorite) favorite_model_command "$TEST_MODEL"; exit $?;; unfavorite) unfavorite_model_command "$TEST_MODEL"; exit $?;; config) print_config_summary; exit 0;; set-config) [ -n "$SET_KEY" ] || { printf 'ERROR: --set requires KEY VALUE\n' >&2; exit 2; }; save_config_value "$SET_KEY" "$SET_VALUE"; exit $?;; unset-config) [ -n "$UNSET_KEY" ] || { printf 'ERROR: --unset requires KEY\n' >&2; exit 2; }; remove_config_key "$UNSET_KEY"; exit $?;; update-models) update_models_cache; exit $?;; select) select_model; exit $?;; test) [ -n "$TEST_MODEL" ] || { printf 'ERROR: --test-model requires a model\n' >&2; exit 2; }; test_model "$TEST_MODEL"; [ "$SAVE" -eq 1 ] && save_config_value MODEL "$TEST_MODEL"; exit $?;; set-key) set_api_key_command; exit $?;; forget-key) forget_api_key_command; exit $?;;
 esac
 
 # ==========================================================
