@@ -84,7 +84,7 @@
 set -o pipefail
 
 PROGRAM="ttychatter.python"
-VERSION="3.12"
+VERSION="3.13"
 
 CONFIG_DIR="$HOME/.config/ttychatter/openrouter"
 CONFIG_FILE="$CONFIG_DIR/config"
@@ -1292,30 +1292,52 @@ print(json.dumps(payload, ensure_ascii=False))
 # when behavior changes.
 # ----------------------------------------------------------
 parse_openrouter_response() {
-  python3 - "$ATTACHMENT_DIR" "$SESSION_NAME" <<'PYRESP'
+  python3 -c '''
 import json, sys
-attachment_dir=sys.argv[1]; session_name=sys.argv[2] or "model-test"; raw=sys.stdin.read()
-try: data=json.loads(raw)
-except Exception as exc: print(f"invalid JSON response: {exc}; raw response: {raw[:1000]}"); sys.exit(1)
-if "error" in data:
-    err=data["error"]
-    if isinstance(err, dict): print(f"OpenRouter API error {err.get('code','')}: {err.get('message','')}")
-    else: print(f"OpenRouter API error: {err}")
+attachment_dir = sys.argv[1]
+session_name = sys.argv[2] or "model-test"
+raw = sys.stdin.read()
+
+if not raw.strip():
+    print("invalid JSON response: empty response body")
     sys.exit(1)
-texts=[]
-for choice in data.get("choices",[]):
-    msg=choice.get("message",{}) if isinstance(choice,dict) else {}
-    content=msg.get("content","")
-    if isinstance(content,str): texts.append(content)
-    elif isinstance(content,list):
+
+try:
+    data = json.loads(raw)
+except Exception as exc:
+    print(f"invalid JSON response: {exc}; raw response: {raw[:1000]}")
+    sys.exit(1)
+
+if "error" in data:
+    err = data["error"]
+    if isinstance(err, dict):
+        code = err.get("code", "")
+        message = err.get("message", "")
+        print(f"OpenRouter API error {code}: {message}".strip())
+    else:
+        print(f"OpenRouter API error: {err}")
+    sys.exit(1)
+
+texts = []
+for choice in data.get("choices", []):
+    msg = choice.get("message", {}) if isinstance(choice, dict) else {}
+    content = msg.get("content", "")
+    if isinstance(content, str):
+        texts.append(content)
+    elif isinstance(content, list):
         for part in content:
-            if isinstance(part,dict):
-                if isinstance(part.get("text"),str): texts.append(part["text"])
-                elif isinstance(part.get("content"),str): texts.append(part["content"])
-output="\n".join(t for t in texts if t is not None)
-if not output.strip(): print("OpenRouter returned an empty text response"); sys.exit(1)
+            if isinstance(part, dict):
+                if isinstance(part.get("text"), str):
+                    texts.append(part["text"])
+                elif isinstance(part.get("content"), str):
+                    texts.append(part["content"])
+
+output = "\n".join(t for t in texts if t is not None)
+if not output.strip():
+    print("OpenRouter returned an empty text response")
+    sys.exit(1)
 print(output)
-PYRESP
+''' "$ATTACHMENT_DIR" "$SESSION_NAME"
 }
 # ----------------------------------------------------------
 # MAINTAINER COMMENTARY: function call_openrouter_model
