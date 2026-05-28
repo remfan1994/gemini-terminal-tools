@@ -1,5 +1,42 @@
 # ttychatter C changelog
 
+## 0.2.0-c-cli
+
+### Added
+- Demo mode with `--demo`
+- Local demo model catalog for `--demo --models`
+- Demo model-cache writer through `--demo --update-models`
+- Demo model testing through `--demo --test-model MODEL`
+- Demo file-in/file-out chat responses without API key or network access
+- Demo response containing both short inline code and long extracted code block
+- Model favorites file support
+- `--favorites`
+- `--favorite-model MODEL`
+- `--unfavorite-model MODEL`
+- Leading favorite marker in model list output
+- `MODEL_FAVORITES_FILE` config key
+- `--config` to show active paths and major settings
+- `--set KEY VALUE` to write config values
+- `--unset KEY` to remove config keys
+- `--search-sessions TEXT` for local session-log searching
+- Expanded walkthrough covering demo mode and favorites
+- Expanded man page entries for demo mode, favorites, config editing, and session search
+
+### Changed
+- Version updated to `0.2.0-c-cli`
+- User agent updated to `ttychatter-c-cli/0.2`
+- Model listing now marks favorites with `*`
+- C command-line client is closer to the Bash/Python feature set while preserving Unix file-in/file-out behavior
+
+### Fixed
+- Corrected attachment handling hazard found during the feature pass
+- Re-tested demo response path with code-block extraction
+
+### Notes
+- Demo mode exists so users can test the client without spending provider requests.
+- Favorites are deliberately stored as a plain newline-delimited file for easy editing and repair.
+- This version remains a command-line client, not an ncurses UI.
+
 ## 0.1.0-c-cli
 
 ### Added

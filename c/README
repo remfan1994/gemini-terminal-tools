@@ -2,13 +2,13 @@ TTYCHATTER C COMMAND-LINE CLIENT
 ================================
 
 This directory contains the traditional Unix command-line C implementation of
-ttychatter.  It is intentionally different from the Python ncurses interface:
-there is no full-screen UI here.  The user supplies an input file and an output
+ttychatter. It is intentionally different from the Python ncurses interface:
+there is no full-screen UI here. The user supplies an input file and an output
 session file.
 
     ttychatter input.txt output.log
 
-The output file is also the session state.  Reusing the same output file resumes
+The output file is also the session state. Reusing the same output file resumes
 the conversation by sending recent turns as context.
 
 Build requirements
@@ -26,8 +26,24 @@ Run:
 
     ./ttychatter --help
 
-First steps
------------
+First steps without network
+---------------------------
+
+Demo mode lets you exercise the client without an API key or provider calls:
+
+    ./ttychatter --demo --models
+    ./ttychatter --demo --test-model demo/large-context
+
+Then create an input file and test full session logging:
+
+    cat > input.txt
+    Explain Unix pipes in one paragraph.
+    ^D
+
+    ./ttychatter --demo input.txt session.log
+
+First steps with OpenRouter
+---------------------------
 
     ./ttychatter --set-api-key --gpg
     ./ttychatter --doctor

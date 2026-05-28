@@ -5,22 +5,30 @@ NAME
 
 SYNOPSIS
     ttychatter [options] input.txt output.log
+    ttychatter --demo [options] input.txt output.log
     ttychatter --set-api-key [--gpg]
     ttychatter --forget-api-key
-    ttychatter --models [--search TEXT] [--model-type TYPE]
-    ttychatter --update-models
-    ttychatter --test-model MODEL
+    ttychatter --models [--demo] [--search TEXT] [--model-type TYPE]
+    ttychatter --update-models [--demo]
+    ttychatter --test-model MODEL [--demo]
+    ttychatter --favorites
+    ttychatter --favorite-model MODEL
+    ttychatter --unfavorite-model MODEL
+    ttychatter --config
+    ttychatter --set KEY VALUE
+    ttychatter --unset KEY
+    ttychatter --search-sessions TEXT
     ttychatter --doctor
     ttychatter --version
     ttychatter --help
 
 DESCRIPTION
     ttychatter is the C command-line client in the ttychatter family.
-    It is not an ncurses interface.  It follows the traditional Unix file
+    It is not an ncurses interface. It follows the traditional Unix file
     workflow: the user prepares an input file, invokes ttychatter, and the AI
     response is appended to an output/session file.
 
-    The output file is also the session log.  Reusing the same output file
+    The output file is also the session log. Reusing the same output file
     resumes the conversation because ttychatter reads recent turns from that
     file and sends them as context.
 
@@ -40,8 +48,28 @@ BASIC USE
         vi followup.txt
         ttychatter followup.txt session.log
 
+DEMO MODE
+    Demo mode uses local model rows and local canned responses. It does not
+    require an OpenRouter API key and does not contact OpenRouter.
+
+    List demo models:
+
+        ttychatter --demo --models
+
+    Test a demo model:
+
+        ttychatter --demo --test-model demo/large-context
+
+    Run a full file-in/file-out demo request:
+
+        ttychatter --demo input.txt session.log
+
+    Demo responses include both short and long fenced code blocks so users can
+    verify the code-block attachment threshold without spending provider
+    requests.
+
 API KEY SETUP
-    The recommended first step is API-key setup.
+    The recommended first step for real OpenRouter use is API-key setup.
 
     Store the OpenRouter API key encrypted with GPG:
 
@@ -51,7 +79,7 @@ API KEY SETUP
 
         ttychatter --set-api-key
 
-    Plaintext storage is convenient but less safe.  Encrypted GPG storage uses
+    Plaintext storage is convenient but less safe. Encrypted GPG storage uses
     the external gpg command and stores the key at API_KEY_GPG_FILE.
 
     Environment variables are also supported:
@@ -64,10 +92,19 @@ CONFIGURATION
 
         ~/.config/ttychatter/config
 
+    Inspect active configuration:
+
+        ttychatter --config
+
+    Set or unset values:
+
+        ttychatter --set CONTEXT_TURNS 20
+        ttychatter --unset MODEL
+
     Common keys:
 
         OPENROUTER_API_KEY
-            Plaintext API key.  Environment variables override this.
+            Plaintext API key. Environment variables override this.
 
         API_KEY_GPG_FILE
             Path to encrypted API key file.
@@ -85,6 +122,10 @@ CONFIGURATION
         MODEL_CACHE_FILE
             OpenRouter model catalog cache.
             Default: ~/.cache/ttychatter/models.json
+
+        MODEL_FAVORITES_FILE
+            Newline-delimited model favorites file.
+            Default: ~/.local/share/ttychatter/model-favorites
 
         SESSION_DIR
             Default session directory for other ttychatter clients.
@@ -109,6 +150,10 @@ MODEL CATALOG
 
         ttychatter --update-models
 
+    Write a demo model cache without network:
+
+        ttychatter --demo --update-models
+
     List cached models:
 
         ttychatter --models
@@ -130,10 +175,23 @@ MODEL CATALOG
         free
         auto
 
+MODEL FAVORITES
+    Add, remove, and list bookmarked models:
+
+        ttychatter --favorite-model openrouter/auto
+        ttychatter --unfavorite-model openrouter/auto
+        ttychatter --favorites
+
+    The model list marks favorites with a leading asterisk.
+
 MODEL TESTING
     Test one model without appending to a session log:
 
         ttychatter --test-model openrouter/auto
+
+    Test without contacting OpenRouter:
+
+        ttychatter --demo --test-model demo/large-context
 
     The test sends a short availability prompt to the selected model and prints
     the raw response.
@@ -144,12 +202,12 @@ ATTACHMENTS
         ttychatter -a notes.txt input.txt session.log
         ttychatter -a notes.txt -a diagram.png input.txt session.log
 
-    Text-like attachments are inserted into the user message as text.  Image
+    Text-like attachments are inserted into the user message as text. Image
     attachments are sent as data URLs using OpenRouter's chat-completions
     content-part format when the selected model supports image input.
 
     Other binary files are listed in the prompt but not embedded as raw data in
-    this first release.
+    this release.
 
 LOOPBACK
     To also print the AI response to stdout:
@@ -159,6 +217,11 @@ LOOPBACK
     This is useful for pipes:
 
         ttychatter --loopback input.txt session.log | less
+
+SESSION SEARCH
+    Search local session files under SESSION_DIR:
+
+        ttychatter --search-sessions router
 
 SESSION FORMAT
     The output file is human-readable and structured with markers:
@@ -184,7 +247,7 @@ DIAGNOSTICS
         ttychatter --doctor
 
     The doctor command reports config paths, API-key loading status, GPG
-    availability, cache path, storage paths, and libcurl version.  It does not
+    availability, cache path, storage paths, and libcurl version. It does not
     print API-key values.
 
 FILES
@@ -197,6 +260,9 @@ FILES
     ~/.cache/ttychatter/models.json
         Cached OpenRouter model catalog.
 
+    ~/.local/share/ttychatter/model-favorites
+        Newline-delimited favorite model list.
+
     ~/.local/share/ttychatter/attachments
         Extracted code-block attachments.
 
@@ -204,12 +270,11 @@ LIMITATIONS
     - Requires libcurl and json-c.
     - GPG encryption requires the external gpg command.
     - Image attachment support depends on the selected model.
-    - Non-image binary attachments are not fully embedded in this first C CLI
-      release.
+    - Non-image binary attachments are not fully embedded in this C CLI release.
     - The command-line C client is intentionally not an ncurses UI.
 
 VERSION
-    ttychatter 0.1.0-c-cli
+    ttychatter 0.2.0-c-cli
 
 AUTHOR
     Part of the ttychatter project.
