@@ -1,4 +1,4 @@
-ttychatter.mailbot 0.2.0
+ttychatter.mailbot 0.2.1
 =========================
 
 ttychatter.mailbot is a conservative IMAP/sendmail transport adapter for
@@ -42,3 +42,6 @@ Security
 
 Set ALLOWED_FROM. Keep it narrow. Do not run a mailbot that accepts arbitrary
 senders unless you want strangers spending your API quota.
+
+
+0.2.1 note: ALLOWED_FROM matching is exact, case-insensitive, and may contain comma/semicolon/whitespace separated addresses. A configured sender is no longer rejected merely because it is also MAIL_FROM.

@@ -1,3 +1,17 @@
+ttychatter.mailbot 0.2.1
+=========================
+
+Bug fixes
+---------
+- Rewrote sender allowlist handling so an exact ALLOWED_FROM address is honored.
+- Removed the overbroad self-sender rejection that blocked setups using the same local mailbox for MAIL_FROM and ALLOWED_FROM.
+- ALLOWED_FROM now accepts comma, semicolon, or whitespace separated addresses, plus the wildcard * for temporary testing.
+- --list-candidates now prints the configured allowlist in sender skip reasons, making allowlist bugs visible without marking messages read.
+
+Notes
+-----
+- For production, a distinct MAIL_FROM such as ttychatter@example.org is still cleaner. The allowlist, processed Message-ID database, and strict tc:{...} subject parser remain the real mailbot safety controls.
+
 ttychatter.mailbot 0.2.0
 =========================
 

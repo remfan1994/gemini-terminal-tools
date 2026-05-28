@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
 PROGRAM = "ttychatter.mailbot"
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 
 DEFAULT_CONFIG_DIR = Path.home() / ".config" / "ttychatter" / "mailbot"
 DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config"
@@ -132,10 +132,27 @@ def parse_int(value: str, default: int) -> int:
 
 
 def split_addresses(value: str) -> List[str]:
-    # ALLOWED_FROM can be comma or whitespace separated.  Normalize to lowercase
-    # bare email addresses so comparisons are predictable.
-    raw = re.split(r"[ ,]+", value.strip())
-    return [item.lower() for item in raw if item]
+    """Normalize a user supplied address list.
+
+    ALLOWED_FROM is security-sensitive.  A human may write it as one address,
+    a comma-separated list, a semicolon-separated list, or a whitespace-separated
+    list.  The mail headers are later parsed with email.utils.parseaddr(), so
+    this function stores only lowercase bare addresses.  It deliberately accepts
+    the wildcard "*" for temporary lab testing, but administrators should not
+    leave that enabled on a real public mailbox.
+    """
+    out: List[str] = []
+    for item in re.split(r"[;,\s]+", value.strip()):
+        item = item.strip()
+        if not item:
+            continue
+        if item == "*":
+            out.append("*")
+            continue
+        parsed = parseaddr(item)[1].strip().lower()
+        if parsed:
+            out.append(parsed)
+    return out
 
 
 def set_config_value(config_file: Path, key: str, value: str) -> None:
@@ -540,14 +557,27 @@ def message_sender(msg: Message) -> str:
 
 
 def allowed_sender(sender: str, cfg: Config) -> bool:
-    if not sender:
+    """Return true when an incoming sender is authorized to drive the bot.
+
+    The allowlist is the primary protection against random Internet mail
+    spending API credits.  Earlier mailbot builds also rejected any message whose
+    sender matched MAIL_FROM, intending to prevent reply loops.  That was too
+    blunt: small personal mail systems often use the same mailbox for both
+    sending and receiving during setup, and an explicit ALLOWED_FROM entry should
+    be respected.
+
+    Loop prevention belongs elsewhere: exact tc:{...} subjects, processed
+    Message-IDs, dry-run safety, and optional deployment advice to use a distinct
+    MAIL_FROM such as ttychatter@example.org.  Therefore this function now does
+    only one job: compare the parsed sender against the configured allowlist.
+    """
+    parsed_sender = parseaddr(sender or "")[1].strip().lower()
+    if not parsed_sender:
         return False
-    sender = sender.lower()
-    if cfg.mail_from and sender == parseaddr(cfg.mail_from)[1].lower():
-        return False
-    if not cfg.allowed_from:
-        return False
-    return sender in cfg.allowed_from
+    allowed = {item.strip().lower() for item in cfg.allowed_from if item.strip()}
+    if "*" in allowed:
+        return True
+    return parsed_sender in allowed
 
 
 def load_processed(path: Path) -> set[str]:
@@ -694,7 +724,7 @@ def candidate_skip_reason(cfg: Config, msg: Message, uid: bytes, processed: set[
     if not session:
         return "skip: subject does not contain tc:{...}"
     if not allowed_sender(sender, cfg):
-        return f"skip: sender not allowed ({sender or 'empty sender'})"
+        return f"skip: sender not allowed ({sender or 'empty sender'}); allowed={','.join(cfg.allowed_from) or 'empty'}"
     if msgid in processed:
         return "skip: Message-ID already processed"
     return "match"

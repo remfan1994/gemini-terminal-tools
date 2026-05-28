@@ -49,6 +49,16 @@ IMAP SAFETY
     A matching message is marked seen only after a successful real processing
     run, and only if MARK_SEEN is enabled.
 
+ALLOWLIST BEHAVIOR
+    ALLOWED_FROM is the main mailbot safety gate. It may contain one address,
+    comma-separated addresses, semicolon-separated addresses, or whitespace-
+    separated addresses. Matching is case-insensitive after parsing the From
+    header to a bare address.
+
+    A wildcard value of * is accepted for temporary local testing, but should not
+    be left in production because anyone who can mail the bot could spend API
+    credits.
+
 CONFIGURATION BY EMAIL
     A message from ALLOWED_FROM with subject:
 
