@@ -49,7 +49,7 @@
 #include <unistd.h>
 
 #define TC_PROGRAM "ttychatter"
-#define TC_VERSION "0.5.0-c-cli"
+#define TC_VERSION "0.6.0-c-cli"
 #define TC_OPENROUTER_CHAT_URL "https://openrouter.ai/api/v1/chat/completions"
 #define TC_OPENROUTER_MODELS_URL "https://openrouter.ai/api/v1/models"
 
@@ -142,14 +142,17 @@ typedef struct TCArgs {
     char *rename_old;
     char *rename_new;
     char *memory_path;
+    char *resume_session;
     char *search;
     char *model_type;
     char *model_sort;
     long min_input_tokens;
     long min_output_tokens;
     bool require_tokens;
+    bool allow_missing_tokens;
     bool hide_preview;
     bool favorites_only;
+    bool save;
     bool yes;
     char *model_override;
     char *test_model_id;
@@ -1632,8 +1635,10 @@ static void print_help(void) {
     printf("Usage:\n");
     printf("  ttychatter [options] input.txt output.log\n");
     printf("  ttychatter --interactive [session.log]\n");
+    printf("  ttychatter --resume SESSION\n");
     printf("  ttychatter --set-api-key [--gpg]\n");
     printf("  ttychatter --models [--search TEXT] [--model-type TYPE] [--sort KEY]\n");
+    printf("  ttychatter --routers\n");
     printf("  ttychatter --select-model\n");
     printf("  ttychatter --list | --rename-session OLD NEW\n");
     printf("  ttychatter --show-memory SESSION | --clear-memory SESSION | --edit-memory SESSION\n");
@@ -1651,11 +1656,14 @@ static void print_help(void) {
     printf("      --search TEXT        filter model list with --models, otherwise search sessions\n");
     printf("      --search-sessions TEXT search all session logs\n");
     printf("      --model-type TYPE    all, routers, fixed, free, auto\n");
+    printf("      --routers            shorthand for --models --model-type routers\n");
     printf("      --sort KEY           name, context, tokens, type, favorites\n");
     printf("      --min-input-tokens N filter model rows by context length\n");
     printf("      --hide-preview       hide preview/experimental-looking model IDs\n");
+    printf("      --allow-missing-tokens allow rows with unknown context limits\n");
     printf("      --favorites-only     show only favorite models in --models\n");
     printf("      --yes                confirm live send when CONFIRM_LIVE_SEND=1\n");
+    printf("      --save               save successful --test-model result as MODEL\n");
     printf("      --select-model       numbered cached model selector\n");
     printf("      --set-api-key        save API key\n");
     printf("      --gpg                encrypt API key with gpg when used with --set-api-key\n");
@@ -1718,6 +1726,7 @@ static int parse_args(int argc, char **argv, TCArgs *args) {
         {"gpg", no_argument, 0, 1001},
         {"forget-api-key", no_argument, 0, 1002},
         {"models", no_argument, 0, 1003},
+        {"routers", no_argument, 0, 1039},
         {"update-models", no_argument, 0, 1004},
         {"search", required_argument, 0, 1005},
         {"model-type", required_argument, 0, 1006},
@@ -1732,9 +1741,11 @@ static int parse_args(int argc, char **argv, TCArgs *args) {
         {"favorites", no_argument, 0, 1013},
         {"favorite-model", required_argument, 0, 1014},
         {"unfavorite-model", required_argument, 0, 1015},
+        {"unbookmark-model", required_argument, 0, 1015},
         {"loopback-file", required_argument, 0, 1016},
         {"sort", required_argument, 0, 1017},
         {"favorites-only", no_argument, 0, 1018},
+        {"save", no_argument, 0, 1040},
         {"yes", no_argument, 0, 1019},
         {"list", no_argument, 0, 1020},
         {"rename-session", required_argument, 0, 1021},
@@ -1751,8 +1762,11 @@ static int parse_args(int argc, char **argv, TCArgs *args) {
         {"min-output-tokens", required_argument, 0, 1031},
         {"hide-preview", no_argument, 0, 1032},
         {"show-preview", no_argument, 0, 1033},
+        {"allow-missing-tokens", no_argument, 0, 1041},
         {"require-tokens", no_argument, 0, 1034},
         {"send-input", required_argument, 0, 1035},
+        {"resume", required_argument, 0, 1042},
+        {"autoscan-model", no_argument, 0, 1043},
         {"theme", required_argument, 0, 1036},
         {"code-attachment-min-lines", required_argument, 0, 1037},
         {0,0,0,0}
@@ -1770,6 +1784,7 @@ static int parse_args(int argc, char **argv, TCArgs *args) {
             case 1001: args->set_api_key_gpg = true; break;
             case 1002: args->forget_api_key = true; break;
             case 1003: args->list_models = true; break;
+            case 1039: args->list_models = true; free(args->model_type); args->model_type = xstrdup("routers"); break;
             case 1004: args->update_models = true; break;
             case 1005: args->search = xstrdup(optarg); break;
             case 1006: free(args->model_type); args->model_type = xstrdup(optarg); break;
@@ -1797,6 +1812,7 @@ static int parse_args(int argc, char **argv, TCArgs *args) {
             case 1016: args->loopback_file = xstrdup(optarg); break;
             case 1017: args->model_sort = xstrdup(optarg); break;
             case 1018: args->favorites_only = true; break;
+            case 1040: args->save = true; break;
             case 1019: args->yes = true; break;
             case 1020: args->list_sessions_cmd = true; break;
             case 1021:
@@ -1818,8 +1834,11 @@ static int parse_args(int argc, char **argv, TCArgs *args) {
             case 1031: args->min_output_tokens = atol(optarg); break;
             case 1032: args->hide_preview = true; break;
             case 1033: args->hide_preview = false; break;
+            case 1041: args->allow_missing_tokens = true; break;
             case 1034: args->require_tokens = true; break;
             case 1035: args->config_set_cmd = true; args->config_key = xstrdup("SEND_INPUT"); args->config_value = xstrdup(optarg); break;
+            case 1042: args->interactive = true; args->resume_session = xstrdup(optarg); break;
+            case 1043: fprintf(stderr, "--autoscan-model has been removed. Use --models, --test-model MODEL, or --select-model.\n"); return 1;
             case 1036: args->config_set_cmd = true; args->config_key = xstrdup("THEME"); args->config_value = xstrdup(optarg); break;
             case 1037: args->config_set_cmd = true; args->config_key = xstrdup("CODE_ATTACHMENT_MIN_LINES"); args->config_value = xstrdup(optarg); break;
             case 1038: args->search = xstrdup(optarg); args->search_sessions_cmd = true; break;
@@ -1941,24 +1960,30 @@ static char *interactive_default_session_path(const TCConfig *cfg) {
 static void runtime_command_help(void) {
     printf("Runtime colon commands:\n");
     printf("  :help                         show this command list\n");
+    printf("  :list                         list saved sessions\n");
+    printf("  :rename NAME                  rename current interactive session\n");
     printf("  :models                       list cached models\n");
     printf("  :routers                      list router models\n");
     printf("  :update-models                refresh model cache from OpenRouter\n");
+    printf("  :select-model                 open numbered cached model selector\n");
     printf("  :test-model MODEL             test one model\n");
     printf("  :model MODEL                  use model for this run\n");
     printf("  :model-save MODEL             use model and save MODEL config\n");
     printf("  :favorites                    list favorite models\n");
     printf("  :favorite MODEL               add favorite model\n");
     printf("  :unfavorite MODEL             remove favorite model\n");
+    printf("  :unbookmark MODEL             alias for :unfavorite\n");
     printf("  :config                       print config summary\n");
     printf("  :set KEY VALUE                set config key\n");
     printf("  :unset KEY                    remove config key\n");
     printf("  :set-api-key [gpg]            store API key, optionally encrypted\n");
     printf("  :forget-api-key               remove stored API-key material\n");
     printf("  :memory                       show current context buffer\n");
+    printf("  :edit-memory                  edit current memory/context in external editor\n");
     printf("  :clear-memory                 clear current context for future sends\n");
     printf("  :attach FILE                  queue attachment for next message\n");
     printf("  :attachments                  list pending attachments\n");
+    printf("  :pending                      alias for :attachments\n");
     printf("  :clear-attachments            clear pending attachments\n");
     printf("  :editor                       compose one message in $VISUAL/$EDITOR/vi\n");
     printf("  :search TEXT                  search current session file\n");
@@ -2263,19 +2288,33 @@ static int interactive_send_message(TCConfig *cfg, const char *output_path, cons
 }
 
 static int interactive_handle_command(TCConfig *cfg, TCArgs *pending_args, TCMessageList *ctx,
-                                      const char *output_path, char **active_model, char *line) {
+                                      char **output_pathp, char **active_model, char *line) {
+    const char *output_path = *output_pathp;
     char *cmdline = trim_in_place(line + 1);
     char *cmd = strtok(cmdline, " \t");
     char *rest = strtok(NULL, "");
     rest = rest ? trim_in_place(rest) : NULL;
     if (!cmd || strcmp(cmd, "help") == 0) { runtime_command_help(); return 0; }
     if (strcmp(cmd, "quit") == 0 || strcmp(cmd, "q") == 0) return 1;
+    if (strcmp(cmd, "list") == 0) { list_sessions_command(cfg); return 0; }
+    if (strcmp(cmd, "rename") == 0) {
+        if (!rest || !*rest) { fprintf(stderr, "usage: :rename NAME\n"); return 0; }
+        char *newp = session_path_from_arg(cfg, rest);
+        if (file_exists(newp)) { fprintf(stderr, "target already exists: %s\n", newp); free(newp); return 0; }
+        if (file_exists(*output_pathp) && rename(*output_pathp, newp) != 0) { fprintf(stderr, "rename failed: %s\n", strerror(errno)); free(newp); return 0; }
+        free(*output_pathp);
+        *output_pathp = newp;
+        output_path = *output_pathp;
+        fprintf(stderr, "current session renamed to %s\n", output_path);
+        return 0;
+    }
     if (strcmp(cmd, "models") == 0) { list_models(cfg, NULL, pending_args->model_type, pending_args->model_sort, false, pending_args->demo); return 0; }
     if (strcmp(cmd, "routers") == 0) { list_models(cfg, NULL, "routers", pending_args->model_sort, false, pending_args->demo); return 0; }
     if (strcmp(cmd, "update-models") == 0) { update_models(cfg, pending_args->demo); return 0; }
+    if (strcmp(cmd, "select-model") == 0) { select_model_command(cfg, pending_args->demo); return 0; }
     if (strcmp(cmd, "favorites") == 0) { list_favorites(cfg); return 0; }
     if (strcmp(cmd, "favorite") == 0) { if (rest) add_favorite(cfg, rest); else fprintf(stderr, "usage: :favorite MODEL\n"); return 0; }
-    if (strcmp(cmd, "unfavorite") == 0) { if (rest) remove_favorite(cfg, rest); else fprintf(stderr, "usage: :unfavorite MODEL\n"); return 0; }
+    if (strcmp(cmd, "unfavorite") == 0 || strcmp(cmd, "unbookmark") == 0) { if (rest) remove_favorite(cfg, rest); else fprintf(stderr, "usage: :unfavorite MODEL\n"); return 0; }
     if (strcmp(cmd, "test-model") == 0) { if (rest) test_model_command(cfg, rest, pending_args->demo); else fprintf(stderr, "usage: :test-model MODEL\n"); return 0; }
     if (strcmp(cmd, "model") == 0) { if (rest) { free(*active_model); *active_model = xstrdup(rest); fprintf(stderr, "runtime model: %s\n", *active_model); } else fprintf(stderr, "usage: :model MODEL\n"); return 0; }
     if (strcmp(cmd, "model-save") == 0) { if (rest) { free(*active_model); *active_model = xstrdup(rest); config_write_key_value(cfg, "MODEL", rest); fprintf(stderr, "saved MODEL=%s\n", rest); } else fprintf(stderr, "usage: :model-save MODEL\n"); return 0; }
@@ -2295,9 +2334,16 @@ static int interactive_handle_command(TCConfig *cfg, TCArgs *pending_args, TCMes
     if (strcmp(cmd, "set-api-key") == 0) { cmd_set_api_key(cfg, rest && strcmp(rest, "gpg") == 0); config_load(cfg); return 0; }
     if (strcmp(cmd, "forget-api-key") == 0) { cmd_forget_api_key(cfg); free(cfg->api_key); cfg->api_key = NULL; return 0; }
     if (strcmp(cmd, "memory") == 0) { print_context_buffer(ctx); return 0; }
+    if (strcmp(cmd, "edit-memory") == 0) {
+        edit_memory_command(cfg, output_path);
+        msglist_free(ctx);
+        *ctx = load_context_from_session(output_path, cfg->context_turns);
+        fprintf(stderr, "reloaded memory from edited snapshot\n");
+        return 0;
+    }
     if (strcmp(cmd, "clear-memory") == 0) { msglist_free(ctx); ctx->items = NULL; ctx->count = 0; ctx->cap = 0; clear_memory_command(output_path); return 0; }
     if (strcmp(cmd, "attach") == 0) { if (rest) { args_add_attachment(pending_args, rest); fprintf(stderr, "queued attachment: %s\n", rest); } else fprintf(stderr, "usage: :attach FILE\n"); return 0; }
-    if (strcmp(cmd, "attachments") == 0) { if (pending_args->attachment_count == 0) printf("[no pending attachments]\n"); for (size_t i = 0; i < pending_args->attachment_count; i++) printf("%zu: %s\n", i + 1, pending_args->attachments[i]); return 0; }
+    if (strcmp(cmd, "attachments") == 0 || strcmp(cmd, "pending") == 0) { if (pending_args->attachment_count == 0) printf("[no pending attachments]\n"); for (size_t i = 0; i < pending_args->attachment_count; i++) printf("%zu: %s\n", i + 1, pending_args->attachments[i]); return 0; }
     if (strcmp(cmd, "clear-attachments") == 0) { free_pending_attachments(pending_args); fprintf(stderr, "cleared pending attachments\n"); return 0; }
     if (strcmp(cmd, "editor") == 0) { char *msg = compose_with_external_editor(); if (msg) { interactive_send_message(cfg, output_path, *active_model, msg, ctx, pending_args); free(msg); } return 0; }
     if (strcmp(cmd, "search") == 0) { if (rest) search_file_lines(output_path, rest); else fprintf(stderr, "usage: :search TEXT\n"); return 0; }
@@ -2333,7 +2379,7 @@ static int interactive_loop(TCConfig *cfg, TCArgs *base_args, const char *maybe_
         char *s = trim_in_place(line);
         if (!*s) continue;
         if (s[0] == ':' && s[1] != '\0') {
-            int done = interactive_handle_command(cfg, &pending, &ctx, output_path, &active_model, s);
+            int done = interactive_handle_command(cfg, &pending, &ctx, &output_path, &active_model, s);
             if (done) break;
             continue;
         }
@@ -2403,6 +2449,7 @@ int main(int argc, char **argv) {
             cfg.model_min_output_tokens = 0;
         }
         if (args.require_tokens) cfg.model_filter_require_tokens = true;
+        if (args.allow_missing_tokens) cfg.model_filter_require_tokens = false;
         if (args.hide_preview) cfg.model_filter_hide_preview = true;
         if (args.min_input_tokens > 0) cfg.model_min_input_tokens = args.min_input_tokens;
         if (args.min_output_tokens > 0) cfg.model_min_output_tokens = args.min_output_tokens;
@@ -2410,7 +2457,17 @@ int main(int argc, char **argv) {
     }
     if (args.test_model) {
         if (!args.demo && !cfg.api_key) die("API key missing; set OPENROUTER_API_KEY or run --set-api-key");
-        return test_model_command(&cfg, args.test_model_id, args.demo);
+        int rc = test_model_command(&cfg, args.test_model_id, args.demo);
+        if (rc == 0 && args.save && args.test_model_id) {
+            config_write_key_value(&cfg, "MODEL", args.test_model_id);
+            fprintf(stderr, "saved MODEL=%s\n", args.test_model_id);
+        }
+        return rc;
+    }
+
+    if (args.interactive && args.resume_session) {
+        char *resume_path = session_path_from_arg(&cfg, args.resume_session);
+        return interactive_loop(&cfg, &args, resume_path);
     }
 
     if (args.interactive) {
@@ -2442,7 +2499,10 @@ int main(int argc, char **argv) {
     append_turn(args.output_path, model, args.input_path, &args, input_text, cleaned);
     fprintf(stderr, "appended response to %s\n", args.output_path);
     if (args.loopback) printf("%s\n", cleaned);
-    if (args.loopback_file) write_file_mode(args.loopback_file, cleaned, 0600);
+    if (args.loopback_file) {
+        append_file_text(args.loopback_file, cleaned);
+        append_file_text(args.loopback_file, "\n");
+    }
 
     free(input_text);
     free(raw);
