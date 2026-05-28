@@ -48,7 +48,7 @@
 #include <unistd.h>
 
 #define TC_PROGRAM "ttychatter"
-#define TC_VERSION "0.1.0-c-cli"
+#define TC_VERSION "0.2.0-c-cli"
 #define TC_OPENROUTER_CHAT_URL "https://openrouter.ai/api/v1/chat/completions"
 #define TC_OPENROUTER_MODELS_URL "https://openrouter.ai/api/v1/models"
 
@@ -77,6 +77,7 @@ typedef struct TCConfig {
     char *api_key_gpg_file;
     char *model;
     char *model_cache_file;
+    char *model_favorites_file;
     char *session_dir;
     char *attachment_dir;
     long context_turns;
@@ -95,6 +96,15 @@ typedef struct TCArgs {
     bool list_models;
     bool test_model;
     bool loopback;
+    bool demo;
+    bool show_config;
+    bool list_favorites;
+    char *set_key;
+    char *set_value;
+    char *unset_key;
+    char *favorite_model;
+    char *unfavorite_model;
+    char *search_sessions;
     char *search;
     char *model_type;
     char *model_override;
@@ -502,6 +512,7 @@ static void config_init_defaults(TCConfig *cfg) {
     cfg->api_key_gpg_file = home_path(".config/ttychatter/api-key.gpg");
     cfg->model = xstrdup("openrouter/auto");
     cfg->model_cache_file = xdg_cache_file();
+    cfg->model_favorites_file = xdg_data_dir("model-favorites");
     cfg->session_dir = xdg_data_dir("sessions");
     cfg->attachment_dir = xdg_data_dir("attachments");
     cfg->context_turns = 12;
@@ -522,6 +533,9 @@ static void config_set(TCConfig *cfg, const char *key, const char *value) {
     } else if (strcmp(key, "MODEL_CACHE_FILE") == 0) {
         free(cfg->model_cache_file);
         cfg->model_cache_file = expand_tilde(value);
+    } else if (strcmp(key, "MODEL_FAVORITES_FILE") == 0) {
+        free(cfg->model_favorites_file);
+        cfg->model_favorites_file = expand_tilde(value);
     } else if (strcmp(key, "SESSION_DIR") == 0) {
         free(cfg->session_dir);
         cfg->session_dir = expand_tilde(value);
@@ -650,7 +664,7 @@ static TCHttpResponse http_request(const char *url, const char *method, const ch
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &b);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "ttychatter-c-cli/0.1");
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "ttychatter-c-cli/0.2");
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
     if (strcmp(method, "POST") == 0) {
         curl_easy_setopt(curl, CURLOPT_POST, 1L);
@@ -704,6 +718,98 @@ static bool contains_casefold(const char *hay, const char *needle) {
     return false;
 }
 
+
+/*
+ * Demo model catalog.  Demo mode exists because users and maintainers need to
+ * exercise the client without spending API calls or touching the network.  The
+ * JSON shape intentionally resembles OpenRouter's model list response enough
+ * for the normal listing/filtering code to process it.  If the real provider
+ * changes its schema, the demo catalog should remain a stable internal test
+ * fixture rather than trying to mimic every provider detail.
+ */
+static const char *demo_models_json(void) {
+    return "{\"data\":["
+           "{\"id\":\"openrouter/auto\",\"name\":\"OpenRouter Auto Router\",\"context_length\":128000},"
+           "{\"id\":\"openrouter/free\",\"name\":\"OpenRouter Free Router\",\"context_length\":8192},"
+           "{\"id\":\"demo/large-context\",\"name\":\"Demo Large Context Fixed Model\",\"context_length\":1048576},"
+           "{\"id\":\"demo/code-helper:free\",\"name\":\"Demo Free Code Helper\",\"context_length\":32768},"
+           "{\"id\":\"demo/tiny\",\"name\":\"Demo Tiny Fixed Model\",\"context_length\":4096}"
+           "]}";
+}
+
+/*
+ * Favorites are deliberately a plain newline-delimited text file.  A JSON array
+ * would be easy enough with json-c, but a line file is grep-friendly, editable
+ * with vi, and easy to repair by hand.  The file contains model IDs, one per
+ * line.  The listing code marks favorites with a leading '*'.
+ */
+static bool favorite_contains(const TCConfig *cfg, const char *model_id) {
+    if (!cfg->model_favorites_file || !model_id || !file_exists(cfg->model_favorites_file)) return false;
+    size_t len = 0;
+    char *text = read_file(cfg->model_favorites_file, &len);
+    bool found = false;
+    for (char *line = strtok(text, "\n"); line; line = strtok(NULL, "\n")) {
+        char *t = trim_in_place(line);
+        if (strcmp(t, model_id) == 0) { found = true; break; }
+    }
+    free(text);
+    return found;
+}
+
+static int favorite_add(const TCConfig *cfg, const char *model_id) {
+    if (!model_id || !*model_id) return 1;
+    if (favorite_contains(cfg, model_id)) {
+        fprintf(stderr, "favorite already present: %s\n", model_id);
+        return 0;
+    }
+    char *dircopy = xstrdup(cfg->model_favorites_file);
+    char *slash = strrchr(dircopy, '/');
+    if (slash) { *slash = '\0'; mkdir_p(dircopy); }
+    free(dircopy);
+    TCBuffer b;
+    buffer_init(&b);
+    buffer_appendf(&b, "%s\n", model_id);
+    append_file_text(cfg->model_favorites_file, b.data);
+    free(b.data);
+    fprintf(stderr, "added favorite: %s\n", model_id);
+    return 0;
+}
+
+static int favorite_remove(const TCConfig *cfg, const char *model_id) {
+    if (!cfg->model_favorites_file || !file_exists(cfg->model_favorites_file)) return 0;
+    size_t len = 0;
+    char *text = read_file(cfg->model_favorites_file, &len);
+    TCBuffer out;
+    buffer_init(&out);
+    for (char *line = strtok(text, "\n"); line; line = strtok(NULL, "\n")) {
+        char *t = trim_in_place(line);
+        if (*t && strcmp(t, model_id) != 0) buffer_appendf(&out, "%s\n", t);
+    }
+    write_file_mode(cfg->model_favorites_file, out.data, 0600);
+    fprintf(stderr, "removed favorite if present: %s\n", model_id ? model_id : "");
+    free(text);
+    free(out.data);
+    return 0;
+}
+
+static int favorite_list(const TCConfig *cfg) {
+    if (!cfg->model_favorites_file || !file_exists(cfg->model_favorites_file)) {
+        fprintf(stderr, "No favorites file found: %s\n", cfg->model_favorites_file ? cfg->model_favorites_file : "(unset)");
+        return 1;
+    }
+    size_t len = 0;
+    char *text = read_file(cfg->model_favorites_file, &len);
+    printf("%s", text);
+    free(text);
+    return 0;
+}
+
+static int write_demo_model_cache(const TCConfig *cfg) {
+    write_file_mode(cfg->model_cache_file, demo_models_json(), 0600);
+    fprintf(stderr, "wrote demo model cache: %s\n", cfg->model_cache_file);
+    return 0;
+}
+
 static int update_models(const TCConfig *cfg) {
     TCHttpResponse r = http_request(TC_OPENROUTER_MODELS_URL, "GET", cfg->api_key, NULL);
     if (r.status < 200 || r.status >= 300) {
@@ -717,24 +823,23 @@ static int update_models(const TCConfig *cfg) {
     return 0;
 }
 
-static int list_models(const TCConfig *cfg, const char *search, const char *type_filter) {
-    if (!file_exists(cfg->model_cache_file)) {
-        fprintf(stderr, "No model cache found: %s\n", cfg->model_cache_file);
-        fprintf(stderr, "Run: %s --update-models\n", TC_PROGRAM);
-        return 1;
-    }
-    size_t len = 0;
-    char *json = read_file(cfg->model_cache_file, &len);
+static int list_models_from_json(const TCConfig *cfg, const char *json, const char *search, const char *type_filter) {
     json_object *root = json_tokener_parse(json);
-    free(json);
-    if (!root) die("could not parse model cache JSON");
+    if (!root) die("could not parse model catalog JSON");
     json_object *data = NULL;
     if (!json_object_object_get_ex(root, "data", &data) || !json_object_is_type(data, json_type_array)) {
         json_object_put(root);
-        die("model cache does not contain data[]");
+        die("model catalog does not contain data[]");
     }
-    printf("%-42s %-14s %-10s %s\n", "MODEL", "TYPE", "CONTEXT", "NAME");
-    printf("%-42s %-14s %-10s %s\n", "-----", "----", "-------", "----");
+
+    /*
+     * This is intentionally a terminal-friendly table rather than a pretty
+     * curses browser.  The C CLI is meant to be piped through grep, sort, less,
+     * awk, or cut.  A leading '*' marks user favorites without requiring color
+     * or control sequences, which keeps output safe for logs and scripts.
+     */
+    printf("F %-42s %-14s %-10s %s\n", "MODEL", "TYPE", "CONTEXT", "NAME");
+    printf("- %-42s %-14s %-10s %s\n", "-----", "----", "-------", "----");
     size_t n = json_object_array_length(data);
     for (size_t i = 0; i < n; i++) {
         json_object *m = json_object_array_get_idx(data, i);
@@ -747,10 +852,23 @@ static int list_models(const TCConfig *cfg, const char *search, const char *type
         long ctx = jctx ? json_object_get_int64(jctx) : 0;
         if (!model_type_matches(id, type_filter)) continue;
         if (search && *search && !contains_casefold(id, search) && !contains_casefold(name, search)) continue;
-        printf("%-42.42s %-14s %-10ld %s\n", id, model_type_of(id), ctx, name);
+        printf("%c %-42.42s %-14s %-10ld %s\n", favorite_contains(cfg, id) ? '*' : ' ', id, model_type_of(id), ctx, name);
     }
     json_object_put(root);
     return 0;
+}
+
+static int list_models(const TCConfig *cfg, const char *search, const char *type_filter) {
+    if (!file_exists(cfg->model_cache_file)) {
+        fprintf(stderr, "No model cache found: %s\n", cfg->model_cache_file);
+        fprintf(stderr, "Run: %s --update-models\n", TC_PROGRAM);
+        return 1;
+    }
+    size_t len = 0;
+    char *json = read_file(cfg->model_cache_file, &len);
+    int rc = list_models_from_json(cfg, json, search, type_filter);
+    free(json);
+    return rc;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -972,6 +1090,32 @@ static char *extract_code_blocks(const TCConfig *cfg, const char *session_base, 
 /* OpenRouter chat request                                                   */
 /* ------------------------------------------------------------------------- */
 
+static char *demo_chat_response(const char *model, const char *user_text, const TCArgs *args) {
+    (void)args;
+    TCBuffer b;
+    buffer_init(&b);
+    buffer_appendf(&b, "Demo response from %s. No network request was made.\n\n", model ? model : "demo/auto");
+    buffer_append(&b, "The input file was read successfully and the session-output file can be used again to continue this conversation.\n\n");
+    buffer_append(&b, "Short inline code block, intentionally below the attachment threshold:\n\n");
+    buffer_append(&b, "```sh\necho short demo\n```\n\n");
+    buffer_append(&b, "Longer code block, intentionally above the default threshold so attachment extraction can be tested:\n\n");
+    buffer_append(&b, "```python\n");
+    buffer_append(&b, "def demo():\n");
+    buffer_append(&b, "    print('ttychatter demo mode')\n");
+    buffer_append(&b, "    print('this block should become an attachment')\n");
+    buffer_append(&b, "    print('no provider request was made')\n");
+    buffer_append(&b, "\ndemo()\n```\n\n");
+    if (user_text && *user_text) {
+        buffer_append(&b, "Your prompt began with: ");
+        size_t preview = strlen(user_text);
+        if (preview > 120) preview = 120;
+        buffer_append_n(&b, user_text, preview);
+        if (strlen(user_text) > preview) buffer_append(&b, "...");
+        buffer_append(&b, "\n");
+    }
+    return buffer_take(&b);
+}
+
 static char *openrouter_chat(const TCConfig *cfg, const char *model, const char *user_text, const TCMessageList *context, const TCArgs *args) {
     json_object *root = json_object_new_object();
     json_object_object_add(root, "model", json_object_new_string(model));
@@ -1133,15 +1277,26 @@ static void print_help(void) {
     printf("Usage:\n");
     printf("  ttychatter [options] input.txt output.log\n");
     printf("  ttychatter --set-api-key [--gpg]\n");
-    printf("  ttychatter --models [--search TEXT] [--model-type TYPE]\n");
-    printf("  ttychatter --update-models\n");
-    printf("  ttychatter --test-model MODEL\n");
+    printf("  ttychatter --models [--search TEXT] [--model-type TYPE] [--demo]\n");
+    printf("  ttychatter --update-models [--demo]\n");
+    printf("  ttychatter --test-model MODEL [--demo]\n");
+    printf("  ttychatter --favorites | --favorite-model MODEL | --unfavorite-model MODEL\n");
+    printf("  ttychatter --config | --set KEY VALUE | --unset KEY\n");
+    printf("  ttychatter --search-sessions TEXT\n");
     printf("\nOptions:\n");
     printf("  -m, --model MODEL        model/router to use (default from config)\n");
     printf("  -a, --attach FILE        attach file; repeatable\n");
     printf("  -l, --loopback           also print AI output to stdout\n");
+    printf("      --demo               use local demo models/replies; no network/API key\n");
     printf("      --search TEXT        filter model list\n");
     printf("      --model-type TYPE    all, routers, fixed, free, auto\n");
+    printf("      --favorites          list favorite models\n");
+    printf("      --favorite-model M   add favorite model\n");
+    printf("      --unfavorite-model M remove favorite model\n");
+    printf("      --config             print active config summary\n");
+    printf("      --set KEY VALUE      write config key\n");
+    printf("      --unset KEY          remove config key\n");
+    printf("      --search-sessions T  search local session files\n");
     printf("      --set-api-key        save API key\n");
     printf("      --gpg                encrypt API key with gpg when used with --set-api-key\n");
     printf("      --forget-api-key     remove stored plaintext/encrypted API key\n");
@@ -1152,6 +1307,54 @@ static void print_help(void) {
 
 static void print_version(void) {
     printf("%s %s\n", TC_PROGRAM, TC_VERSION);
+}
+
+
+/*
+ * Print the active configuration in a human-readable form.  This is not meant
+ * to expose secrets: API keys are intentionally summarized as loaded/missing.
+ * The command is useful because ttychatter has multiple XDG paths and users
+ * should not have to guess where sessions, attachments, cache files, and GPG
+ * key files live.
+ */
+static int print_config(const TCConfig *cfg) {
+    printf("config file:      %s\n", cfg->config_file);
+    printf("api key:          %s\n", cfg->api_key ? "loaded" : "missing");
+    printf("api key gpg file: %s\n", cfg->api_key_gpg_file);
+    printf("model:            %s\n", cfg->model);
+    printf("model cache:      %s\n", cfg->model_cache_file);
+    printf("model favorites:  %s\n", cfg->model_favorites_file);
+    printf("session dir:      %s\n", cfg->session_dir);
+    printf("attachment dir:   %s\n", cfg->attachment_dir);
+    printf("context turns:    %ld\n", cfg->context_turns);
+    printf("code threshold:   %ld lines\n", cfg->code_attachment_min_lines);
+    printf("max attachment:   %ld bytes\n", cfg->max_attachment_bytes);
+    return 0;
+}
+
+/*
+ * Session search is intentionally simple: scan the local session directory and
+ * print any lines containing the requested substring.  This gives the C client
+ * a small but useful piece of the transcript-search behavior from the richer
+ * clients without requiring ncurses, an indexer, or a database.
+ */
+static int search_sessions(const TCConfig *cfg, const char *needle) {
+    if (!needle || !*needle) {
+        fprintf(stderr, "--search-sessions requires text to search for\n");
+        return 2;
+    }
+    char *qdir = shell_quote(cfg->session_dir);
+    char *qneedle = shell_quote(needle);
+    TCBuffer cmd;
+    buffer_init(&cmd);
+    buffer_appendf(&cmd, "grep -RIn -- %s %s 2>/dev/null", qneedle, qdir);
+    char *cmds = buffer_take(&cmd);
+    int rc = system(cmds);
+    free(cmds);
+    free(qdir);
+    free(qneedle);
+    if (rc != 0) return 1;
+    return 0;
 }
 
 static int doctor(const TCConfig *cfg) {
@@ -1190,6 +1393,14 @@ static int parse_args(int argc, char **argv, TCArgs *args) {
         {"model", required_argument, 0, 'm'},
         {"attach", required_argument, 0, 'a'},
         {"loopback", no_argument, 0, 'l'},
+        {"demo", no_argument, 0, 1009},
+        {"config", no_argument, 0, 1010},
+        {"set", required_argument, 0, 1011},
+        {"unset", required_argument, 0, 1012},
+        {"favorites", no_argument, 0, 1013},
+        {"favorite-model", required_argument, 0, 1014},
+        {"unfavorite-model", required_argument, 0, 1015},
+        {"search-sessions", required_argument, 0, 1016},
         {"set-api-key", no_argument, 0, 1000},
         {"gpg", no_argument, 0, 1001},
         {"forget-api-key", no_argument, 0, 1002},
@@ -1209,6 +1420,18 @@ static int parse_args(int argc, char **argv, TCArgs *args) {
             case 'm': args->model_override = xstrdup(optarg); break;
             case 'a': args_add_attachment(args, optarg); break;
             case 'l': args->loopback = true; break;
+            case 1009: args->demo = true; break;
+            case 1010: args->show_config = true; break;
+            case 1011:
+                args->set_key = xstrdup(optarg);
+                if (optind < argc) args->set_value = xstrdup(argv[optind++]);
+                else { fprintf(stderr, "--set requires KEY VALUE\n"); return 1; }
+                break;
+            case 1012: args->unset_key = xstrdup(optarg); break;
+            case 1013: args->list_favorites = true; break;
+            case 1014: args->favorite_model = xstrdup(optarg); break;
+            case 1015: args->unfavorite_model = xstrdup(optarg); break;
+            case 1016: args->search_sessions = xstrdup(optarg); break;
             case 1000: args->set_api_key = true; break;
             case 1001: args->set_api_key_gpg = true; break;
             case 1002: args->forget_api_key = true; break;
@@ -1230,12 +1453,13 @@ static int parse_args(int argc, char **argv, TCArgs *args) {
     return 0;
 }
 
-static int test_model_command(const TCConfig *cfg, const char *model) {
+static int test_model_command(const TCConfig *cfg, const char *model, bool demo) {
     TCMessageList ctx = {0};
     TCArgs empty;
     args_init(&empty);
+    empty.demo = demo;
     const char *prompt = "Please reply with a short sentence confirming this model is available for text generation.";
-    char *reply = openrouter_chat(cfg, model, prompt, &ctx, &empty);
+    char *reply = demo ? demo_chat_response(model, prompt, &empty) : openrouter_chat(cfg, model, prompt, &ctx, &empty);
     printf("Model: %s\n", model);
     printf("Response:\n%s\n", reply);
     free(reply);
@@ -1258,26 +1482,33 @@ int main(int argc, char **argv) {
     if (args.show_version) { print_version(); return 0; }
     if (args.set_api_key) return cmd_set_api_key(&cfg, args.set_api_key_gpg);
     if (args.forget_api_key) return cmd_forget_api_key(&cfg);
+    if (args.show_config) return print_config(&cfg);
+    if (args.set_key) { config_write_key_value(&cfg, args.set_key, args.set_value ? args.set_value : ""); return 0; }
+    if (args.unset_key) { config_remove_key(&cfg, args.unset_key); return 0; }
+    if (args.list_favorites) return favorite_list(&cfg);
+    if (args.favorite_model) return favorite_add(&cfg, args.favorite_model);
+    if (args.unfavorite_model) return favorite_remove(&cfg, args.unfavorite_model);
+    if (args.search_sessions) return search_sessions(&cfg, args.search_sessions);
     if (args.doctor) return doctor(&cfg);
-    if (args.update_models) return update_models(&cfg);
-    if (args.list_models) return list_models(&cfg, args.search, args.model_type);
+    if (args.update_models) return args.demo ? write_demo_model_cache(&cfg) : update_models(&cfg);
+    if (args.list_models) return args.demo ? list_models_from_json(&cfg, demo_models_json(), args.search, args.model_type) : list_models(&cfg, args.search, args.model_type);
     if (args.test_model) {
-        if (!cfg.api_key) die("API key missing; set OPENROUTER_API_KEY or run --set-api-key");
-        return test_model_command(&cfg, args.test_model_id);
+        if (!args.demo && !cfg.api_key) die("API key missing; set OPENROUTER_API_KEY or run --set-api-key");
+        return test_model_command(&cfg, args.test_model_id, args.demo);
     }
 
     if (!args.input_path || !args.output_path) {
         print_help();
         return 2;
     }
-    if (!cfg.api_key) die("API key missing; set OPENROUTER_API_KEY or run --set-api-key");
+    if (!args.demo && !cfg.api_key) die("API key missing; set OPENROUTER_API_KEY or run --set-api-key");
 
     size_t input_len = 0;
     char *input_text = read_file(args.input_path, &input_len);
     TCMessageList context = load_context_from_session(args.output_path, cfg.context_turns);
     const char *model = args.model_override ? args.model_override : cfg.model;
 
-    char *raw = openrouter_chat(&cfg, model, input_text, &context, &args);
+    char *raw = args.demo ? demo_chat_response(model, input_text, &args) : openrouter_chat(&cfg, model, input_text, &context, &args);
     char *session_base = basename_no_ext(args.output_path);
     char *cleaned = extract_code_blocks(&cfg, session_base, raw);
 
