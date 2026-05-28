@@ -1,34 +1,20 @@
-TTYCHATTER C COMMAND-LINE CLIENT
+ttychatter C command-line client
 ================================
 
-This directory contains the traditional Unix command-line C implementation of
-ttychatter.
-
-It is intentionally different from the Python ncurses interface.  The ncurses
-client is the full-screen terminal application.  This C client is the classic
-Unix tool: it reads an input file and appends output to a session file.
+This directory contains the traditional Unix C edition of ttychatter.  It is
+not an ncurses program.  It is a file-in/file-out command-line tool:
 
     ttychatter input.txt output.log
 
-The output file is also the session state.  Reusing the same output file resumes
-the conversation by sending recent turns as context.
+The output file is both transcript and session state.  Reusing the same output
+file resumes the session:
 
-Interactive mode
-----------------
+    ttychatter next-question.txt output.log
 
-The C client also includes a line-oriented interactive mode for parity with the
-Bash clients:
+Build
+-----
 
-    ttychatter --interactive session.log
-
-Interactive mode accepts colon commands such as :help, :models, :attach,
-:editor, :memory, and :quit.  It is deliberately not a curses UI.  It exists so
-users can keep chatting without preparing a new input file for every turn.
-
-Build requirements
-------------------
-
-Debian/Ubuntu/ChromeOS Linux:
+Dependencies on Debian/Ubuntu/Crostini:
 
     sudo apt-get install build-essential pkg-config libcurl4-openssl-dev libjson-c-dev ca-certificates gnupg
 
@@ -36,37 +22,26 @@ Build:
 
     make
 
-Run:
+Check syntax/basic commands:
 
-    ./ttychatter --help
+    make check
 
-Quick demo
-----------
+Design notes
+------------
 
-Demo mode does not need an API key and does not contact OpenRouter:
+The C edition aims for feature parity with ttychatter.python and
+ttychatter.bash where that parity makes sense on a traditional command line.
+It supports interactive colon commands, model caching, favorites, GPG API-key
+storage, attachment attempts, code-block extraction, session search, loopback
+output, and demo mode.
 
-    ./ttychatter --demo --models
-    ./ttychatter --demo --interactive demo.log
+Some graphical/ncurses features intentionally map to command-line equivalents:
 
-File workflow
--------------
+    ncurses model browser -> --models / --select-model
+    ncurses options screen -> --config / --set / --unset
+    ncurses memory screen -> --show-memory / --edit-memory / --clear-memory
+    ncurses file attachment menu -> -a FILE and :attach FILE
 
-    cat > input.txt
-    Explain Unix pipes in one paragraph.
-    ^D
-
-    ./ttychatter --demo input.txt session.log
-    less session.log
-
-API-key setup
--------------
-
-Encrypted storage is recommended:
-
-    ./ttychatter --set-api-key --gpg
-
-Plaintext config storage is also available:
-
-    ./ttychatter --set-api-key
-
-Read WALKTHROUGH for a complete guide.
+The source is heavily commented to help future maintainers, porters, fork
+authors, packagers, and customizers understand the reason behind each major
+subsystem.

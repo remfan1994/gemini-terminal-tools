@@ -1,124 +1,80 @@
 # ttychatter C changelog
 
+## 0.5.0-c-cli
+
+### Added
+- Additional feature-parity work against ttychatter.python reference behavior
+- Config support for MODEL_TEST_PROMPT
+- Config support for SEND_INPUT as a cross-client parity key
+- Config support for EDITOR
+- Config support for DEMO_MODE
+- Config support for MODEL_TYPE_FILTER
+- Config support for MODEL_FILTER_GENERATE_CONTENT
+- Config support for MODEL_FILTER_REQUIRE_TOKENS
+- Config support for MODEL_FILTER_HIDE_PREVIEW
+- Config support for MODEL_MIN_INPUT_TOKENS
+- Config support for MODEL_MIN_OUTPUT_TOKENS
+- `--list` session listing command
+- `--rename-session OLD NEW` command
+- `--show-memory SESSION` command
+- `--clear-memory SESSION` command
+- `--edit-memory SESSION` command
+- `--editor-prompt [SESSION]` command
+- `--credits` command
+- `--search-sessions TEXT` command
+- `--select-model` numbered cached model selector
+- `--min-input-tokens N`
+- `--min-output-tokens N`
+- `--hide-preview`
+- `--show-preview`
+- `--require-tokens`
+- `--send-input VALUE`
+- `--theme VALUE`
+- `--code-attachment-min-lines N`
+- Interactive `:clear-memory` command
+- Explicit context snapshot markers for edited memory
+- Memory-clear marker handling in context reconstruction
+
+### Changed
+- `--help` now documents the expanded command set
+- `--config` now prints more cross-client parity keys
+- `--test-model` now uses MODEL_TEST_PROMPT from config
+- Model listing now honors more filter settings from config and flags
+- `--all` disables model filters for model listing
+- Session memory parsing now honors explicit memory-clear markers and context snapshots
+
+### Notes
+- Some keys such as SEND_INPUT and THEME are accepted for config compatibility even though the file-in/file-out C client has no ncurses input field or visual theme.
+- The C client remains command-line/file-oriented; ncurses-only UI mechanics are represented by command-line equivalents.
+
 ## 0.4.0-c-cli
 
 ### Added
-- Line-oriented interactive mode with `--interactive`
-- Short `-i` alias for interactive mode
-- Optional interactive session path argument
-- Runtime colon-command system for the C client
-- `:help` runtime command
-- `:models` runtime command
-- `:routers` runtime command
-- `:update-models` runtime command
-- `:test-model MODEL` runtime command
-- `:model MODEL` runtime command for runtime model switching
-- `:model-save MODEL` runtime command for runtime switch plus config save
-- `:favorites`, `:favorite MODEL`, and `:unfavorite MODEL` runtime commands
-- `:config`, `:set KEY VALUE`, and `:unset KEY` runtime commands
-- `:set-api-key [gpg]` and `:forget-api-key` runtime commands
-- `:memory` runtime command for viewing the active context buffer
-- `:attach FILE`, `:attachments`, and `:clear-attachments` runtime commands
-- `:editor` runtime command using VISUAL, EDITOR, or vi
-- `:search TEXT` runtime command for current session search
-- `:search-all TEXT` runtime command for SESSION_DIR search
-- `:credits` runtime command
-- `:doctor` runtime command
-- `:quit` runtime command
-- Literal-colon escaping with `\:`
-- Interactive-mode documentation in README, WALKTHROUGH, and man page
-
-### Changed
-- Version updated to 0.4.0-c-cli
-- C client parity with Bash runtime command mode improved
-- Interactive mode reuses the same structured output/session file as file-in/file-out mode
-- Interactive sends reuse attachment handling, context reconstruction, code-block extraction, and session append logic
-
-### Notes
-- Interactive mode is intentionally a line-oriented REPL, not a curses interface.
-- The traditional `ttychatter input.txt output.log` workflow remains the default.
-- Colon commands are local commands and are not sent to OpenRouter.
+- Interactive mode with colon commands
+- `--interactive` / `-i`
+- Runtime commands such as `:help`, `:models`, `:attach`, `:editor`, `:doctor`, and `:quit`
 
 ## 0.3.0-c-cli
 
 ### Added
-- CONFIRM_LIVE_SEND config key
-- --yes option for noninteractive confirmation bypass
-- STARTUP_NOTICE config key
-- New-output-file Project Lead notice block
-- LOOPBACK config key
-- THEME config key for cross-client config parity
-- MODEL_SORT_ORDER config key
-- --sort KEY model listing option
-- --favorites-only model listing option
-- Favorite marker column in model listings
-- Model row sorting by name, context/tokens, type, or favorites
-- Expanded --config output for new parity keys
-- Expanded --doctor output for new parity keys
-- Expanded man page documentation for confirmation, startup notice, loopback defaults, themes, model sorting, and favorites-only listing
-
-### Changed
-- Version updated to 0.3.0-c-cli
-- Model listing now uses a model-row metadata structure instead of printing directly from JSON
-- New output files can now include a non-context Project Lead notice block
-- Live OpenRouter sends can be guarded by a confirmation prompt when configured
-- Favorites are now visible in the model listing table
-
-### Notes
-- SEND_INPUT is intentionally not implemented because this C client is file-in/file-out by default.
-- THEME is accepted for config parity but does not currently change command-line rendering.
-- The Project Lead notice is not parsed as user or assistant context.
+- Confirm-live-send support
+- Startup notice support
+- Loopback default config support
+- Model sorting and favorites-only listing
 
 ## 0.2.0-c-cli
 
 ### Added
-- Demo mode with `--demo`
-- Demo model list for offline/no-key testing
-- Demo chat response for testing output/session/log behavior without network calls
-- Demo model test support with `--demo --test-model MODEL`
-- Config inspection command with `--config`
-- Config write command with `--set KEY=VALUE`
-- Config removal command with `--unset KEY`
-- Model favorites file support
-- `--favorites` command
-- `--favorite-model MODEL` command
-- `--unfavorite-model MODEL` command
-- `MODEL_FAVORITES_FILE` config key
-- `--loopback-file FILE` response mirroring
-
-### Changed
-- Version updated to `0.2.0-c-cli`
-- `--update-models` writes the demo model cache when used with `--demo`
-- `--models` can show local demo models when used with `--demo`
-- `--test-model` no longer requires an API key in demo mode
+- Demo mode
+- Model favorites
+- Config set/unset
+- Session search
 
 ## 0.1.0-c-cli
 
-### Added
-- Initial C command-line ttychatter client
-- Traditional file-in/file-out workflow: `ttychatter input.txt output.log`
-- OpenRouter chat-completions support through libcurl
-- JSON request/response handling through json-c
-- XDG-style config/cache/data defaults
-- Config file loading from `~/.config/ttychatter/config`
-- Environment API-key support through `OPENROUTER_API_KEY` and `TTYCHATTER_API_KEY`
-- Plaintext API-key setup command
-- Optional GPG-encrypted API-key setup command
-- API-key forget command
-- Doctor diagnostics command
-- Model cache update command
-- Model listing from cache
-- Model search filter
-- Model type filter for routers/fixed/free/auto
-- Single-model test command
-- Input file to output session log workflow
-- Session continuation by reusing the same output file
-- Context reconstruction from recent output-file turns
-- Repeatable `--attach` / `-a` option
-- Text attachment insertion
-- Image attachment data URL support for compatible models
-- Long fenced-code-block extraction into attachment files
-- Loopback output mode for piping AI responses to stdout
-- Traditional Unix man page
-- Step-by-step WALKTHROUGH document
-- Verbose maintainer comments in source code
+### Initial release
+- File-in/file-out OpenRouter command-line client
+- API-key setup including GPG support
+- Model list/update/test basics
+- Session log append/resume
+- Attachments and code-block extraction basics

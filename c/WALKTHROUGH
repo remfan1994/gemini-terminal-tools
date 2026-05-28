@@ -1,111 +1,81 @@
-TTYCHATTER C COMMAND-LINE WALKTHROUGH
-=====================================
+ttychatter C walkthrough
+========================
 
-This walkthrough guides a first-time user from an empty setup to both the
-traditional file workflow and the line-oriented interactive workflow.
+1. Build the program
+--------------------
 
-1. Build
---------
-
-    sudo apt-get update
-    sudo apt-get install build-essential pkg-config libcurl4-openssl-dev libjson-c-dev ca-certificates gnupg
-
-    cd c
     make
 
-Check the binary:
+2. Store an API key
+-------------------
 
-    ./ttychatter --version
-    ./ttychatter --help
+Plaintext config:
 
-2. Try demo mode
-----------------
+    ./ttychatter --set-api-key
 
-Demo mode does not use the network.
-
-    ./ttychatter --demo --models
-    ./ttychatter --demo --test-model demo/large-context
-
-3. Try file-in/file-out mode
-----------------------------
-
-    cat > first.txt
-    Explain the purpose of demo mode.
-    ^D
-
-    ./ttychatter --demo --loopback first.txt session.log
-
-Open the session:
-
-    less session.log
-
-4. Try interactive mode
------------------------
-
-    ./ttychatter --demo --interactive session.log
-
-Then type:
-
-    :help
-    hello from interactive demo mode
-    :memory
-    :quit
-
-Colon commands are local ttychatter commands.  They are not sent to the model.
-
-5. Store an OpenRouter API key
-------------------------------
-
-Encrypted storage:
+Encrypted with gpg:
 
     ./ttychatter --set-api-key --gpg
 
-Environment variable alternative:
-
-    export OPENROUTER_API_KEY="your-key"
-
-6. Get models
--------------
+3. Fetch model catalog
+----------------------
 
     ./ttychatter --update-models
+
+4. Browse/search/select models
+------------------------------
+
+    ./ttychatter --models
     ./ttychatter --models --search free
     ./ttychatter --models --model-type routers
-    ./ttychatter --models --sort context
+    ./ttychatter --select-model
 
-7. Bookmark a model
--------------------
+5. Create an input file
+-----------------------
 
-    ./ttychatter --favorite-model openrouter/auto
-    ./ttychatter --favorites
+    cat > input.txt
+    Explain what a Unix pipeline is in one paragraph.
+    Ctrl+D
 
-8. Test a model
----------------
+6. Send input and write output/session log
+------------------------------------------
 
-    ./ttychatter --test-model openrouter/auto
+    ./ttychatter input.txt session.log
 
-9. Real file workflow
----------------------
-
-    cat > first.txt
-    Explain router models versus fixed models.
-    ^D
-
-    ./ttychatter -m openrouter/auto first.txt session.log
-
-Continue the session:
+7. Resume the same session
+--------------------------
 
     cat > followup.txt
-    Give me a shorter explanation.
-    ^D
+    Give me a tiny example.
+    Ctrl+D
 
-    ./ttychatter -m openrouter/auto followup.txt session.log
+    ./ttychatter followup.txt session.log
 
-10. Attach files
-----------------
+8. Attach files
+---------------
 
-    ./ttychatter -a notes.txt -a image.png question.txt session.log
+    ./ttychatter -a notes.txt -a image.png prompt.txt session.log
 
-11. Use loopback
-----------------
+9. Use loopback output
+----------------------
 
-    ./ttychatter --loopback question.txt session.log | tee latest-response.txt
+    ./ttychatter --loopback prompt.txt session.log | less
+
+10. Interactive mode with colon commands
+----------------------------------------
+
+    ./ttychatter --interactive session.log
+
+    ttychatter> hello
+    ttychatter> :models
+    ttychatter> :attach notes.txt
+    ttychatter> :memory
+    ttychatter> :quit
+
+11. Demo mode
+-------------
+
+Demo mode avoids network/API use:
+
+    ./ttychatter --demo input.txt demo.log
+    ./ttychatter --demo --interactive demo.log
