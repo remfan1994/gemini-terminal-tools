@@ -2,14 +2,28 @@ TTYCHATTER C COMMAND-LINE CLIENT
 ================================
 
 This directory contains the traditional Unix command-line C implementation of
-ttychatter. It is intentionally different from the Python ncurses interface:
-there is no full-screen UI here. The user supplies an input file and an output
-session file.
+ttychatter.
+
+It is intentionally different from the Python ncurses interface.  The ncurses
+client is the full-screen terminal application.  This C client is the classic
+Unix tool: it reads an input file and appends output to a session file.
 
     ttychatter input.txt output.log
 
-The output file is also the session state. Reusing the same output file resumes
+The output file is also the session state.  Reusing the same output file resumes
 the conversation by sending recent turns as context.
+
+Interactive mode
+----------------
+
+The C client also includes a line-oriented interactive mode for parity with the
+Bash clients:
+
+    ttychatter --interactive session.log
+
+Interactive mode accepts colon commands such as :help, :models, :attach,
+:editor, :memory, and :quit.  It is deliberately not a curses UI.  It exists so
+users can keep chatting without preparing a new input file for every turn.
 
 Build requirements
 ------------------
@@ -26,37 +40,33 @@ Run:
 
     ./ttychatter --help
 
-First steps without network
----------------------------
+Quick demo
+----------
 
-Demo mode lets you exercise the client without an API key or provider calls:
+Demo mode does not need an API key and does not contact OpenRouter:
 
     ./ttychatter --demo --models
-    ./ttychatter --demo --test-model demo/large-context
+    ./ttychatter --demo --interactive demo.log
 
-Then create an input file and test full session logging:
+File workflow
+-------------
 
     cat > input.txt
     Explain Unix pipes in one paragraph.
     ^D
 
     ./ttychatter --demo input.txt session.log
+    less session.log
 
-First steps with OpenRouter
----------------------------
+API-key setup
+-------------
+
+Encrypted storage is recommended:
 
     ./ttychatter --set-api-key --gpg
-    ./ttychatter --doctor
-    ./ttychatter --update-models
-    ./ttychatter --models --search free
-    ./ttychatter --test-model openrouter/auto
 
-Then create an input file and session:
+Plaintext config storage is also available:
 
-    cat > input.txt
-    Explain Unix pipes in one paragraph.
-    ^D
+    ./ttychatter --set-api-key
 
-    ./ttychatter input.txt session.log
-
-Read WALKTHROUGH for a complete step-by-step guide.
+Read WALKTHROUGH for a complete guide.

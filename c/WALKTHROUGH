@@ -1,167 +1,111 @@
 TTYCHATTER C COMMAND-LINE WALKTHROUGH
 =====================================
 
-This walkthrough guides a first-time user from an empty setup to a resumed
-session with attachments. It is written for the C command-line version, not the
-ncurses or Bash clients.
+This walkthrough guides a first-time user from an empty setup to both the
+traditional file workflow and the line-oriented interactive workflow.
 
-1. Build the program
---------------------
-
-Install development packages on Debian, Ubuntu, or ChromeOS Linux:
+1. Build
+--------
 
     sudo apt-get update
     sudo apt-get install build-essential pkg-config libcurl4-openssl-dev libjson-c-dev ca-certificates gnupg
 
-Build:
-
     cd c
     make
 
-Check that the binary runs:
+Check the binary:
 
     ./ttychatter --version
     ./ttychatter --help
 
-2. Try demo mode before using the network
------------------------------------------
+2. Try demo mode
+----------------
 
-Demo mode does not need an API key and does not contact OpenRouter.
+Demo mode does not use the network.
 
     ./ttychatter --demo --models
     ./ttychatter --demo --test-model demo/large-context
 
-Create a prompt:
+3. Try file-in/file-out mode
+----------------------------
 
     cat > first.txt
     Explain the purpose of demo mode.
     ^D
 
-Run a full demo request:
-
     ./ttychatter --demo --loopback first.txt session.log
 
-The demo response includes short and long code blocks. Long code blocks are
-saved under ATTACHMENT_DIR according to CODE_ATTACHMENT_MIN_LINES.
+Open the session:
 
-3. Store your OpenRouter API key
---------------------------------
+    less session.log
 
-Encrypted storage is recommended:
+4. Try interactive mode
+-----------------------
+
+    ./ttychatter --demo --interactive session.log
+
+Then type:
+
+    :help
+    hello from interactive demo mode
+    :memory
+    :quit
+
+Colon commands are local ttychatter commands.  They are not sent to the model.
+
+5. Store an OpenRouter API key
+------------------------------
+
+Encrypted storage:
 
     ./ttychatter --set-api-key --gpg
 
-You will paste the API key, then GPG will ask for encryption/passphrase handling
-according to your local GPG setup.
-
-If you prefer environment variables, use:
+Environment variable alternative:
 
     export OPENROUTER_API_KEY="your-key"
 
-Plaintext config storage is also available:
-
-    ./ttychatter --set-api-key
-
-4. Check local diagnostics
---------------------------
-
-Run:
-
-    ./ttychatter --doctor
-
-The doctor command tells you whether ttychatter found your key, cache paths,
-GPG, and libcurl. It does not print the API key itself.
-
-5. Get the model list
----------------------
-
-Refresh the OpenRouter model cache:
+6. Get models
+-------------
 
     ./ttychatter --update-models
-
-List cached models:
-
-    ./ttychatter --models
-
-Search cached models:
-
-    ./ttychatter --models --search llama
+    ./ttychatter --models --search free
     ./ttychatter --models --model-type routers
-    ./ttychatter --models --model-type free
+    ./ttychatter --models --sort context
 
-6. Bookmark useful models
--------------------------
+7. Bookmark a model
+-------------------
 
     ./ttychatter --favorite-model openrouter/auto
     ./ttychatter --favorites
 
-Favorites are shown with a leading asterisk in the model list.
-
-7. Test a model
+8. Test a model
 ---------------
-
-Test one model before starting a real session:
 
     ./ttychatter --test-model openrouter/auto
 
-If the model replies, you can use it for a session.
-
-8. Create your first real input file
-------------------------------------
-
-Use any editor or shell tool:
+9. Real file workflow
+---------------------
 
     cat > first.txt
-    Explain the difference between a router model and a fixed model.
+    Explain router models versus fixed models.
     ^D
-
-9. Generate output into a session file
---------------------------------------
-
-Run:
 
     ./ttychatter -m openrouter/auto first.txt session.log
 
-Open the session log:
-
-    less session.log
-
-10. Resume the session
-----------------------
-
-Create another input file:
+Continue the session:
 
     cat > followup.txt
-    Explain that again using a short Unix analogy.
+    Give me a shorter explanation.
     ^D
-
-Reuse the same output file:
 
     ./ttychatter -m openrouter/auto followup.txt session.log
 
-The program reads recent turns from session.log and appends a new turn.
-
-11. Attach files
+10. Attach files
 ----------------
 
-Attach one text file:
+    ./ttychatter -a notes.txt -a image.png question.txt session.log
 
-    ./ttychatter -a notes.txt question.txt session.log
-
-Attach multiple files:
-
-    ./ttychatter -a notes.txt -a outline.md -a diagram.png question.txt session.log
-
-Text attachments are inserted into the prompt. Image attachments are sent as
-OpenRouter chat content parts when the selected model supports image input.
-Other binary files are listed but not fully embedded in this C CLI release.
-
-12. Use loopback for pipes
---------------------------
-
-To print the AI response to stdout as well as append it to the session log:
+11. Use loopback
+----------------
 
     ./ttychatter --loopback question.txt session.log | tee latest-response.txt
-
-This makes ttychatter fit classic shell pipelines while still preserving the
-session file.

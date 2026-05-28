@@ -1,38 +1,46 @@
 TTYCHATTER(1)              User Commands              TTYCHATTER(1)
 
 NAME
-    ttychatter - file-based OpenRouter chat client
+    ttychatter - traditional command-line OpenRouter chat client
 
 SYNOPSIS
     ttychatter [options] input.txt output.log
-    ttychatter --demo [options] input.txt output.log
+    ttychatter --interactive [output.log]
+    ttychatter --demo --interactive [output.log]
     ttychatter --set-api-key [--gpg]
     ttychatter --forget-api-key
     ttychatter --models [--demo] [--search TEXT] [--model-type TYPE]
+               [--sort ORDER] [--favorites-only]
     ttychatter --update-models [--demo]
     ttychatter --test-model MODEL [--demo]
     ttychatter --favorites
     ttychatter --favorite-model MODEL
     ttychatter --unfavorite-model MODEL
     ttychatter --config
-    ttychatter --set KEY VALUE
+    ttychatter --set KEY=VALUE
     ttychatter --unset KEY
-    ttychatter --search-sessions TEXT
     ttychatter --doctor
     ttychatter --version
     ttychatter --help
 
 DESCRIPTION
     ttychatter is the C command-line client in the ttychatter family.
-    It is not an ncurses interface. It follows the traditional Unix file
-    workflow: the user prepares an input file, invokes ttychatter, and the AI
-    response is appended to an output/session file.
 
-    The output file is also the session log. Reusing the same output file
+    It is intentionally not the ncurses interface.  The primary workflow is a
+    traditional Unix file-in/file-out model: the user prepares an input file,
+    runs ttychatter, and ttychatter appends the AI response to an output file.
+
+        ttychatter input.txt output.log
+
+    The output file is also the session state.  Reusing the same output file
     resumes the conversation because ttychatter reads recent turns from that
     file and sends them as context.
 
-BASIC USE
+    ttychatter also provides an optional line-oriented interactive mode with
+    colon commands.  This exists to preserve feature parity with the Bash
+    clients without turning the C client into an ncurses program.
+
+BASIC FILE WORKFLOW
     Create an input prompt:
 
         cat > input.txt
@@ -43,34 +51,66 @@ BASIC USE
 
         ttychatter input.txt session.log
 
-    Continue the same session with a new input file:
+    Continue the same session:
 
         vi followup.txt
         ttychatter followup.txt session.log
 
+INTERACTIVE MODE
+    Start an interactive line-oriented session:
+
+        ttychatter --interactive session.log
+
+    Or use demo mode without network access:
+
+        ttychatter --demo --interactive demo.log
+
+    In interactive mode, normal lines are sent to the AI model.  Lines that
+    begin with ':' are local ttychatter commands and are not sent to the model.
+
+    Common runtime commands:
+
+        :help
+        :models
+        :routers
+        :update-models
+        :test-model MODEL
+        :model MODEL
+        :model-save MODEL
+        :favorites
+        :favorite MODEL
+        :unfavorite MODEL
+        :config
+        :set KEY VALUE
+        :unset KEY
+        :set-api-key
+        :set-api-key gpg
+        :forget-api-key
+        :memory
+        :attach FILE
+        :attachments
+        :clear-attachments
+        :editor
+        :search TEXT
+        :search-all TEXT
+        :credits
+        :doctor
+        :quit
+
+    To send a literal message beginning with ':' prefix it with a backslash:
+
+        \:this line is sent to the model
+
 DEMO MODE
-    Demo mode uses local model rows and local canned responses. It does not
+    Demo mode uses local model rows and local canned responses.  It does not
     require an OpenRouter API key and does not contact OpenRouter.
 
-    List demo models:
-
         ttychatter --demo --models
-
-    Test a demo model:
-
         ttychatter --demo --test-model demo/large-context
-
-    Run a full file-in/file-out demo request:
-
         ttychatter --demo input.txt session.log
-
-    Demo responses include both short and long fenced code blocks so users can
-    verify the code-block attachment threshold without spending provider
-    requests.
+        ttychatter --demo --interactive session.log
 
 API KEY SETUP
-    The recommended first step for real OpenRouter use is API-key setup.
-
     Store the OpenRouter API key encrypted with GPG:
 
         ttychatter --set-api-key --gpg
@@ -79,7 +119,7 @@ API KEY SETUP
 
         ttychatter --set-api-key
 
-    Plaintext storage is convenient but less safe. Encrypted GPG storage uses
+    Plaintext storage is convenient but less safe.  Encrypted GPG storage uses
     the external gpg command and stores the key at API_KEY_GPG_FILE.
 
     Environment variables are also supported:
@@ -98,7 +138,7 @@ CONFIGURATION
 
     Set or unset values:
 
-        ttychatter --set CONTEXT_TURNS 20
+        ttychatter --set CONTEXT_TURNS=20
         ttychatter --unset MODEL
 
     Common keys:
@@ -125,16 +165,16 @@ CONFIGURATION
 
         MODEL_FAVORITES_FILE
             Newline-delimited model favorites file.
-            Default: ~/.local/share/ttychatter/model-favorites
+
+        MODEL_SORT_ORDER
+            Default sort order for model listing.
+            Values: name, context, tokens, type, favorites
 
         SESSION_DIR
-            Default session directory for other ttychatter clients.
-            The C client can still write to any output file given on the
-            command line.
+            Default session directory for helper commands and session search.
 
         ATTACHMENT_DIR
             Directory for extracted code-block attachments.
-            Default: ~/.local/share/ttychatter/attachments
 
         CODE_ATTACHMENT_MIN_LINES
             Minimum line count before a returned fenced code block is saved as
@@ -145,14 +185,23 @@ CONFIGURATION
             Maximum local attachment size for inline sending.
             Default: 1048576
 
+        CONFIRM_LIVE_SEND
+            If true, ask before making a real OpenRouter chat-completions
+            request. The --yes option bypasses this confirmation.
+
+        STARTUP_NOTICE
+            If true, a new output/session file begins with a human-readable
+            Project Lead notice block. That block is not sent as provider
+            context.
+
+        LOOPBACK
+            If true, print AI output to stdout in addition to appending it to
+            the session log.
+
 MODEL CATALOG
     Refresh the OpenRouter model cache:
 
         ttychatter --update-models
-
-    Write a demo model cache without network:
-
-        ttychatter --demo --update-models
 
     List cached models:
 
@@ -162,18 +211,19 @@ MODEL CATALOG
 
         ttychatter --models --search llama
 
-    Show only routers or free models:
+    Show routers, fixed models, free models, or favorites:
 
         ttychatter --models --model-type routers
+        ttychatter --models --model-type fixed
         ttychatter --models --model-type free
+        ttychatter --models --favorites-only
 
-    Recognized model types:
+    Sort the model list:
 
-        all
-        routers
-        fixed
-        free
-        auto
+        ttychatter --models --sort name
+        ttychatter --models --sort context
+        ttychatter --models --sort type
+        ttychatter --models --sort favorites
 
 MODEL FAVORITES
     Add, remove, and list bookmarked models:
@@ -182,99 +232,54 @@ MODEL FAVORITES
         ttychatter --unfavorite-model openrouter/auto
         ttychatter --favorites
 
-    The model list marks favorites with a leading asterisk.
-
-MODEL TESTING
-    Test one model without appending to a session log:
-
-        ttychatter --test-model openrouter/auto
-
-    Test without contacting OpenRouter:
-
-        ttychatter --demo --test-model demo/large-context
-
-    The test sends a short availability prompt to the selected model and prints
-    the raw response.
-
 ATTACHMENTS
-    Attach one or more files:
+    Attach files with repeated -a options:
 
-        ttychatter -a notes.txt input.txt session.log
-        ttychatter -a notes.txt -a diagram.png input.txt session.log
+        ttychatter -a notes.txt -a image.png input.txt session.log
 
-    Text-like attachments are inserted into the user message as text. Image
-    attachments are sent as data URLs using OpenRouter's chat-completions
-    content-part format when the selected model supports image input.
+    Text files are inserted into the text prompt. Image files are sent as
+    OpenRouter chat content parts when the chosen model supports image input.
+    Other binary files are listed in the prompt but not fully embedded.
 
-    Other binary files are listed in the prompt but not embedded as raw data in
-    this release.
+CODE BLOCK EXTRACTION
+    Long fenced code blocks in AI responses are saved under ATTACHMENT_DIR.
+    Short fenced blocks remain inline.  CODE_ATTACHMENT_MIN_LINES controls the
+    threshold.
 
 LOOPBACK
-    To also print the AI response to stdout:
+    Print the clean AI response to stdout while still appending to the session
+    log:
 
-        ttychatter --loopback input.txt session.log
+        ttychatter --loopback input.txt session.log | tee latest.txt
 
-    This is useful for pipes:
+    Mirror the clean AI response to a file:
 
-        ttychatter --loopback input.txt session.log | less
-
-SESSION SEARCH
-    Search local session files under SESSION_DIR:
-
-        ttychatter --search-sessions router
-
-SESSION FORMAT
-    The output file is human-readable and structured with markers:
-
-        ===== TTYCHATTER TURN BEGIN =====
-        ----- USER BEGIN -----
-        ...
-        ----- USER END -----
-        ----- AI BEGIN -----
-        ...
-        ----- AI END -----
-        ===== TTYCHATTER TURN END =====
-
-    These markers allow ttychatter to reconstruct recent context later.
-
-WALKTHROUGH
-    A detailed step-by-step guide is provided in the WALKTHROUGH file included
-    with the source distribution.
-
-DIAGNOSTICS
-    Show local diagnostics:
-
-        ttychatter --doctor
-
-    The doctor command reports config paths, API-key loading status, GPG
-    availability, cache path, storage paths, and libcurl version. It does not
-    print API-key values.
+        ttychatter --loopback-file latest.txt input.txt session.log
 
 FILES
     ~/.config/ttychatter/config
         Configuration file.
 
     ~/.config/ttychatter/api-key.gpg
-        Default encrypted API key file.
+        Default encrypted API-key file.
 
     ~/.cache/ttychatter/models.json
-        Cached OpenRouter model catalog.
+        Default model catalog cache.
 
-    ~/.local/share/ttychatter/model-favorites
-        Newline-delimited favorite model list.
+    ~/.local/share/ttychatter/sessions/
+        Default session directory used by helper commands.
 
-    ~/.local/share/ttychatter/attachments
-        Extracted code-block attachments.
+    ~/.local/share/ttychatter/attachments/
+        Default extracted attachment directory.
 
 LIMITATIONS
-    - Requires libcurl and json-c.
-    - GPG encryption requires the external gpg command.
-    - Image attachment support depends on the selected model.
-    - Non-image binary attachments are not fully embedded in this C CLI release.
-    - The command-line C client is intentionally not an ncurses UI.
+    - This is not an ncurses program.
+    - Interactive mode is a line-oriented REPL, not a full-screen interface.
+    - Binary/media attachment support depends on provider and model support.
+    - Encrypted API-key storage depends on the external gpg program.
 
 VERSION
-    ttychatter 0.2.0-c-cli
+    ttychatter 0.4.0-c-cli
 
 AUTHOR
-    Part of the ttychatter project.
+    Part of the ttychatter terminal chat client project.
