@@ -1,5 +1,29 @@
 # ttychatter C changelog
 
+## 0.6.0-c-cli
+
+### Added
+- `--routers` shorthand for `--models --model-type routers`
+- `--allow-missing-tokens` model-listing flag
+- `--unbookmark-model MODEL` alias for `--unfavorite-model MODEL`
+- `--resume SESSION` interactive-session shorthand
+- `--save` support for successful `--test-model MODEL`
+- Interactive `:list` command
+- Interactive `:rename NAME` command
+- Interactive `:select-model` command
+- Interactive `:edit-memory` command
+- Interactive `:pending` alias for `:attachments`
+- Interactive `:unbookmark MODEL` alias for `:unfavorite MODEL`
+
+### Changed
+- `--loopback-file` now appends responses instead of overwriting the file
+- Interactive mode now more closely matches the Bash/Python colon-command vocabulary
+- Help output documents the new router, resume, save, and missing-token controls
+
+### Notes
+- This pass focuses on parity with ttychatter.python runtime commands and command-line flags, not on ncurses UI mechanics.
+- The C client remains a traditional Unix file-in/file-out client with an optional line-oriented REPL.
+
 ## 0.5.0-c-cli
 
 ### Added

@@ -79,3 +79,26 @@ Demo mode avoids network/API use:
 
     ./ttychatter --demo input.txt demo.log
     ./ttychatter --demo --interactive demo.log
+
+
+Interactive parity commands
+---------------------------
+
+Start a line-oriented session:
+
+    ttychatter --interactive my-session.log
+
+Or resume by session name/path:
+
+    ttychatter --resume my-session.log
+
+Inside the prompt, use colon commands for local control:
+
+    :list
+    :rename research-notes
+    :select-model
+    :edit-memory
+    :pending
+    :quit
+
+These commands are handled by ttychatter itself and are not sent to the AI.

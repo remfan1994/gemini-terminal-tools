@@ -45,3 +45,22 @@ Some graphical/ncurses features intentionally map to command-line equivalents:
 The source is heavily commented to help future maintainers, porters, fork
 authors, packagers, and customizers understand the reason behind each major
 subsystem.
+
+
+0.6.0 parity notes
+------------------
+
+The C CLI now implements more of the Bash/Python runtime-command vocabulary:
+
+    :list
+    :rename NAME
+    :select-model
+    :edit-memory
+    :pending
+    :unbookmark MODEL
+
+It also accepts command-line compatibility flags such as `--routers`,
+`--allow-missing-tokens`, `--unbookmark-model`, `--resume`, and `--save` for
+successful model tests.  These are intentionally command-line equivalents of
+features present in the Bash/Python clients.  They do not attempt to imitate
+full-screen ncurses behavior.

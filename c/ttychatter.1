@@ -6,8 +6,10 @@ NAME
 SYNOPSIS
     ttychatter [options] input.txt output.log
     ttychatter --interactive [output.log]
+    ttychatter --resume SESSION
     ttychatter --demo [options] input.txt output.log
     ttychatter --models [--search TEXT] [--model-type TYPE] [--sort KEY]
+    ttychatter --routers
     ttychatter --select-model
     ttychatter --test-model MODEL
     ttychatter --set-api-key [--gpg]
@@ -95,15 +97,19 @@ RUNTIME COMMANDS
     commands.  They are not sent to the AI model.
 
         :help
+        :list
+        :rename NAME
         :models
         :routers
         :update-models
+        :select-model
         :test-model MODEL
         :model MODEL
         :model-save MODEL
         :favorites
         :favorite MODEL
         :unfavorite MODEL
+        :unbookmark MODEL
         :config
         :set KEY VALUE
         :unset KEY
@@ -111,9 +117,11 @@ RUNTIME COMMANDS
         :set-api-key gpg
         :forget-api-key
         :memory
+        :edit-memory
         :clear-memory
         :attach FILE
         :attachments
+        :pending
         :clear-attachments
         :editor
         :search TEXT
@@ -126,6 +134,18 @@ RUNTIME COMMANDS
     backslash:
 
         \:this line is sent to the AI
+
+
+RESUME SHORTHAND
+    The C client is primarily file-in/file-out, but --resume SESSION is
+    provided as a convenience alias for interactive use.  It resolves SESSION
+    using the same session-name rules as --show-memory and --rename-session.
+
+    Examples:
+
+        ttychatter --resume research-notes
+        ttychatter --resume research-notes.log
+        ttychatter --resume /path/to/research-notes.log
 
 MODEL MANAGEMENT
     ttychatter uses OpenRouter's model catalog.  The model list is cached
@@ -256,7 +276,16 @@ FILES
         Default attachment directory.
 
 VERSION
-    ttychatter 0.5.0-c-cli
+    ttychatter 0.6.0-c-cli
 
 AUTHOR
     Part of the ttychatter terminal AI client project.
+
+PARITY NOTES
+    ttychatter is not an ncurses program.  Runtime features from the Bash and
+    Python clients are mapped to command-line flags and colon commands where
+    they make sense.  The C client deliberately does not implement visual
+    themes, mouse behavior, or full-screen menus.
+
+VERSION
+    ttychatter 0.6.0-c-cli
