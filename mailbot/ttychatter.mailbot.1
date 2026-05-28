@@ -1,0 +1,132 @@
+TTYCHATTER.MAILBOT(1)       User Commands       TTYCHATTER.MAILBOT(1)
+
+NAME
+    ttychatter.mailbot - IMAP/sendmail transport adapter for ttychatter
+
+SYNOPSIS
+    ttychatter.mailbot --once [--dry-run]
+    ttychatter.mailbot --daemon [--dry-run]
+    ttychatter.mailbot --list-candidates
+    ttychatter.mailbot --doctor
+    ttychatter.mailbot --config
+    ttychatter.mailbot --set KEY VALUE
+    ttychatter.mailbot --unset KEY
+    ttychatter.mailbot --set-imap-password [--gpg]
+    ttychatter.mailbot --set-smtp-password [--gpg]
+    ttychatter.mailbot --version
+    ttychatter.mailbot --help
+
+DESCRIPTION
+    ttychatter.mailbot reads unread mail from an IMAP mailbox, selects messages
+    whose subject contains tc:{session}, sends their body and attachments to a
+    configured ttychatter command, and replies by sendmail or SMTP.
+
+    The mailbot does not speak OpenRouter itself. It is a transport adapter:
+
+        email -> ttychatter -> email reply
+
+    This keeps provider/session/model behavior centralized in ttychatter.
+
+SUBJECT FORMAT
+    Normal chat request:
+
+        tc:{session-name}
+
+    New timestamped session:
+
+        tc:{new}
+
+    Configuration request/update:
+
+        tc:{CONFIG}
+
+IMAP SAFETY
+    ttychatter.mailbot inspects unread candidates using IMAP BODY.PEEK[]. This
+    is important: ordinary RFC822/BODY fetches may set the \Seen flag. Dry-run,
+    candidate listing, skipped messages, and config inspection are designed not
+    to consume unread state.
+
+    A matching message is marked seen only after a successful real processing
+    run, and only if MARK_SEEN is enabled.
+
+CONFIGURATION BY EMAIL
+    A message from ALLOWED_FROM with subject:
+
+        tc:{CONFIG}
+
+    and no config attachment causes the bot to reply with the current config as
+    an attachment named ttychatter-mailbot-config.txt. Plaintext password values
+    are redacted.
+
+    To update config by email:
+
+        1. Send tc:{CONFIG}.
+        2. Save and edit the attached config file.
+        3. Reply with the edited config attached and the same tc:{CONFIG} subject.
+        4. Run ttychatter.mailbot --once, or wait for daemon/cron.
+
+    The bot creates a timestamped backup before replacing the config. Dry-run
+    reports what would happen but does not write config.
+
+SECURITY
+    ALLOWED_FROM should be set and narrow. Mail from other senders is ignored.
+
+    Config editing by email is only accepted from ALLOWED_FROM, and only from a
+    plausible text attachment. Do not expose the bot to arbitrary public senders.
+
+CONFIG FILE
+    Default:
+
+        ~/.config/ttychatter/mailbot/config
+
+    Common keys:
+
+        IMAP_HOST
+        IMAP_PORT
+        IMAP_SSL
+        IMAP_USER
+        IMAP_PASSWORD_GPG_FILE
+        IMAP_MAILBOX
+        MAIL_FROM
+        ALLOWED_FROM
+        REPLY_METHOD
+        SENDMAIL
+        TTYCHATTER_COMMAND
+        SESSION_DIR
+        ATTACHMENT_DIR
+        SUBJECT_PREFIX
+        MAX_BODY_BYTES
+        MAX_ATTACHMENT_BYTES
+        PROCESS_ATTACHMENTS
+        MARK_SEEN
+        CONFIG_SUBJECT_TOKEN
+
+COMMANDS
+    --once
+        Check unread messages once and exit.
+
+    --daemon
+        Poll forever using POLL_INTERVAL.
+
+    --dry-run
+        Show replies/actions without sending replies, updating config, recording
+        processed Message-IDs, or marking messages seen.
+
+    --list-candidates
+        Print unread From/Subject/Message-ID values and whether each candidate
+        matches or why it is skipped. Uses BODY.PEEK[] and does not mark read.
+
+    --set-imap-password --gpg
+        Save IMAP password encrypted with external gpg.
+
+    --set-smtp-password --gpg
+        Save SMTP password encrypted with external gpg.
+
+FILES
+    ~/.config/ttychatter/mailbot/config
+    ~/.config/ttychatter/mailbot/imap-password.gpg
+    ~/.config/ttychatter/mailbot/smtp-password.gpg
+    ~/.local/state/ttychatter/mailbot/processed-ids.txt
+
+VERSION
+    ttychatter.mailbot version 0.2.0

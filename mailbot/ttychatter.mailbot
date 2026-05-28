@@ -1,0 +1,1037 @@
+#!/usr/bin/env python3
+"""
+ttychatter.mailbot
+==================
+
+Mail transport adapter for ttychatter.
+
+This program intentionally does *not* contain OpenRouter request logic.  The
+existing ttychatter clients already know how to talk to the model backend, keep
+sessions, rebuild context, save attachments, and format response logs.  The
+mailbot is therefore only a transport bridge:
+
+    IMAP message -> ttychatter subprocess -> SMTP/sendmail reply
+
+That design keeps the project maintainable.  If the OpenRouter code changes,
+or if ttychatter later supports more providers, this mailbot should keep working
+as long as the command-line ttychatter client keeps a compatible loopback mode.
+
+The first implementation uses only the Python standard library plus optional
+external `gpg`.  That keeps it suitable for OpenBSD/Dovecot/smtpd-style setups
+without bringing in a web framework, daemon framework, or mail library from pip.
+"""
+
+from __future__ import annotations
+
+import argparse
+import email
+import email.policy
+import getpass
+import html
+import imaplib
+import os
+import re
+import shlex
+import smtplib
+import ssl
+import subprocess
+import sys
+import tempfile
+import time
+from dataclasses import dataclass, field
+from email.message import EmailMessage, Message
+from email.utils import getaddresses, make_msgid, parseaddr
+from pathlib import Path
+from typing import Iterable, List, Optional, Tuple
+
+PROGRAM = "ttychatter.mailbot"
+VERSION = "0.2.0"
+
+DEFAULT_CONFIG_DIR = Path.home() / ".config" / "ttychatter" / "mailbot"
+DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config"
+DEFAULT_STATE_DIR = Path.home() / ".local" / "state" / "ttychatter" / "mailbot"
+DEFAULT_CACHE_DIR = Path.home() / ".cache" / "ttychatter" / "mailbot"
+DEFAULT_SESSION_DIR = Path.home() / ".local" / "share" / "ttychatter" / "openrouter" / "sessions"
+DEFAULT_ATTACHMENT_DIR = Path.home() / ".local" / "share" / "ttychatter" / "openrouter" / "attachments"
+
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+# The config parser is deliberately boring: KEY=VALUE lines, blank lines, and
+# comments.  This is the same spirit as the rest of ttychatter.  A future
+# maintainer should resist the urge to require YAML/TOML/JSON just to start a
+# mail transport daemon.  Mailbots often run in plain server environments where
+# minimalism and readability are more valuable than fancy config syntax.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Config:
+    config_file: Path = DEFAULT_CONFIG_FILE
+
+    imap_host: str = "localhost"
+    imap_port: int = 993
+    imap_ssl: bool = True
+    imap_user: str = ""
+    imap_password: str = ""
+    imap_password_gpg_file: Path = DEFAULT_CONFIG_DIR / "imap-password.gpg"
+    imap_mailbox: str = "INBOX"
+
+    send_method: str = "sendmail"  # sendmail or smtp
+    config_subject_token: str = "CONFIG"
+    config_update_requires_attachment: bool = True
+    sendmail_path: str = "/usr/sbin/sendmail"
+
+    smtp_host: str = "localhost"
+    smtp_port: int = 25
+    smtp_ssl: bool = False
+    smtp_starttls: bool = False
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_password_gpg_file: Path = DEFAULT_CONFIG_DIR / "smtp-password.gpg"
+
+    mail_from: str = ""
+    mail_to: str = ""
+    allowed_from: List[str] = field(default_factory=list)
+
+    subject_prefix: str = "tc"
+    poll_interval: int = 60
+    max_messages_per_run: int = 10
+    max_body_bytes: int = 50000
+    max_attachment_bytes: int = 1048576
+    process_attachments: bool = True
+    mark_seen: bool = True
+
+    ttychatter_command: str = "ttychatter.python"
+    ttychatter_extra_args: str = ""
+    session_dir: Path = DEFAULT_SESSION_DIR
+    attachment_dir: Path = DEFAULT_ATTACHMENT_DIR
+    work_dir: Path = DEFAULT_CACHE_DIR / "work"
+    processed_db: Path = DEFAULT_STATE_DIR / "processed-ids.txt"
+
+    reply_subject_prefix: str = "Re:"
+    include_ttychatter_stderr: bool = False
+
+
+def expand_path(value: str) -> Path:
+    return Path(os.path.expandvars(os.path.expanduser(value))).resolve()
+
+
+def parse_bool(value: str, default: bool = False) -> bool:
+    if value == "":
+        return default
+    return value.strip().lower() in {"1", "yes", "y", "true", "on"}
+
+
+def parse_int(value: str, default: int) -> int:
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def split_addresses(value: str) -> List[str]:
+    # ALLOWED_FROM can be comma or whitespace separated.  Normalize to lowercase
+    # bare email addresses so comparisons are predictable.
+    raw = re.split(r"[ ,]+", value.strip())
+    return [item.lower() for item in raw if item]
+
+
+def set_config_value(config_file: Path, key: str, value: str) -> None:
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    lines: List[str] = []
+    replaced = False
+    if config_file.exists():
+        lines = config_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    out: List[str] = []
+    for line in lines:
+        if line.strip().startswith(f"{key}="):
+            out.append(f"{key}={value}")
+            replaced = True
+        else:
+            out.append(line)
+    if not replaced:
+        out.append(f"{key}={value}")
+    config_file.write_text("\n".join(out) + "\n", encoding="utf-8")
+    try:
+        os.chmod(config_file, 0o600)
+    except OSError:
+        pass
+
+
+def unset_config_value(config_file: Path, key: str) -> None:
+    if not config_file.exists():
+        return
+    lines = config_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    out = [line for line in lines if not line.strip().startswith(f"{key}=")]
+    config_file.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
+
+
+def load_config(path: Path = DEFAULT_CONFIG_FILE) -> Config:
+    cfg = Config(config_file=path)
+    if not path.exists():
+        return cfg
+
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+
+        if key == "IMAP_HOST": cfg.imap_host = value
+        elif key == "IMAP_PORT": cfg.imap_port = parse_int(value, cfg.imap_port)
+        elif key == "IMAP_SSL": cfg.imap_ssl = parse_bool(value, cfg.imap_ssl)
+        elif key == "IMAP_USER": cfg.imap_user = value
+        elif key == "IMAP_PASSWORD": cfg.imap_password = value
+        elif key == "IMAP_PASSWORD_GPG_FILE": cfg.imap_password_gpg_file = expand_path(value)
+        elif key == "IMAP_MAILBOX": cfg.imap_mailbox = value
+
+        elif key == "SEND_METHOD": cfg.send_method = value.lower()
+        elif key == "REPLY_METHOD": cfg.send_method = value.lower()
+        elif key == "SENDMAIL": cfg.sendmail_path = value
+        elif key == "SENDMAIL_PATH": cfg.sendmail_path = value
+
+        elif key == "SMTP_HOST": cfg.smtp_host = value
+        elif key == "SMTP_PORT": cfg.smtp_port = parse_int(value, cfg.smtp_port)
+        elif key == "SMTP_SSL": cfg.smtp_ssl = parse_bool(value, cfg.smtp_ssl)
+        elif key == "SMTP_STARTTLS": cfg.smtp_starttls = parse_bool(value, cfg.smtp_starttls)
+        elif key == "SMTP_USER": cfg.smtp_user = value
+        elif key == "SMTP_PASSWORD": cfg.smtp_password = value
+        elif key == "SMTP_PASSWORD_GPG_FILE": cfg.smtp_password_gpg_file = expand_path(value)
+
+        elif key == "MAIL_FROM": cfg.mail_from = value
+        elif key == "MAIL_TO": cfg.mail_to = value
+        elif key == "ALLOWED_FROM": cfg.allowed_from = split_addresses(value)
+
+        elif key == "SUBJECT_PREFIX": cfg.subject_prefix = value
+        elif key == "POLL_INTERVAL": cfg.poll_interval = max(1, parse_int(value, cfg.poll_interval))
+        elif key == "MAX_MESSAGES_PER_RUN": cfg.max_messages_per_run = max(1, parse_int(value, cfg.max_messages_per_run))
+        elif key == "MAX_BODY_BYTES": cfg.max_body_bytes = max(1, parse_int(value, cfg.max_body_bytes))
+        elif key == "MAX_ATTACHMENT_BYTES": cfg.max_attachment_bytes = max(1, parse_int(value, cfg.max_attachment_bytes))
+        elif key == "PROCESS_ATTACHMENTS": cfg.process_attachments = parse_bool(value, cfg.process_attachments)
+        elif key == "MARK_SEEN": cfg.mark_seen = parse_bool(value, cfg.mark_seen)
+
+        elif key == "TTYCHATTER_COMMAND": cfg.ttychatter_command = value
+        elif key == "TTYCHATTER_EXTRA_ARGS": cfg.ttychatter_extra_args = value
+        elif key == "SESSION_DIR": cfg.session_dir = expand_path(value)
+        elif key == "ATTACHMENT_DIR": cfg.attachment_dir = expand_path(value)
+        elif key == "WORK_DIR": cfg.work_dir = expand_path(value)
+        elif key == "PROCESSED_DB": cfg.processed_db = expand_path(value)
+
+        elif key == "REPLY_SUBJECT_PREFIX": cfg.reply_subject_prefix = value
+        elif key == "INCLUDE_TTYCHATTER_STDERR": cfg.include_ttychatter_stderr = parse_bool(value, cfg.include_ttychatter_stderr)
+        elif key == "CONFIG_SUBJECT_TOKEN": cfg.config_subject_token = value
+        elif key == "CONFIG_UPDATE_REQUIRES_ATTACHMENT": cfg.config_update_requires_attachment = parse_bool(value, cfg.config_update_requires_attachment)
+
+    # Environment overrides are useful on servers, cron jobs, and test runs.
+    cfg.imap_password = os.environ.get("TTYCHATTER_IMAP_PASSWORD", cfg.imap_password)
+    cfg.smtp_password = os.environ.get("TTYCHATTER_SMTP_PASSWORD", cfg.smtp_password)
+    return cfg
+
+
+# ---------------------------------------------------------------------------
+# GPG helpers
+# ---------------------------------------------------------------------------
+# The mailbot supports encrypted IMAP/SMTP passwords using external gpg.  This
+# mirrors ttychatter's API-key philosophy: do not implement crypto in the app;
+# call a standard Unix tool that users already understand and can replace.
+# ---------------------------------------------------------------------------
+
+
+def gpg_available() -> bool:
+    from shutil import which
+    return which("gpg") is not None
+
+
+def decrypt_gpg_file(path: Path) -> str:
+    proc = subprocess.run(
+        ["gpg", "--quiet", "--decrypt", str(path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or f"gpg failed decrypting {path}")
+    return proc.stdout.strip("\n")
+
+
+def encrypt_secret_to_gpg(path: Path, secret: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.run(
+        ["gpg", "--symmetric", "--cipher-algo", "AES256", "--yes", "--output", str(path)],
+        input=secret,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or f"gpg failed encrypting {path}")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def load_password(plain: str, gpg_path: Path) -> str:
+    if plain:
+        return plain
+    if gpg_path.exists():
+        return decrypt_gpg_file(gpg_path)
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Message parsing
+# ---------------------------------------------------------------------------
+# Email is messy.  The mailbot keeps a deliberately conservative parser: prefer
+# text/plain, ignore untrusted HTML when possible, size-limit message bodies, and
+# save attachments into an isolated work directory before handing them to
+# ttychatter.  Future maintainers should be careful here.  A mailbot is a bridge
+# from the public mail world to a paid AI API; every boundary needs limits.
+# ---------------------------------------------------------------------------
+
+
+def subject_regex(prefix: str) -> re.Pattern[str]:
+    return re.compile(rf"\b{re.escape(prefix)}:\{{([^}}]+)\}}")
+
+
+def parse_session_from_subject(subject: str, prefix: str) -> Optional[str]:
+    match = subject_regex(prefix).search(subject or "")
+    if not match:
+        return None
+    session = match.group(1).strip()
+    if not session:
+        return None
+    if session.lower() == "new":
+        return "session-" + time.strftime("%Y-%m-%d-%H-%M-%S")
+    return session
+
+
+def is_config_request(session: str, cfg: Config) -> bool:
+    """Return true when a tc:{...} token names the protected config workflow.
+
+    The mailbot intentionally treats tc:{CONFIG} as a transport-control command,
+    not as an AI session name.  This keeps configuration editing through mail
+    explicit, visible, and auditable.  The command still must pass the normal
+    ALLOWED_FROM check before it can do anything.
+    """
+    return session.strip().lower() == cfg.config_subject_token.strip().lower()
+
+
+def decode_part_payload(part: Message) -> str:
+    payload = part.get_payload(decode=True)
+    if payload is None:
+        raw = part.get_payload()
+        return raw if isinstance(raw, str) else ""
+    charset = part.get_content_charset() or "utf-8"
+    return payload.decode(charset, errors="replace")
+
+
+def strip_html(text: str) -> str:
+    text = re.sub(r"(?is)<(script|style).*?>.*?</\1>", "", text)
+    text = re.sub(r"(?s)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?s)</p>", "\n\n", text)
+    text = re.sub(r"(?s)<.*?>", "", text)
+    return html.unescape(text).strip()
+
+
+def extract_body(msg: Message, max_body_bytes: int) -> str:
+    text_plain: List[str] = []
+    text_html: List[str] = []
+
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.is_multipart():
+                continue
+            disposition = (part.get_content_disposition() or "").lower()
+            if disposition == "attachment":
+                continue
+            content_type = part.get_content_type()
+            if content_type == "text/plain":
+                text_plain.append(decode_part_payload(part))
+            elif content_type == "text/html":
+                text_html.append(strip_html(decode_part_payload(part)))
+    else:
+        if msg.get_content_type() == "text/html":
+            text_html.append(strip_html(decode_part_payload(msg)))
+        else:
+            text_plain.append(decode_part_payload(msg))
+
+    body = "\n".join(x for x in text_plain if x.strip()).strip()
+    if not body:
+        body = "\n".join(x for x in text_html if x.strip()).strip()
+
+    raw = body.encode("utf-8", errors="replace")
+    if len(raw) > max_body_bytes:
+        raw = raw[:max_body_bytes]
+        body = raw.decode("utf-8", errors="replace") + "\n\n[message body truncated by ttychatter.mailbot]"
+    return body.strip()
+
+
+def safe_filename(name: str) -> str:
+    name = os.path.basename(name or "attachment")
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._-")
+    return name or "attachment"
+
+
+def save_attachments(msg: Message, directory: Path, max_attachment_bytes: int) -> List[Path]:
+    directory.mkdir(parents=True, exist_ok=True)
+    saved: List[Path] = []
+    counter = 1
+    for part in msg.walk():
+        if part.is_multipart():
+            continue
+        disposition = (part.get_content_disposition() or "").lower()
+        filename = part.get_filename()
+        if disposition != "attachment" and not filename:
+            continue
+        payload = part.get_payload(decode=True)
+        if payload is None:
+            continue
+        if len(payload) > max_attachment_bytes:
+            continue
+        base = safe_filename(filename or f"attachment-{counter}")
+        path = directory / f"{counter:02d}-{base}"
+        path.write_bytes(payload)
+        saved.append(path)
+        counter += 1
+    return saved
+
+
+
+def looks_like_config_text(text: str) -> bool:
+    """Very small sanity check for emailed config files.
+
+    This does not try to validate every possible key.  Its job is to prevent an
+    obviously wrong attachment, such as an image or forwarded HTML body, from
+    replacing the mailbot config.  Real parsing still happens through load_config
+    after the file is written.
+    """
+    useful = 0
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith('#'):
+            continue
+        if '=' not in line:
+            return False
+        key, _ = line.split('=', 1)
+        if not re.match(r'^[A-Z0-9_]+$', key.strip()):
+            return False
+        useful += 1
+    return useful > 0
+
+
+def find_config_attachment(msg: Message, max_attachment_bytes: int) -> Optional[Tuple[str, str]]:
+    """Return (filename, text) for the first plausible config attachment.
+
+    The config-over-email workflow is intentionally attachment-based.  The bot
+    sends the current config as an attached text file, the user edits that file,
+    and then mails it back with subject tc:{CONFIG}.  Requiring an attachment
+    avoids accidentally treating a normal email body as a replacement config.
+    """
+    for part in msg.walk():
+        if part.is_multipart():
+            continue
+        filename = part.get_filename() or ''
+        disposition = (part.get_content_disposition() or '').lower()
+        if disposition != 'attachment' and not filename:
+            continue
+        safe = safe_filename(filename or 'config.txt')
+        if not (safe.endswith('.txt') or 'config' in safe.lower()):
+            continue
+        payload = part.get_payload(decode=True)
+        if payload is None or len(payload) > max_attachment_bytes:
+            continue
+        charset = part.get_content_charset() or 'utf-8'
+        text = payload.decode(charset, errors='replace')
+        if looks_like_config_text(text):
+            return safe, text
+    return None
+
+
+def build_config_reply(cfg: Config, original: Message, body: str, attachment_text: Optional[str] = None) -> EmailMessage:
+    """Build a reply for tc:{CONFIG}.
+
+    If attachment_text is provided, it is attached as a text/plain config file.
+    This is the safe round-trip path: request config, receive attachment, edit
+    locally, reply with edited attachment.
+    """
+    reply_to = parseaddr(original.get('Reply-To') or original.get('From') or '')[1]
+    dest = cfg.mail_to or reply_to
+    subject = original.get('Subject', f'{cfg.subject_prefix}:{{{cfg.config_subject_token}}}')
+    msg = EmailMessage()
+    msg['From'] = cfg.mail_from or cfg.smtp_user or cfg.imap_user
+    msg['To'] = dest
+    msg['Subject'] = f'{cfg.reply_subject_prefix} {subject}'
+    msg['Message-ID'] = make_msgid(domain=(msg['From'].split('@')[-1] if '@' in msg['From'] else None))
+    if original.get('Message-ID'):
+        msg['In-Reply-To'] = original.get('Message-ID')
+        msg['References'] = original.get('Message-ID')
+    msg.set_content(body.rstrip() + '\n')
+    if attachment_text is not None:
+        msg.add_attachment(attachment_text.encode('utf-8'), maintype='text', subtype='plain', filename='ttychatter-mailbot-config.txt')
+    return msg
+
+
+def public_config_text(cfg: Config) -> str:
+    """Return the current config file, redacting plaintext password lines.
+
+    The goal is editable configuration without accidentally emailing secrets in
+    the clear.  Encrypted password file paths are safe to show; plaintext
+    password values are replaced with a comment.
+    """
+    if not cfg.config_file.exists():
+        return '# ttychatter.mailbot config does not exist yet\n'
+    out=[]
+    for raw in cfg.config_file.read_text(encoding='utf-8', errors='replace').splitlines():
+        if raw.strip().startswith(('IMAP_PASSWORD=', 'SMTP_PASSWORD=')):
+            key=raw.split('=',1)[0]
+            out.append(f'# {key}=REDACTED_BY_TTYCHATTER_MAILBOT')
+        else:
+            out.append(raw)
+    return '\n'.join(out).rstrip() + '\n'
+
+
+def apply_config_attachment(cfg: Config, text: str) -> Path:
+    """Atomically replace the config file with emailed config text.
+
+    A timestamped backup is kept beside the original.  This is intentionally
+    simple and inspectable: future maintainers can see exactly what file was
+    replaced and where the backup went.
+    """
+    cfg.config_file.parent.mkdir(parents=True, exist_ok=True)
+    backup = cfg.config_file.with_name(cfg.config_file.name + '.bak-' + time.strftime('%Y%m%d-%H%M%S'))
+    if cfg.config_file.exists():
+        backup.write_text(cfg.config_file.read_text(encoding='utf-8', errors='replace'), encoding='utf-8')
+    tmp = cfg.config_file.with_suffix(cfg.config_file.suffix + '.tmp')
+    tmp.write_text(text.rstrip() + '\n', encoding='utf-8')
+    tmp.replace(cfg.config_file)
+    try:
+        os.chmod(cfg.config_file, 0o600)
+    except OSError:
+        pass
+    return backup
+
+# ---------------------------------------------------------------------------
+# IMAP / SMTP transport
+# ---------------------------------------------------------------------------
+# IMAP is only used for receiving and state flags.  SMTP or sendmail is used for
+# replies.  OpenBSD users with smtpd can set SEND_METHOD=sendmail and avoid SMTP
+# password storage entirely.  Users with hosted mail can configure SMTP.
+# ---------------------------------------------------------------------------
+
+
+def imap_connect(cfg: Config) -> imaplib.IMAP4:
+    password = load_password(cfg.imap_password, cfg.imap_password_gpg_file)
+    if cfg.imap_ssl:
+        conn: imaplib.IMAP4 = imaplib.IMAP4_SSL(cfg.imap_host, cfg.imap_port)
+    else:
+        conn = imaplib.IMAP4(cfg.imap_host, cfg.imap_port)
+    conn.login(cfg.imap_user, password)
+    conn.select(cfg.imap_mailbox)
+    return conn
+
+
+def message_sender(msg: Message) -> str:
+    return parseaddr(msg.get("From", ""))[1].lower()
+
+
+def allowed_sender(sender: str, cfg: Config) -> bool:
+    if not sender:
+        return False
+    sender = sender.lower()
+    if cfg.mail_from and sender == parseaddr(cfg.mail_from)[1].lower():
+        return False
+    if not cfg.allowed_from:
+        return False
+    return sender in cfg.allowed_from
+
+
+def load_processed(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    return {line.strip() for line in path.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()}
+
+
+def remember_processed(path: Path, message_id: str) -> None:
+    if not message_id:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(message_id + "\n")
+
+
+def send_reply_sendmail(cfg: Config, reply: EmailMessage) -> None:
+    proc = subprocess.run(
+        [cfg.sendmail_path, "-t", "-oi"],
+        input=reply.as_string(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or "sendmail failed")
+
+
+def send_reply_smtp(cfg: Config, reply: EmailMessage) -> None:
+    password = load_password(cfg.smtp_password, cfg.smtp_password_gpg_file)
+    context = ssl.create_default_context()
+    if cfg.smtp_ssl:
+        smtp: smtplib.SMTP = smtplib.SMTP_SSL(cfg.smtp_host, cfg.smtp_port, context=context)
+    else:
+        smtp = smtplib.SMTP(cfg.smtp_host, cfg.smtp_port)
+    try:
+        smtp.ehlo()
+        if cfg.smtp_starttls:
+            smtp.starttls(context=context)
+            smtp.ehlo()
+        if cfg.smtp_user:
+            smtp.login(cfg.smtp_user, password)
+        smtp.send_message(reply)
+    finally:
+        smtp.quit()
+
+
+def send_reply(cfg: Config, reply: EmailMessage) -> None:
+    if cfg.send_method == "smtp":
+        send_reply_smtp(cfg, reply)
+    else:
+        send_reply_sendmail(cfg, reply)
+
+
+# ---------------------------------------------------------------------------
+# ttychatter subprocess bridge
+# ---------------------------------------------------------------------------
+# The command is invoked in loopback mode so stdout is the clean AI response.
+# Interface/status chatter belongs on stderr and is retained only for optional
+# debugging.  This is the same reason the Bash clients gained loopback mode: it
+# makes ttychatter composable with other Unix transports.
+# ---------------------------------------------------------------------------
+
+
+def session_log_path(cfg: Config, session: str) -> Path:
+    session = re.sub(r"[^A-Za-z0-9._-]+", "_", session.strip()).strip("._-") or "session"
+    if session.endswith(".log"):
+        return cfg.session_dir / session
+    return cfg.session_dir / f"{session}.log"
+
+
+def run_ttychatter(cfg: Config, session: str, body: str, attachments: List[Path]) -> Tuple[int, str, str]:
+    cfg.session_dir.mkdir(parents=True, exist_ok=True)
+    cfg.attachment_dir.mkdir(parents=True, exist_ok=True)
+
+    session_name = session_log_path(cfg, session).stem
+    cmd = shlex.split(cfg.ttychatter_command)
+    cmd.append("--loopback")
+    for extra in shlex.split(cfg.ttychatter_extra_args):
+        cmd.append(extra)
+    for path in attachments:
+        cmd.extend(["--attach", str(path)])
+    cmd.append(session_name)
+
+    proc = subprocess.run(
+        cmd,
+        input=body,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+
+
+def build_reply(cfg: Config, original: Message, session: str, body: str, stderr_text: str, ok: bool) -> EmailMessage:
+    sender = message_sender(original)
+    reply_to = parseaddr(original.get("Reply-To") or original.get("From") or sender)[1]
+    dest = cfg.mail_to or reply_to
+    subject = original.get("Subject", f"tc:{{{session}}}")
+
+    msg = EmailMessage()
+    msg["From"] = cfg.mail_from or cfg.smtp_user or cfg.imap_user
+    msg["To"] = dest
+    msg["Subject"] = f"{cfg.reply_subject_prefix} {subject}"
+    msg["Message-ID"] = make_msgid(domain=(msg["From"].split("@")[-1] if "@" in msg["From"] else None))
+    if original.get("Message-ID"):
+        msg["In-Reply-To"] = original.get("Message-ID")
+        msg["References"] = original.get("Message-ID")
+
+    status = "success" if ok else "error"
+    text = [
+        f"ttychatter.mailbot {status}",
+        f"session: {session}",
+        "",
+        body or "(empty response)",
+    ]
+    if cfg.include_ttychatter_stderr and stderr_text:
+        text.extend(["", "--- ttychatter stderr ---", stderr_text])
+    msg.set_content("\n".join(text).rstrip() + "\n")
+    return msg
+
+
+def fetch_message_peek(conn: imaplib.IMAP4, uid: bytes) -> Optional[Message]:
+    """Fetch an unread candidate without consuming its unread state.
+
+    The single most important safety rule in this mailbot is: inspection must
+    not mutate the mailbox.  IMAP BODY[] and RFC822 fetches commonly set the
+    \\Seen flag.  BODY.PEEK[] is the standard way to read enough of the message
+    for parsing while leaving unread messages unread until ttychatter actually
+    processes them successfully.
+    """
+    status, data = conn.uid("FETCH", uid, "(BODY.PEEK[])")
+    if status != "OK" or not data or data[0] is None:
+        return None
+    raw = data[0][1]
+    return email.message_from_bytes(raw, policy=email.policy.default)
+
+
+def candidate_skip_reason(cfg: Config, msg: Message, uid: bytes, processed: set[str]) -> str:
+    subject = msg.get("Subject", "")
+    session = parse_session_from_subject(subject, cfg.subject_prefix)
+    sender = message_sender(msg)
+    msgid = msg.get("Message-ID", f"imap-uid-{uid.decode(errors='replace')}")
+    if not session:
+        return "skip: subject does not contain tc:{...}"
+    if not allowed_sender(sender, cfg):
+        return f"skip: sender not allowed ({sender or 'empty sender'})"
+    if msgid in processed:
+        return "skip: Message-ID already processed"
+    return "match"
+
+
+def process_config_message(cfg: Config, conn: imaplib.IMAP4, uid: bytes, msg: Message, dry_run: bool = False) -> bool:
+    msgid = msg.get("Message-ID", f"imap-uid-{uid.decode(errors='replace')}")
+    processed = load_processed(cfg.processed_db)
+    if msgid in processed:
+        return False
+
+    found = find_config_attachment(msg, cfg.max_attachment_bytes)
+    if found is None:
+        body = (
+            "ttychatter.mailbot config export\n"
+            "\n"
+            "Edit the attached config file and mail it back with the same subject tc:{CONFIG}.\n"
+            "Plaintext password values are redacted; encrypted password file paths are preserved.\n"
+        )
+        reply = build_config_reply(cfg, msg, body, attachment_text=public_config_text(cfg))
+    else:
+        filename, text = found
+        if dry_run:
+            body = f"[dry-run] would replace config from attachment: {filename}\n"
+        else:
+            backup = apply_config_attachment(cfg, text)
+            body = f"updated config from attachment: {filename}\nbackup: {backup}\n"
+        reply = build_config_reply(cfg, msg, body)
+
+    if dry_run:
+        print(reply.as_string())
+    else:
+        send_reply(cfg, reply)
+        remember_processed(cfg.processed_db, msgid)
+        if cfg.mark_seen:
+            conn.uid("STORE", uid, "+FLAGS", "(\\Seen)")
+    return True
+
+
+def process_message(cfg: Config, conn: imaplib.IMAP4, uid: bytes, dry_run: bool = False) -> bool:
+    msg = fetch_message_peek(conn, uid)
+    if msg is None:
+        return False
+    msgid = msg.get("Message-ID", f"imap-uid-{uid.decode(errors='replace')}")
+    subject = msg.get("Subject", "")
+    session = parse_session_from_subject(subject, cfg.subject_prefix)
+    if not session:
+        return False
+    if not allowed_sender(message_sender(msg), cfg):
+        return False
+
+    processed = load_processed(cfg.processed_db)
+    if msgid in processed:
+        return False
+    if is_config_request(session, cfg):
+        return process_config_message(cfg, conn, uid, msg, dry_run=dry_run)
+
+    body = extract_body(msg, cfg.max_body_bytes)
+    if not body:
+        body = "(empty email body)"
+
+    with tempfile.TemporaryDirectory(prefix="ttychatter-mailbot-", dir=str(cfg.work_dir)) as tmp:
+        tempdir = Path(tmp)
+        attachments = save_attachments(msg, tempdir, cfg.max_attachment_bytes) if cfg.process_attachments else []
+        rc, output, stderr_text = (0, "[dry-run] would call ttychatter here", "")
+        if not dry_run:
+            rc, output, stderr_text = run_ttychatter(cfg, session, body, attachments)
+        ok = rc == 0
+        reply = build_reply(cfg, msg, session, output if ok else stderr_text or output, stderr_text, ok)
+        if not dry_run:
+            send_reply(cfg, reply)
+            remember_processed(cfg.processed_db, msgid)
+            if cfg.mark_seen:
+                conn.uid("STORE", uid, "+FLAGS", "(\\Seen)")
+        else:
+            print(reply.as_string())
+    return True
+
+
+def list_candidates(cfg: Config) -> int:
+    """Print unread candidates and skip reasons without changing mail state."""
+    cfg.work_dir.mkdir(parents=True, exist_ok=True)
+    conn = imap_connect(cfg)
+    try:
+        status, data = conn.uid("SEARCH", None, "UNSEEN")
+        if status != "OK":
+            print("IMAP search failed", file=sys.stderr)
+            return 1
+        uids = (data[0] or b"").split()
+        processed = load_processed(cfg.processed_db)
+        if not uids:
+            print("no unread candidates")
+            return 0
+        for uid in uids:
+            msg = fetch_message_peek(conn, uid)
+            if msg is None:
+                print(f"uid={uid.decode(errors='replace')} skip: fetch failed")
+                continue
+            sender = message_sender(msg)
+            subject = msg.get("Subject", "")
+            msgid = msg.get("Message-ID", f"imap-uid-{uid.decode(errors='replace')}")
+            reason = candidate_skip_reason(cfg, msg, uid, processed)
+            print(f"uid={uid.decode(errors='replace')} from={sender} subject={subject!r} message_id={msgid!r} {reason}")
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+    return 0
+
+
+def run_once(cfg: Config, dry_run: bool = False) -> int:
+    cfg.work_dir.mkdir(parents=True, exist_ok=True)
+    cfg.processed_db.parent.mkdir(parents=True, exist_ok=True)
+    cfg.session_dir.mkdir(parents=True, exist_ok=True)
+    cfg.attachment_dir.mkdir(parents=True, exist_ok=True)
+
+    conn = imap_connect(cfg)
+    processed_count = 0
+    try:
+        status, data = conn.uid("SEARCH", None, "UNSEEN")
+        if status != "OK":
+            print("IMAP search failed", file=sys.stderr)
+            return 1
+        uids = (data[0] or b"").split()
+        for uid in uids[: cfg.max_messages_per_run]:
+            if process_message(cfg, conn, uid, dry_run=dry_run):
+                processed_count += 1
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+    print(f"processed messages: {processed_count}")
+    return 0
+
+
+def run_daemon(cfg: Config, dry_run: bool = False) -> int:
+    while True:
+        try:
+            run_once(cfg, dry_run=dry_run)
+        except KeyboardInterrupt:
+            return 0
+        except Exception as exc:
+            print(f"mailbot error: {exc}", file=sys.stderr)
+        time.sleep(cfg.poll_interval)
+
+
+# ---------------------------------------------------------------------------
+# CLI utilities
+# ---------------------------------------------------------------------------
+
+
+def doctor(cfg: Config) -> int:
+    checks: List[Tuple[str, bool, str]] = []
+    checks.append(("config file", cfg.config_file.exists(), str(cfg.config_file)))
+    checks.append(("imap host", bool(cfg.imap_host), cfg.imap_host))
+    checks.append(("imap user", bool(cfg.imap_user), cfg.imap_user or "missing"))
+    checks.append(("allowed from", bool(cfg.allowed_from), ", ".join(cfg.allowed_from) or "missing"))
+    checks.append(("mail from", bool(cfg.mail_from or cfg.smtp_user or cfg.imap_user), cfg.mail_from or cfg.smtp_user or cfg.imap_user or "missing"))
+    checks.append(("gpg", gpg_available(), "found" if gpg_available() else "not found"))
+    checks.append(("ttychatter command", bool(cfg.ttychatter_command), cfg.ttychatter_command))
+    for label, path in [
+        ("session dir", cfg.session_dir),
+        ("attachment dir", cfg.attachment_dir),
+        ("work dir", cfg.work_dir),
+        ("processed db dir", cfg.processed_db.parent),
+    ]:
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            writable = os.access(path, os.W_OK)
+        except Exception:
+            writable = False
+        checks.append((label, writable, str(path)))
+
+    rc = 0
+    for name, ok, detail in checks:
+        print(f"{'OK' if ok else 'FAIL'}\t{name}\t{detail}")
+        if not ok and name in {"imap user", "allowed from", "mail from", "ttychatter command"}:
+            rc = 1
+    return rc
+
+
+def print_config(cfg: Config) -> None:
+    # Never print password values.  Showing that a password source exists is
+    # enough for diagnostics and avoids accidental secret disclosure in forum
+    # posts or bug reports.
+    print(f"CONFIG_FILE={cfg.config_file}")
+    print(f"IMAP_HOST={cfg.imap_host}")
+    print(f"IMAP_PORT={cfg.imap_port}")
+    print(f"IMAP_SSL={int(cfg.imap_ssl)}")
+    print(f"IMAP_USER={cfg.imap_user}")
+    print(f"IMAP_PASSWORD={'set' if cfg.imap_password else 'unset'}")
+    print(f"IMAP_PASSWORD_GPG_FILE={cfg.imap_password_gpg_file}")
+    print(f"SEND_METHOD={cfg.send_method}")
+    print(f"SMTP_HOST={cfg.smtp_host}")
+    print(f"SMTP_PORT={cfg.smtp_port}")
+    print(f"MAIL_FROM={cfg.mail_from}")
+    print(f"ALLOWED_FROM={','.join(cfg.allowed_from)}")
+    print(f"TTYCHATTER_COMMAND={cfg.ttychatter_command}")
+    print(f"SESSION_DIR={cfg.session_dir}")
+    print(f"ATTACHMENT_DIR={cfg.attachment_dir}")
+    print(f"SUBJECT_PREFIX={cfg.subject_prefix}")
+    print(f"CONFIG_SUBJECT_TOKEN={cfg.config_subject_token}")
+    print(f"CONFIG_UPDATE_REQUIRES_ATTACHMENT={int(cfg.config_update_requires_attachment)}")
+
+
+def set_password_command(cfg: Config, which: str, encrypted: bool) -> int:
+    if encrypted and not gpg_available():
+        print("gpg not found", file=sys.stderr)
+        return 1
+    secret = getpass.getpass(f"Enter {which.upper()} password: ")
+    if not secret:
+        print("empty password refused", file=sys.stderr)
+        return 1
+    if which == "imap":
+        if encrypted:
+            encrypt_secret_to_gpg(cfg.imap_password_gpg_file, secret)
+            unset_config_value(cfg.config_file, "IMAP_PASSWORD")
+            set_config_value(cfg.config_file, "IMAP_PASSWORD_GPG_FILE", str(cfg.imap_password_gpg_file))
+            print(f"saved encrypted IMAP password to {cfg.imap_password_gpg_file}")
+        else:
+            set_config_value(cfg.config_file, "IMAP_PASSWORD", secret)
+            print("saved IMAP_PASSWORD in plaintext config")
+    else:
+        if encrypted:
+            encrypt_secret_to_gpg(cfg.smtp_password_gpg_file, secret)
+            unset_config_value(cfg.config_file, "SMTP_PASSWORD")
+            set_config_value(cfg.config_file, "SMTP_PASSWORD_GPG_FILE", str(cfg.smtp_password_gpg_file))
+            print(f"saved encrypted SMTP password to {cfg.smtp_password_gpg_file}")
+        else:
+            set_config_value(cfg.config_file, "SMTP_PASSWORD", secret)
+            print("saved SMTP_PASSWORD in plaintext config")
+    return 0
+
+
+def help_text() -> str:
+    return f"""{PROGRAM} - email transport adapter for ttychatter
+
+USAGE
+    {PROGRAM} --once
+    {PROGRAM} --daemon
+    {PROGRAM} --doctor
+    {PROGRAM} --list-candidates
+    {PROGRAM} --config
+    {PROGRAM} --set KEY VALUE
+    {PROGRAM} --unset KEY
+    {PROGRAM} --set-imap-password [--gpg]
+    {PROGRAM} --set-smtp-password [--gpg]
+    {PROGRAM} --version
+    {PROGRAM} --help
+
+MAIL SUBJECT
+    tc:{{session-name}}
+    tc:{{CONFIG}}
+
+DESCRIPTION
+    Reads unread mail from IMAP, extracts messages whose subject contains
+    tc:{{session}}, sends the body to ttychatter, and replies by SMTP or
+    sendmail.
+
+SECURITY
+    ALLOWED_FROM is required.  Mail from other senders is ignored.
+    tc:{{CONFIG}} mails the current config as an attachment, or applies an
+    edited config attachment from an allowed sender. Dry-run never writes config.
+"""
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--config-file", default=str(DEFAULT_CONFIG_FILE))
+    parser.add_argument("--once", action="store_true")
+    parser.add_argument("--daemon", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--doctor", action="store_true")
+    parser.add_argument("--list-candidates", action="store_true")
+    parser.add_argument("--config", action="store_true")
+    parser.add_argument("--set", nargs=2, metavar=("KEY", "VALUE"))
+    parser.add_argument("--unset", metavar="KEY")
+    parser.add_argument("--set-imap-password", action="store_true")
+    parser.add_argument("--set-smtp-password", action="store_true")
+    parser.add_argument("--gpg", action="store_true")
+    parser.add_argument("--version", action="store_true")
+    parser.add_argument("--help", "-h", action="store_true")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    if args.help:
+        print(help_text())
+        return 0
+    if args.version:
+        print(f"{PROGRAM} version {VERSION}")
+        return 0
+
+    cfg = load_config(expand_path(args.config_file))
+
+    if args.set:
+        set_config_value(cfg.config_file, args.set[0], args.set[1])
+        return 0
+    if args.unset:
+        unset_config_value(cfg.config_file, args.unset)
+        return 0
+    if args.config:
+        print_config(cfg)
+        return 0
+    if args.set_imap_password:
+        return set_password_command(cfg, "imap", args.gpg)
+    if args.set_smtp_password:
+        return set_password_command(cfg, "smtp", args.gpg)
+    if args.doctor:
+        return doctor(cfg)
+    if args.list_candidates:
+        return list_candidates(cfg)
+    if args.daemon:
+        try:
+            return run_daemon(cfg, dry_run=args.dry_run)
+        except imaplib.IMAP4.error as exc:
+            print(f"IMAP error: {exc}", file=sys.stderr)
+            return 1
+        except RuntimeError as exc:
+            print(f"mailbot error: {exc}", file=sys.stderr)
+            return 1
+    if args.once:
+        try:
+            return run_once(cfg, dry_run=args.dry_run)
+        except imaplib.IMAP4.error as exc:
+            print(f"IMAP error: {exc}", file=sys.stderr)
+            return 1
+        except RuntimeError as exc:
+            print(f"mailbot error: {exc}", file=sys.stderr)
+            return 1
+
+    print(help_text(), file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

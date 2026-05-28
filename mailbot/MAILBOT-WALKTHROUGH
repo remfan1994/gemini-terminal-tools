@@ -1,0 +1,106 @@
+ttychatter.mailbot walkthrough
+==============================
+
+1. Install the program
+----------------------
+
+    mkdir -p /home/r94/bin
+    cp ttychatter.mailbot /home/r94/bin/
+    chmod 700 /home/r94/bin/ttychatter.mailbot
+
+2. Confirm the bot can run
+--------------------------
+
+    /home/r94/bin/ttychatter.mailbot --version
+    /home/r94/bin/ttychatter.mailbot --help
+
+3. Configure IMAP and sending
+-----------------------------
+
+Example config:
+
+    IMAP_HOST=localhost
+    IMAP_PORT=993
+    IMAP_SSL=1
+    IMAP_USER=r94
+    IMAP_PASSWORD_GPG_FILE=/home/r94/.config/ttychatter/mailbot/imap-password.gpg
+
+    MAIL_FROM=ttychatter@thatiam.vip
+    ALLOWED_FROM=r94@thatiam.vip
+
+    REPLY_METHOD=sendmail
+    SENDMAIL=/usr/sbin/sendmail
+
+    TTYCHATTER_COMMAND=/home/r94/bin/ttychatter.python
+    SESSION_DIR=/home/r94/.local/share/ttychatter/openrouter/sessions
+    ATTACHMENT_DIR=/home/r94/.local/share/ttychatter/openrouter/attachments
+
+    SUBJECT_PREFIX=tc
+    MAX_BODY_BYTES=50000
+    PROCESS_ATTACHMENTS=1
+
+4. Store the IMAP password
+--------------------------
+
+    export GPG_TTY=$(tty)
+    /home/r94/bin/ttychatter.mailbot --set-imap-password --gpg
+
+5. Check diagnostics
+--------------------
+
+    /home/r94/bin/ttychatter.mailbot --config
+    /home/r94/bin/ttychatter.mailbot --doctor
+
+6. Candidate debugging
+----------------------
+
+If a message is unread but not processed:
+
+    /home/r94/bin/ttychatter.mailbot --list-candidates
+
+This prints each unread candidate, its sender, its subject, and why it matches
+or is skipped. It uses BODY.PEEK[] and does not mark messages read.
+
+7. Dry-run a normal mail request
+--------------------------------
+
+Send yourself an unread mail with subject:
+
+    tc:{mailbot-test}
+
+Then run:
+
+    /home/r94/bin/ttychatter.mailbot --once --dry-run
+
+Dry-run must not mark the email read.
+
+8. Real one-shot run
+--------------------
+
+After dry-run looks correct:
+
+    /home/r94/bin/ttychatter.mailbot --once
+
+9. Config by email
+------------------
+
+To request the config:
+
+    Subject: tc:{CONFIG}
+
+The bot replies with ttychatter-mailbot-config.txt attached. Edit that file and
+reply with it attached under the same subject. The bot will backup the old config
+and replace it with the attached config.
+
+Dry-run is safe:
+
+    /home/r94/bin/ttychatter.mailbot --once --dry-run
+
+It will not write config and will not mark the config mail read.
+
+10. Cron
+--------
+
+Once everything works:
+
+    */2 * * * * /home/r94/bin/ttychatter.mailbot --once >>/home/r94/.local/share/ttychatter/mailbot.log 2>&1
