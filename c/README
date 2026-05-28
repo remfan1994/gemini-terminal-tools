@@ -1,0 +1,46 @@
+TTYCHATTER C COMMAND-LINE CLIENT
+================================
+
+This directory contains the traditional Unix command-line C implementation of
+ttychatter.  It is intentionally different from the Python ncurses interface:
+there is no full-screen UI here.  The user supplies an input file and an output
+session file.
+
+    ttychatter input.txt output.log
+
+The output file is also the session state.  Reusing the same output file resumes
+the conversation by sending recent turns as context.
+
+Build requirements
+------------------
+
+Debian/Ubuntu/ChromeOS Linux:
+
+    sudo apt-get install build-essential pkg-config libcurl4-openssl-dev libjson-c-dev ca-certificates gnupg
+
+Build:
+
+    make
+
+Run:
+
+    ./ttychatter --help
+
+First steps
+-----------
+
+    ./ttychatter --set-api-key --gpg
+    ./ttychatter --doctor
+    ./ttychatter --update-models
+    ./ttychatter --models --search free
+    ./ttychatter --test-model openrouter/auto
+
+Then create an input file and session:
+
+    cat > input.txt
+    Explain Unix pipes in one paragraph.
+    ^D
+
+    ./ttychatter input.txt session.log
+
+Read WALKTHROUGH for a complete step-by-step guide.

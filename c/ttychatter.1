@@ -1,0 +1,215 @@
+TTYCHATTER(1)              User Commands              TTYCHATTER(1)
+
+NAME
+    ttychatter - file-based OpenRouter chat client
+
+SYNOPSIS
+    ttychatter [options] input.txt output.log
+    ttychatter --set-api-key [--gpg]
+    ttychatter --forget-api-key
+    ttychatter --models [--search TEXT] [--model-type TYPE]
+    ttychatter --update-models
+    ttychatter --test-model MODEL
+    ttychatter --doctor
+    ttychatter --version
+    ttychatter --help
+
+DESCRIPTION
+    ttychatter is the C command-line client in the ttychatter family.
+    It is not an ncurses interface.  It follows the traditional Unix file
+    workflow: the user prepares an input file, invokes ttychatter, and the AI
+    response is appended to an output/session file.
+
+    The output file is also the session log.  Reusing the same output file
+    resumes the conversation because ttychatter reads recent turns from that
+    file and sends them as context.
+
+BASIC USE
+    Create an input prompt:
+
+        cat > input.txt
+        Explain what DNS caching means.
+        ^D
+
+    Send it and append the response to a session file:
+
+        ttychatter input.txt session.log
+
+    Continue the same session with a new input file:
+
+        vi followup.txt
+        ttychatter followup.txt session.log
+
+API KEY SETUP
+    The recommended first step is API-key setup.
+
+    Store the OpenRouter API key encrypted with GPG:
+
+        ttychatter --set-api-key --gpg
+
+    Store the OpenRouter API key in plaintext config:
+
+        ttychatter --set-api-key
+
+    Plaintext storage is convenient but less safe.  Encrypted GPG storage uses
+    the external gpg command and stores the key at API_KEY_GPG_FILE.
+
+    Environment variables are also supported:
+
+        OPENROUTER_API_KEY
+        TTYCHATTER_API_KEY
+
+CONFIGURATION
+    Default config file:
+
+        ~/.config/ttychatter/config
+
+    Common keys:
+
+        OPENROUTER_API_KEY
+            Plaintext API key.  Environment variables override this.
+
+        API_KEY_GPG_FILE
+            Path to encrypted API key file.
+            Default: ~/.config/ttychatter/api-key.gpg
+
+        MODEL
+            OpenRouter model/router.
+            Default: openrouter/auto
+
+        CONTEXT_TURNS
+            Recent user/assistant turns read from the output log and sent as
+            conversation context.
+            Default: 12
+
+        MODEL_CACHE_FILE
+            OpenRouter model catalog cache.
+            Default: ~/.cache/ttychatter/models.json
+
+        SESSION_DIR
+            Default session directory for other ttychatter clients.
+            The C client can still write to any output file given on the
+            command line.
+
+        ATTACHMENT_DIR
+            Directory for extracted code-block attachments.
+            Default: ~/.local/share/ttychatter/attachments
+
+        CODE_ATTACHMENT_MIN_LINES
+            Minimum line count before a returned fenced code block is saved as
+            an attachment rather than left inline.
+            Default: 5
+
+        MAX_ATTACHMENT_BYTES
+            Maximum local attachment size for inline sending.
+            Default: 1048576
+
+MODEL CATALOG
+    Refresh the OpenRouter model cache:
+
+        ttychatter --update-models
+
+    List cached models:
+
+        ttychatter --models
+
+    Search cached models:
+
+        ttychatter --models --search llama
+
+    Show only routers or free models:
+
+        ttychatter --models --model-type routers
+        ttychatter --models --model-type free
+
+    Recognized model types:
+
+        all
+        routers
+        fixed
+        free
+        auto
+
+MODEL TESTING
+    Test one model without appending to a session log:
+
+        ttychatter --test-model openrouter/auto
+
+    The test sends a short availability prompt to the selected model and prints
+    the raw response.
+
+ATTACHMENTS
+    Attach one or more files:
+
+        ttychatter -a notes.txt input.txt session.log
+        ttychatter -a notes.txt -a diagram.png input.txt session.log
+
+    Text-like attachments are inserted into the user message as text.  Image
+    attachments are sent as data URLs using OpenRouter's chat-completions
+    content-part format when the selected model supports image input.
+
+    Other binary files are listed in the prompt but not embedded as raw data in
+    this first release.
+
+LOOPBACK
+    To also print the AI response to stdout:
+
+        ttychatter --loopback input.txt session.log
+
+    This is useful for pipes:
+
+        ttychatter --loopback input.txt session.log | less
+
+SESSION FORMAT
+    The output file is human-readable and structured with markers:
+
+        ===== TTYCHATTER TURN BEGIN =====
+        ----- USER BEGIN -----
+        ...
+        ----- USER END -----
+        ----- AI BEGIN -----
+        ...
+        ----- AI END -----
+        ===== TTYCHATTER TURN END =====
+
+    These markers allow ttychatter to reconstruct recent context later.
+
+WALKTHROUGH
+    A detailed step-by-step guide is provided in the WALKTHROUGH file included
+    with the source distribution.
+
+DIAGNOSTICS
+    Show local diagnostics:
+
+        ttychatter --doctor
+
+    The doctor command reports config paths, API-key loading status, GPG
+    availability, cache path, storage paths, and libcurl version.  It does not
+    print API-key values.
+
+FILES
+    ~/.config/ttychatter/config
+        Configuration file.
+
+    ~/.config/ttychatter/api-key.gpg
+        Default encrypted API key file.
+
+    ~/.cache/ttychatter/models.json
+        Cached OpenRouter model catalog.
+
+    ~/.local/share/ttychatter/attachments
+        Extracted code-block attachments.
+
+LIMITATIONS
+    - Requires libcurl and json-c.
+    - GPG encryption requires the external gpg command.
+    - Image attachment support depends on the selected model.
+    - Non-image binary attachments are not fully embedded in this first C CLI
+      release.
+    - The command-line C client is intentionally not an ncurses UI.
+
+VERSION
+    ttychatter 0.1.0-c-cli
+
+AUTHOR
+    Part of the ttychatter project.

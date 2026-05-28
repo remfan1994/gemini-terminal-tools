@@ -1,0 +1,38 @@
+# ttychatter C changelog
+
+## 0.1.0-c-cli
+
+### Added
+- Initial C command-line ttychatter client
+- Traditional file-in/file-out workflow: `ttychatter input.txt output.log`
+- OpenRouter chat-completions support through libcurl
+- JSON request/response handling through json-c
+- XDG-style config/cache/data defaults
+- Config file loading from `~/.config/ttychatter/config`
+- Environment API-key support through `OPENROUTER_API_KEY` and `TTYCHATTER_API_KEY`
+- Plaintext API-key setup command
+- Optional GPG-encrypted API-key setup command
+- API-key forget command
+- Doctor diagnostics command
+- Model cache update command
+- Model listing from cache
+- Model search filter
+- Model type filter for routers/fixed/free/auto
+- Single-model test command
+- Input file to output session log workflow
+- Session continuation by reusing the same output file
+- Context reconstruction from recent output-file turns
+- Repeatable `--attach` / `-a` option
+- Text attachment insertion
+- Image attachment data URL support for compatible models
+- Long fenced-code-block extraction into attachment files
+- Loopback output mode for piping AI responses to stdout
+- Traditional Unix man page
+- Step-by-step WALKTHROUGH document
+- Verbose maintainer comments in source code
+
+### Notes
+- This is not an ncurses client.
+- This version intentionally starts with traditional command-line semantics.
+- Non-image binary attachments are listed but not fully embedded yet.
+- Encrypted API-key storage uses the external `gpg` command rather than linking a crypto library.
