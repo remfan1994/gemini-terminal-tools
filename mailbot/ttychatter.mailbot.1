@@ -1,458 +1,188 @@
-TTYCHATTER.MAILBOT(1)       User Commands       TTYCHATTER.MAILBOT(1)
-
-NAME
-    ttychatter.mailbot - IMAP/sendmail or SMTP transport adapter and remote
-    control surface for ttychatter
-
-SYNOPSIS
-    ttychatter.mailbot --once [--dry-run]
-    ttychatter.mailbot --daemon [--dry-run]
-    ttychatter.mailbot --list-candidates
-    ttychatter.mailbot --doctor
-    ttychatter.mailbot --sessions
-    ttychatter.mailbot --list-sessions
-    ttychatter.mailbot --manpage
-    ttychatter.mailbot --update-models [--dry-run]
-    ttychatter.mailbot --config
-    ttychatter.mailbot --set KEY VALUE
-    ttychatter.mailbot --unset KEY
-    ttychatter.mailbot --set-imap-password [--gpg]
-    ttychatter.mailbot --set-smtp-password [--gpg]
-    ttychatter.mailbot --version
-    ttychatter.mailbot --help
-
-DESCRIPTION
-    ttychatter.mailbot reads unread mail from an IMAP mailbox, selects messages
-    whose subject contains a token such as tc:{session}, and either:
-
-        1. sends the message body and attachments to ttychatter.python; or
-        2. handles an allowlisted mailbot control command.
-
-    Replies are sent by sendmail or SMTP. The mailbot does not implement
-    OpenRouter, model selection, memory, or session context itself. It remains a
-    transport adapter:
-
-        email -> ttychatter.python -> email reply
-
-    Ordinary chat runs use ttychatter.python --loopback so stdout is the clean
-    response body and stderr remains diagnostic output. Utility/control commands
-    call ttychatter.python directly with explicit allowlisted flags.
-
-SUBJECT FORMAT
-    Normal chat request:
-
-        tc:{session-name}
-
-    New timestamped session:
-
-        tc:{new}
-
-    Mailbot config export/update:
-
-        tc:{CONFIG}
-
-    Mailbot control command in the subject:
-
-        tc:{MAILBOT:command args}
-
-    Mailbot control command in the body:
-
-        tc:{MAILBOT}
-
-        command args
-
-    The subject token can appear inside a larger subject line. The prefix tc,
-    the CONFIG token, and the MAILBOT token are configurable.
-
-EMAIL CONTROL COMMANDS
-    All control commands require the message sender to match ALLOWED_FROM.
-
-    help
-        Return the mailbot email command summary.
-
-    manpage
-    manual
-    get-manpage
-    fetch-manpage
-        Return the configured external manpage as an attachment named
-        ttychatter.mailbot.1 when found, otherwise return the embedded fallback.
-        This is the command to fetch and retrieve the mailbot manpage over email.
-
-    config
-        Return the public/redacted mailbot config as an attachment named
-        ttychatter-mailbot-config.txt. This is equivalent to the tc:{CONFIG}
-        export path.
-
-    sessions
-    list
-    list-sessions
-    session-list
-        List saved session logs newest first. Each entry includes the sanitized
-        session name, modified time, byte count, line count, and short previews
-        from the head and tail of the log.
-
-    search TEXT
-        Search all session logs for TEXT, newest first.
-
-    search-session SESSION TEXT
-        Search one session log for TEXT.
-
-    rename-session OLD NEW
-        Rename one session log. Names are sanitized to A-Z, a-z, 0-9, dot,
-        underscore, and dash. Dry-run reports the action without renaming.
-
-    update-models
-    update-model-list
-    update-model-cache
-    model-cache
-        Run ttychatter.python --update-models. The mailbot then looks for a
-        cache path printed as "updated model cache: PATH"; if no path is found,
-        it uses MODEL_CACHE_FILE. When the cache exists and is not larger than
-        MAX_OUTGOING_ATTACHMENT_BYTES, the reply attaches it as models-cache.json.
-
-    models [FLAGS]
-        Run ttychatter.python --models with safe model-list flags only.
-
-    routers [FLAGS]
-    router-list [FLAGS]
-        Run ttychatter.python --routers with safe model-list flags only.
-
-    Allowed model-list flags are:
-
-        --all
-        --sort VALUE
-        --modellist-sort-tokens
-        --min-input-tokens N
-        --min-output-tokens N
-        --hide-preview
-        --show-preview
-        --require-tokens
-        --allow-missing-tokens
-        --model-type VALUE
-
-    favorites
-    faves
-        Run ttychatter.python --favorites.
-
-    favorite-model MODEL
-        Run ttychatter.python --favorite-model MODEL.
-
-    unfavorite-model MODEL
-    unbookmark-model MODEL
-        Run ttychatter.python --unfavorite-model MODEL.
-
-    test-model MODEL
-        Run ttychatter.python --test-model MODEL.
-
-    ttyconfig
-    ttyconfig-summary
-        Run ttychatter.python --config.
-
-    ttydoctor
-    doctor
-        Run ttychatter.python --doctor.
-
-    credits
-        Run ttychatter.python --credits.
-
-    show-memory SESSION
-        Run ttychatter.python --show-memory SESSION.
-
-    clear-memory SESSION
-        Run ttychatter.python --clear-memory SESSION.
-
-    tty-set KEY VALUE
-        Run ttychatter.python --set KEY VALUE. The mailbot refuses to set
-        OPENROUTER_API_KEY or API_KEY by email. Use ttychatter.python
-        --set-api-key locally for secrets.
-
-    tty-unset KEY
-        Run ttychatter.python --unset KEY.
-
-BODY ARGUMENTS
-    For commands that usually need arguments, the subject may contain only the
-    command name and the first nonempty nonquoted body line may contain the
-    arguments. This works for models, routers, search, search-session,
-    rename-session, favorite-model, unfavorite-model, test-model, show-memory,
-    clear-memory, tty-set, and tty-unset.
-
-    Example:
-
-        Subject: tc:{MAILBOT:search}
-
-        gpt-5
-
-LOCAL COMMANDS
-    --config-file PATH
-        Use an alternate mailbot config file. This option applies before local
-        commands such as --manpage, --sessions, --update-models, and --config.
-
-    --once
-        Check unread messages once and exit.
-
-    --daemon
-        Poll forever using POLL_INTERVAL.
-
-    --dry-run
-        Show replies/actions without sending replies, replacing config,
-        recording processed Message-IDs, mutating model caches, renaming
-        sessions, or marking messages seen.
-
-    --list-candidates
-        Print unread From/Subject/Message-ID values and whether each message
-        matches or why it is skipped. Uses IMAP BODY.PEEK[] and does not mark
-        messages read.
-
-    --doctor
-        Print local diagnostics for config, directories, password files, manpage
-        lookup, send method, and ttychatter command setting.
-
-    --sessions, --list-sessions
-        Print the same session list and head/tail previews used by the email
-        sessions command.
-
-    --manpage
-        Print the configured external manpage to stdout when found, otherwise
-        print the embedded fallback.
-
-    --update-models
-        Run the email update-models dispatcher locally. It prints the subprocess
-        result and cache attachment note to stdout. The local CLI does not send
-        an email attachment.
-
-    --config
-        Print nonsecret config diagnostics.
-
-    --set KEY VALUE, --unset KEY
-        Edit the mailbot config file.
-
-    --set-imap-password [--gpg]
-    --set-smtp-password [--gpg]
-        Prompt for IMAP or SMTP password storage. With --gpg, store the secret
-        encrypted by external gpg. Without --gpg, store it in plaintext config.
-
-CONFIGURATION BY EMAIL
-    A message from ALLOWED_FROM with subject tc:{CONFIG} and no config
-    attachment causes the bot to reply with the current public config as
-    ttychatter-mailbot-config.txt. Plaintext IMAP_PASSWORD and SMTP_PASSWORD
-    values are redacted.
-
-    To update config by email:
-
-        1. Send tc:{CONFIG}.
-        2. Save and edit the attached config file.
-        3. Reply with the edited text config attached under the same subject.
-        4. Run ttychatter.mailbot --once, or let daemon/cron process it.
-
-    The bot creates a timestamped backup before replacing the config. Dry-run
-    reports what would happen but does not write config.
-
-CONFIG FILE
-    Default path:
-
-        ~/.config/ttychatter/mailbot/config
-
-    Supported keys:
-
-        IMAP_HOST
-        IMAP_PORT
-        IMAP_SSL
-        IMAP_USER
-        IMAP_PASSWORD
-        IMAP_PASSWORD_GPG_FILE
-        IMAP_MAILBOX
-        SEND_METHOD
-        REPLY_METHOD
-        SENDMAIL
-        SENDMAIL_PATH
-        SMTP_HOST
-        SMTP_PORT
-        SMTP_SSL
-        SMTP_STARTTLS
-        SMTP_USER
-        SMTP_PASSWORD
-        SMTP_PASSWORD_GPG_FILE
-        MAIL_FROM
-        MAIL_TO
-        ALLOWED_FROM
-        SUBJECT_PREFIX
-        CONFIG_SUBJECT_TOKEN
-        MAILBOT_SUBJECT_TOKEN
-        MAILBOT_MANPAGE_FILE
-        CONFIG_UPDATE_REQUIRES_ATTACHMENT
-        POLL_INTERVAL
-        MAX_MESSAGES_PER_RUN
-        MAX_BODY_BYTES
-        MAX_ATTACHMENT_BYTES
-        PROCESS_ATTACHMENTS
-        MARK_SEEN
-        TTYCHATTER_COMMAND
-        TTYCHATTER_EXTRA_ARGS
-        TTYCHATTER_CONTROL_TIMEOUT
-        SESSION_DIR
-        ATTACHMENT_DIR
-        MODEL_CACHE_FILE
-        WORK_DIR
-        PROCESSED_DB
-        SESSION_LIST_HEAD_LINES
-        SESSION_LIST_TAIL_LINES
-        SESSION_LIST_MAX_SESSIONS
-        SESSION_PREVIEW_LINE_CHARS
-        SESSION_SEARCH_MAX_MATCHES
-        MAX_COMMAND_OUTPUT_BYTES
-        MAX_OUTGOING_ATTACHMENT_BYTES
-        REPLY_SUBJECT_PREFIX
-        INCLUDE_TTYCHATTER_STDERR
-
-COMMON DEFAULTS
-        SUBJECT_PREFIX=tc
-        CONFIG_SUBJECT_TOKEN=CONFIG
-        MAILBOT_SUBJECT_TOKEN=MAILBOT
-        MAILBOT_MANPAGE_FILE=
-        TTYCHATTER_COMMAND=ttychatter.python
-        SESSION_DIR=~/.local/share/ttychatter/openrouter/sessions
-        ATTACHMENT_DIR=~/.local/share/ttychatter/openrouter/attachments
-        MODEL_CACHE_FILE=~/.config/ttychatter/openrouter/models-cache.json
-        SESSION_LIST_HEAD_LINES=3
-        SESSION_LIST_TAIL_LINES=3
-        SESSION_LIST_MAX_SESSIONS=50
-        SESSION_PREVIEW_LINE_CHARS=220
-        SESSION_SEARCH_MAX_MATCHES=100
-        TTYCHATTER_CONTROL_TIMEOUT=180
-        MAX_COMMAND_OUTPUT_BYTES=200000
-        MAX_OUTGOING_ATTACHMENT_BYTES=8388608
-
-MANPAGE LOOKUP
-    The email manpage command and local --manpage option return the first
-    readable manpage found. The lookup order is:
-
-        TTYCHATTER_MAILBOT_MANPAGE_FILE from environment, when set
-        MAILBOT_MANPAGE_FILE from config
-        ~/.config/ttychatter/mailbot/ttychatter.mailbot.1
-        ~/.config/ttychatter/mailbot/ttychatter.mailbot.1.gz
-        directory beside the script/ttychatter.mailbot.1
-        directory beside the script/ttychatter.mailbot.1.gz
-        directory beside argv[0]/ttychatter.mailbot.1
-        directory beside argv[0]/ttychatter.mailbot.1.gz
-        $XDG_DATA_HOME/man/man1/ttychatter.mailbot.1
-        $XDG_DATA_HOME/man/man1/ttychatter.mailbot.1.gz
-        ~/.local/share/man/man1/ttychatter.mailbot.1
-        ~/.local/share/man/man1/ttychatter.mailbot.1.gz
-        /usr/local/share/man/man1/ttychatter.mailbot.1
-        /usr/local/share/man/man1/ttychatter.mailbot.1.gz
-        /usr/local/man/man1/ttychatter.mailbot.1
-        /usr/local/man/man1/ttychatter.mailbot.1.gz
-        /usr/share/man/man1/ttychatter.mailbot.1
-        /usr/share/man/man1/ttychatter.mailbot.1.gz
-        current working directory/ttychatter.mailbot.1
-        current working directory/ttychatter.mailbot.1.gz
-
-    For a normal install, name the file ttychatter.mailbot.1 rather than
-    ttychatter.mailbot.1.updated. To use a different filename, set
-    MAILBOT_MANPAGE_FILE. If no external file is found, the embedded fallback
-    is used.
-
-GPG PASSWORD TROUBLESHOOTING
-    When IMAP_PASSWORD is unset and IMAP_PASSWORD_GPG_FILE exists, the mailbot
-    decrypts that file before opening the IMAP connection. A run such as
-    ttychatter.mailbot --once can therefore fail before any mail is processed if
-    gpg-agent or pinentry cannot unlock the password file.
-
-    Agent/pinentry failures often look like:
-
-        gpg: problem with the agent: Permission denied
-        gpg: decryption failed: Bad session key
-
-    Test the same decrypt as the mailbot user:
-
-        export GPG_TTY=$(tty)
-        gpgconf --launch gpg-agent
-        gpg-connect-agent updatestartuptty /bye
-        gpg --decrypt ~/.config/ttychatter/mailbot/imap-password.gpg >/dev/null
-
-    If a bad passphrase is cached, run:
-
-        gpgconf --kill gpg-agent
-
-    Also verify that ~/.gnupg and the configured password .gpg file are owned by
-    the mailbot user and have restrictive permissions. Do not diagnose this by
-    switching to root unless the service is actually configured to run as root;
-    root changes HOME, GNUPGHOME, and the gpg-agent socket and can make the
-    failure appear as a different IMAP problem. For unattended daemon runs, the
-    gpg-agent passphrase must already be cached, or the deployment must use a
-    protected plaintext IMAP_PASSWORD line, a TTYCHATTER_IMAP_PASSWORD
-    environment override, or another local secret manager.
-
-    If root or another user shows:
-
-        IMAP error: LOGIN command error: BAD
-
-    first confirm that the intended config is being read:
-
-        ttychatter.mailbot --config
-        ttychatter.mailbot --doctor
-
-    A BAD login command is usually a syntax problem such as empty IMAP_USER, a
-    password containing a carriage return or newline, or running with a different
-    user/HOME than the configured mailbot account. Version 0.3.1 rejects empty
-    IMAP_USER/password values and CR/LF in login values before sending LOGIN.
-
-IMAP SAFETY
-    The mailbot inspects unread candidates using IMAP BODY.PEEK[]. Ordinary
-    RFC822/BODY fetches may set the \Seen flag. Dry-run, candidate listing,
-    skipped messages, config inspection, and command inspection are designed not
-    to consume unread state. A matching message is marked seen only after a
-    successful real processing run, and only if MARK_SEEN is enabled.
-
-ALLOWLIST BEHAVIOR
-    ALLOWED_FROM is the main safety gate. It may contain one address or multiple
-    addresses separated by commas, semicolons, or whitespace. Matching is
-    case-insensitive after parsing the From header to a bare address.
-
-    A wildcard value of * is accepted for temporary local testing but should not
-    be left in production.
-
-SECURITY NOTES
-    Use a narrow ALLOWED_FROM and a private mailbox. Commands are allowlisted and
-    are not shell-expanded. TTYCHATTER_EXTRA_ARGS is used for ordinary loopback
-    chat calls, not for utility/control calls. Do not send passwords, API keys,
-    or other long-lived secrets through email.
-
-GPG PASSWORD FILES
-    With --gpg, the mailbot stores IMAP and SMTP passwords in external gpg
-    files and decrypts them with gpg --quiet --decrypt at runtime. For an
-    interactive shell, make sure GPG_TTY names the real terminal:
-
-        export GPG_TTY=$(tty)
-
-    Version 0.3.1 also passes GPG_TTY automatically to gpg when the mailbot has
-    a controlling terminal, trims trailing CR/LF from decrypted password files,
-    and prints the process user, HOME, and GPG_TTY in gpg-agent diagnostics. If
-    gpg still reports an agent or pinentry error, test the password file
-    directly as the same user:
-
-        gpg --decrypt ~/.config/ttychatter/mailbot/imap-password.gpg
-
-    For cron, rc, systemd, or other unattended launches, gpg-agent must already
-    have the passphrase cached, or the deployment must use plaintext
-    IMAP_PASSWORD/SMTP_PASSWORD lines protected by a mode-0600 config file.
-    SEND_METHOD=sendmail avoids SMTP password decryption.
-
-FILES
-    ~/.config/ttychatter/mailbot/config
-    ~/.config/ttychatter/mailbot/imap-password.gpg
-    ~/.config/ttychatter/mailbot/smtp-password.gpg
-    ~/.config/ttychatter/mailbot/ttychatter.mailbot.1
-    ~/.local/share/man/man1/ttychatter.mailbot.1
-    /usr/local/share/man/man1/ttychatter.mailbot.1
-    ~/.local/state/ttychatter/mailbot/processed-ids.txt
-    ~/.local/share/ttychatter/openrouter/sessions/*.log
-    ~/.config/ttychatter/openrouter/models-cache.json
-
-EXIT STATUS
-    0 indicates success. Nonzero status indicates configuration, IMAP, SMTP,
-    sendmail, or ttychatter subprocess failure.
-
-VERSION
-    ttychatter.mailbot version 0.3.1
-
+.TH TTYCHATTER.MAILBOT 1 "May 2026" "ttychatter.mailbot 0.4.1" "User Commands"
+.SH NAME
+ttychatter.mailbot \- email transport adapter and remote control surface for ttychatter
+.SH SYNOPSIS
+.B ttychatter.mailbot
+[--config-file PATH] [--once|--daemon|--dry-run] [--doctor] [--list-candidates]
+.PP
+.B ttychatter.mailbot
+[--config|--raw-config] [--sessions|--list-sessions] [--manpage] [--model-cache] [--model-search TEXT] [--update-models] [--delete-session SESSION]
+.PP
+.B ttychatter.mailbot
+[--set KEY VALUE] [--unset KEY] [--set-imap-password [--gpg]] [--set-smtp-password [--gpg]]
+.SH DESCRIPTION
+ttychatter.mailbot reads unread IMAP mail, accepts only messages from ALLOWED_FROM,
+extracts a subject token, and either sends the message body to ttychatter.python
+or handles a local mailbot control command. Replies are sent by sendmail or SMTP.
+.PP
+The 0.4 command grammar reserves braces for ttychatter chat sessions and uses
+bare subjects for mailbot controls. Version 0.4.1 makes model-cache operations
+cache-only unless the operator explicitly runs update-models.
+.SH CHAT SUBJECTS
+.TP
+.B tc:{session-name}
+Send the message body to the named ttychatter session.
+.TP
+.B tc:{new}
+Start a new unnamed chat. The mailbot passes no session argument, so
+ttychatter.python creates its normal session-YYYY-MM-DD-HH-MM-SS log name.
+.SH CONTROL SUBJECTS
+.TP
+.B tc:CONFIG
+Export or apply the mailbot config attachment.
+.TP
+.B tc:MODELS
+Attach the existing MODEL_CACHE_FILE as models-cache.json. This is cache-only;
+it does not call ttychatter.python --update-models and does not ping OpenRouter.
+.TP
+.B tc:MODELS TEXT
+Search the existing model cache for TEXT. This is also cache-only.
+.TP
+.B tc:CMD
+Run the first nonempty message-body line as a mailbot command.
+.TP
+.B tc:command args
+Run a mailbot command directly from the subject.
+.TP
+.B tc:delete{session-name}
+Delete the named session log from SESSION_DIR. The supplied name must already be the exact sanitized session name.
+.TP
+.B tc:rm{session-name}
+Alias for delete{session-name}.
+.PP
+Legacy subjects tc:{CONFIG}, tc:{MAILBOT},
+and tc:{MAILBOT:command args} remain accepted for compatibility,
+but new mail should use the bare control subjects.
+.SH SUPPORTED COMMANDS
+.TP
+.B help
+Return the email command summary.
+.TP
+.B manpage
+Return the configured external manpage as an email attachment when found,
+otherwise return the embedded fallback. Aliases: manual, get-manpage, fetch-manpage.
+.TP
+.B sessions
+List saved session names with short head and tail previews from each session log.
+.TP
+.B search TEXT
+Search all session logs for TEXT. If the subject is only tc:search,
+the first nonempty body line supplies TEXT.
+.TP
+.B search-session SESSION TEXT
+Search a single session log for TEXT.
+.TP
+.B rename-session OLD NEW
+Rename a session log after sanitizing both names.
+.TP
+.B delete-session SESSION
+Delete a session log. Aliases: delete, rm, remove-session, rm-session. The
+target must resolve inside SESSION_DIR and the supplied name must already be
+the exact sanitized session name. Subject shortcuts tc:delete{SESSION}
+and tc:rm{SESSION} are accepted.
+.TP
+.B model-cache
+Attach the existing MODEL_CACHE_FILE as models-cache.json. This command never
+refreshes the cache. Alias: models-cache.
+.TP
+.B model-search TEXT
+Search the existing model cache for TEXT. This command never refreshes the cache.
+Aliases: search-models, models-search, model-list-search.
+.TP
+.B update-models
+Run ttychatter.python --update-models, then attach the resulting models-cache.json
+when the cache file is present and smaller than MAX_OUTGOING_ATTACHMENT_BYTES.
+This is the explicit live refresh command.
+.TP
+.B model-list [FLAGS]
+Run ttychatter.python --models. Aliases: models, list-models, models-list, show-models.
+The safe model-list flags are --all, --sort VALUE, --modellist-sort-tokens,
+--min-input-tokens N, --min-output-tokens N, --hide-preview, --show-preview,
+--require-tokens, --allow-missing-tokens, and --model-type VALUE.
+.TP
+.B routers [FLAGS]
+Run ttychatter.python --routers with the same safe model-list flags.
+.TP
+.B favorites
+Return ttychatter's model favorites.
+.TP
+.B favorite-model MODEL
+Add MODEL to ttychatter's favorites file.
+.TP
+.B unfavorite-model MODEL
+Remove MODEL from ttychatter's favorites file.
+.TP
+.B test-model MODEL
+Run ttychatter.python --test-model MODEL.
+.TP
+.B ttyconfig
+Return ttychatter.python --config output.
+.TP
+.B ttydoctor
+Return ttychatter.python --doctor diagnostics.
+.TP
+.B show-memory SESSION
+Return ttychatter's memory snapshot for SESSION.
+.TP
+.B clear-memory SESSION
+Clear ttychatter's memory snapshot for SESSION.
+.TP
+.B tty-set KEY VALUE
+Run ttychatter.python --set KEY VALUE. Do not send secrets by email.
+.TP
+.B tty-unset KEY
+Run ttychatter.python --unset KEY.
+.TP
+.B credits
+Return ttychatter.python --credits output.
+.SH LOCAL CONFIG OUTPUT
+The local --config command prints the parsed effective config, not a byte-for-byte
+copy of the config file. Use --raw-config to print the actual config file with
+plaintext password lines redacted. The default config path is
+TTYCHATTER_MAILBOT_CONFIG, then XDG_CONFIG_HOME/ttychatter/mailbot/config,
+then ~/.config/ttychatter/mailbot/config; --config-file PATH has final precedence.
+.SH CONFIG COMMAND
+The subject tc:CONFIG exports the mailbot config as an
+attachment. Reply with an edited config attachment using the same subject to
+replace the config; a timestamped backup is kept. Plaintext IMAP_PASSWORD and
+SMTP_PASSWORD values are redacted on export.
+.SH CONFIGURATION KEYS
+Core keys include IMAP_HOST, IMAP_PORT, IMAP_SSL, IMAP_USER, IMAP_PASSWORD,
+IMAP_PASSWORD_GPG_FILE, SEND_METHOD, SENDMAIL_PATH, SMTP_HOST, SMTP_PORT,
+SMTP_SSL, SMTP_STARTTLS, SMTP_USER, SMTP_PASSWORD, SMTP_PASSWORD_GPG_FILE,
+MAIL_FROM, MAIL_TO, ALLOWED_FROM, SUBJECT_PREFIX, CONFIG_SUBJECT_TOKEN,
+MODELS_SUBJECT_TOKEN, COMMAND_SUBJECT_TOKEN, MAILBOT_SUBJECT_TOKEN,
+POLL_INTERVAL, MAX_MESSAGES_PER_RUN, MAX_BODY_BYTES, MAX_ATTACHMENT_BYTES,
+PROCESS_ATTACHMENTS, MARK_SEEN, TTYCHATTER_COMMAND, TTYCHATTER_EXTRA_ARGS,
+TTYCHATTER_CONTROL_TIMEOUT, MAILBOT_MANPAGE_FILE, SESSION_DIR, ATTACHMENT_DIR,
+MODEL_CACHE_FILE, WORK_DIR, PROCESSED_DB, SESSION_LIST_HEAD_LINES,
+SESSION_LIST_TAIL_LINES, SESSION_LIST_MAX_SESSIONS, SESSION_PREVIEW_LINE_CHARS,
+SESSION_SEARCH_MAX_MATCHES, MODEL_SEARCH_MAX_MATCHES, MAX_COMMAND_OUTPUT_BYTES,
+MAX_OUTGOING_ATTACHMENT_BYTES, REPLY_SUBJECT_PREFIX, and INCLUDE_TTYCHATTER_STDERR.
+.SH SECURITY
+ALLOWED_FROM is required. Commands are allowlisted and are not shell-expanded.
+Email is not a good channel for secrets; use the local --set-imap-password and
+--set-smtp-password commands for passwords.
+.SH GPG PASSWORD FILES
+With --gpg, the mailbot stores IMAP and SMTP passwords in external gpg files and
+decrypts them with gpg --quiet --decrypt at runtime. For interactive tests, set
+export GPG_TTY=$(tty) and test the password file directly with gpg --decrypt as
+the mailbot user. Do not diagnose this by switching to root unless the service
+is actually configured to run as root.
+.SH MANPAGE LOOKUP
+The email manpage command and the local --manpage command use the first readable
+manpage found. The lookup order is TTYCHATTER_MAILBOT_MANPAGE_FILE, then
+MAILBOT_MANPAGE_FILE, then config, executable, XDG/user man1, system man1, and
+current working directory candidates. Matching .1.gz files are accepted. If no
+external file is found, the embedded fallback is used.
+.SH FILES
+Default config: ~/.config/ttychatter/mailbot/config
+.PP
+Default processed-message database: ~/.local/state/ttychatter/mailbot/processed-ids.txt
+.PP
+Default session directory: ~/.local/share/ttychatter/openrouter/sessions
+.PP
+Default model cache: ~/.config/ttychatter/openrouter/models-cache.json
+.SH EXIT STATUS
+0 indicates success. Nonzero status indicates configuration, IMAP, SMTP,
+sendmail, or ttychatter subprocess failure.

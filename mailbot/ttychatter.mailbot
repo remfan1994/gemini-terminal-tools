@@ -30,6 +30,7 @@ import email.policy
 import getpass
 import gzip
 import html
+import json
 import imaplib
 import mimetypes
 import os
@@ -46,10 +47,10 @@ from dataclasses import dataclass, field
 from email.message import EmailMessage, Message
 from email.utils import getaddresses, make_msgid, parseaddr
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple
+from typing import Any, Iterable, List, Optional, Tuple
 
 PROGRAM = "ttychatter.mailbot"
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 
 DEFAULT_CONFIG_DIR = Path.home() / ".config" / "ttychatter" / "mailbot"
 DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config"
@@ -129,6 +130,7 @@ class Config:
     session_list_max_sessions: int = 50
     session_preview_line_chars: int = 220
     session_search_max_matches: int = 100
+    model_search_max_matches: int = 100
     max_command_output_bytes: int = 200000
     max_outgoing_attachment_bytes: int = 8388608
 
@@ -172,7 +174,8 @@ KNOWN_CONFIG_KEYS = {
     "TTYCHATTER_CONTROL_TIMEOUT", "SESSION_LIST_HEAD_LINES",
     "SESSION_LIST_TAIL_LINES", "SESSION_LIST_MAX_SESSIONS",
     "SESSION_PREVIEW_LINE_CHARS", "SESSION_SEARCH_MAX_MATCHES",
-    "MAX_COMMAND_OUTPUT_BYTES", "MAX_OUTGOING_ATTACHMENT_BYTES",
+    "MODEL_SEARCH_MAX_MATCHES", "MAX_COMMAND_OUTPUT_BYTES",
+    "MAX_OUTGOING_ATTACHMENT_BYTES",
 }
 
 SECRET_CONFIG_KEYS = {"IMAP_PASSWORD", "SMTP_PASSWORD"}
@@ -406,6 +409,7 @@ def load_config(path: Path = DEFAULT_CONFIG_FILE) -> Config:
         elif key == "SESSION_LIST_MAX_SESSIONS": cfg.session_list_max_sessions = max(1, parse_int(value, cfg.session_list_max_sessions))
         elif key == "SESSION_PREVIEW_LINE_CHARS": cfg.session_preview_line_chars = max(20, parse_int(value, cfg.session_preview_line_chars))
         elif key == "SESSION_SEARCH_MAX_MATCHES": cfg.session_search_max_matches = max(1, parse_int(value, cfg.session_search_max_matches))
+        elif key == "MODEL_SEARCH_MAX_MATCHES": cfg.model_search_max_matches = max(1, parse_int(value, cfg.model_search_max_matches))
         elif key == "MAX_COMMAND_OUTPUT_BYTES": cfg.max_command_output_bytes = max(1000, parse_int(value, cfg.max_command_output_bytes))
         elif key == "MAX_OUTGOING_ATTACHMENT_BYTES": cfg.max_outgoing_attachment_bytes = max(1, parse_int(value, cfg.max_outgoing_attachment_bytes))
         elif key == "CONFIG_FILE":
@@ -715,8 +719,13 @@ def parse_subject_request(subject: str, cfg: Config, body: str = "") -> Optional
         return SubjectRequest("command", maybe_append_body_arguments(stripped, body) if stripped else (first_command_line_from_body(body) or "help"), raw=command_text)
 
     models_token = (cfg.models_subject_token or "MODELS").strip()
-    if token_equals(first, models_token) and not rest:
-        return SubjectRequest("command", "update-models", raw=command_text)
+    # MODELS is an exact uppercase control token so tc:MODELS remains a
+    # cache-only shorthand while tc:models can still be used as the ordinary
+    # allowlisted ttychatter model-list command.
+    if models_token and first == models_token:
+        if not rest:
+            return SubjectRequest("command", "model-cache", raw=command_text)
+        return SubjectRequest("command", "model-search " + shlex.quote(rest), raw=command_text)
 
     return SubjectRequest("command", maybe_append_body_arguments(command_text, body), raw=command_text)
 
@@ -1192,6 +1201,44 @@ def rename_session_file(cfg: Config, old: str, new: str) -> str:
     return f"renamed session: {old_name} -> {new_name}\n"
 
 
+def validated_session_log_target(cfg: Config, session: str) -> Tuple[str, Path]:
+    raw = (session or "").strip()
+    if not raw:
+        raise ValueError("empty session name")
+    if raw.endswith(".log"):
+        raw = raw[:-4]
+    name = sanitize_session_name(raw)
+    if not name:
+        raise ValueError("empty session name after sanitizing")
+    if name != raw:
+        raise ValueError(f"unsafe session name {session!r}; use exact sanitized session name {name!r}")
+    root = cfg.session_dir.resolve()
+    target = (root / f"{name}.log").resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("session path escapes SESSION_DIR") from exc
+    if target.parent != root:
+        raise ValueError("nested session paths are not accepted")
+    return name, target
+
+
+def delete_session_file(cfg: Config, session: str) -> str:
+    name, target = validated_session_log_target(cfg, session)
+    if not target.exists():
+        raise FileNotFoundError(f"session not found: {name}")
+    if not target.is_file():
+        raise ValueError(f"session path is not a regular file: {target}")
+    target.unlink()
+    return f"deleted session: {name}\npath: {target}\n"
+
+
+def parse_braced_delete_command(command_line: str) -> Optional[List[str]]:
+    match = re.fullmatch(r"\s*(delete|rm|delete-session|remove-session)\s*\{([^}]+)\}\s*", command_line or "", flags=re.IGNORECASE)
+    if not match:
+        return None
+    return [match.group(1), match.group(2).strip()]
+
 
 def run_ttychatter(cfg: Config, session: str, body: str, attachments: List[Path]) -> Tuple[int, str, str]:
     cfg.session_dir.mkdir(parents=True, exist_ok=True)
@@ -1308,6 +1355,131 @@ def read_file_attachment(path: Path, cfg: Config, filename: Optional[str] = None
     if path.suffix.lower() == ".json":
         maintype, subtype = "application", "json"
     return ReplyAttachment(filename or safe_filename(path.name), data, maintype, subtype), f"attached: {filename or path.name} ({len(data)} bytes)"
+
+
+def model_cache_reply(cfg: Config) -> Tuple[bool, str, List[ReplyAttachment]]:
+    cache_path = cfg.model_cache_file
+    attachment, note = read_file_attachment(cache_path, cfg, "models-cache.json")
+    body = "model-cache: existing cache only; no OpenRouter fetch was attempted\n"
+    body += f"model_cache_file: {cache_path}\n{note}\n"
+    if attachment is None:
+        body += "Run update-models when you intentionally want to refresh the cache.\n"
+        return False, body, []
+    return True, body, [attachment]
+
+
+def strings_from_json(value: Any) -> Iterable[str]:
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for key, child in value.items():
+            yield str(key)
+            yield from strings_from_json(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from strings_from_json(child)
+    elif value is not None:
+        yield str(value)
+
+
+def model_items_from_cache(data: Any) -> List[Any]:
+    if isinstance(data, dict):
+        for key in ("data", "models", "items"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return value
+        return [data]
+    if isinstance(data, list):
+        return data
+    return []
+
+
+def model_item_summary(item: Any, line_chars: int) -> str:
+    if isinstance(item, dict):
+        model_id = str(item.get("id") or item.get("name") or item.get("slug") or "[no id]")
+        display = str(item.get("name") or item.get("display_name") or item.get("displayName") or "")
+        desc = str(item.get("description") or "")
+        context = item.get("context_length") or item.get("contextLength") or ""
+        output = item.get("max_completion_tokens") or item.get("maxCompletionTokens") or ""
+        arch = item.get("architecture") if isinstance(item.get("architecture"), dict) else {}
+        modalities = arch.get("input_modalities") or arch.get("inputModalities") or arch.get("modality") or ""
+        if isinstance(modalities, list):
+            modalities_text = "/".join(str(x) for x in modalities)
+        else:
+            modalities_text = str(modalities)
+        pieces = [model_id]
+        if display and display != model_id:
+            pieces.append(f"name={display}")
+        if context:
+            pieces.append(f"ctx={context}")
+        if output:
+            pieces.append(f"out={output}")
+        if modalities_text:
+            pieces.append(f"modalities={modalities_text}")
+        if desc:
+            pieces.append("desc=" + trim_preview_line(desc, max(40, line_chars // 2)))
+        return trim_preview_line("; ".join(pieces), line_chars)
+    return trim_preview_line(str(item), line_chars)
+
+
+def search_model_cache(cfg: Config, query: str) -> Tuple[bool, str]:
+    query = (query or "").strip()
+    if not query:
+        return False, "usage: model-search TEXT\n"
+    path = cfg.model_cache_file
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return False, f"model cache read failed: {path}: {exc}\nRun update-models when you intentionally want to refresh the cache.\n"
+    try:
+        data = json.loads(raw)
+    except Exception as exc:
+        # Keep a useful fallback for damaged or nonstandard caches. This is still
+        # cache-only: no network or ttychatter model refresh is attempted.
+        needle = query.casefold()
+        lines = [
+            f"model-cache search: {query}",
+            f"cache: {path}",
+            f"warning: JSON parse failed: {exc}",
+            "fallback: raw line substring search",
+            "",
+        ]
+        matches = 0
+        for lineno, line in enumerate(raw.splitlines(), 1):
+            if needle in line.casefold():
+                matches += 1
+                lines.append(f"{lineno}: {trim_preview_line(line, cfg.session_preview_line_chars)}")
+                if matches >= cfg.model_search_max_matches:
+                    lines.append(f"[stopped after MODEL_SEARCH_MAX_MATCHES={cfg.model_search_max_matches}]")
+                    break
+        if matches == 0:
+            lines.append(f"no matches for: {query}")
+        return matches > 0, "\n".join(lines).rstrip() + "\n"
+
+    items = model_items_from_cache(data)
+    needle = query.casefold()
+    matches: List[str] = []
+    for item in items:
+        haystack = "\n".join(strings_from_json(item)).casefold()
+        if needle in haystack:
+            matches.append(model_item_summary(item, cfg.session_preview_line_chars))
+            if len(matches) >= cfg.model_search_max_matches:
+                break
+
+    lines = [
+        f"model-cache search: {query}",
+        f"cache: {path}",
+        f"items scanned: {len(items)}",
+        f"matches: {len(matches)}",
+        "",
+    ]
+    if matches:
+        lines.extend(matches)
+        if len(matches) >= cfg.model_search_max_matches:
+            lines.append(f"[stopped after MODEL_SEARCH_MAX_MATCHES={cfg.model_search_max_matches}]")
+    else:
+        lines.append(f"no matches for: {query}")
+    return bool(matches), "\n".join(lines).rstrip() + "\n"
 
 
 def build_reply(cfg: Config, original: Message, session: str, body: str, stderr_text: str, ok: bool) -> EmailMessage:
@@ -1443,7 +1615,8 @@ Chat:
 
 Config/models/control:
   {cfg.subject_prefix}:CONFIG                  Export/apply mailbot config attachment
-  {cfg.subject_prefix}:MODELS                  Run ttychatter.python --update-models and attach models-cache.json
+  {cfg.subject_prefix}:MODELS                  Attach existing models-cache.json; no refresh
+  {cfg.subject_prefix}:MODELS TEXT             Search existing model cache for TEXT; no refresh
   {cfg.subject_prefix}:CMD                     Run the first nonempty body line as a command
   {cfg.subject_prefix}:help                    Show this command list
   {cfg.subject_prefix}:manpage | manual        Return the mailbot manpage as an attachment
@@ -1454,11 +1627,16 @@ Sessions:
   {cfg.subject_prefix}:search-session SESSION TEXT
                                     Search one session log
   {cfg.subject_prefix}:rename-session OLD NEW  Rename a session log
+  {cfg.subject_prefix}:delete{{SESSION}}         Delete a session log
+  {cfg.subject_prefix}:rm{{SESSION}}             Alias for delete{{SESSION}}
 
 Model cache and model list:
-  {cfg.subject_prefix}:MODELS                  Refresh model cache and attach models-cache.json
+  {cfg.subject_prefix}:MODELS                  Attach existing models-cache.json; no OpenRouter fetch
+  {cfg.subject_prefix}:model-cache             Same cache-only attachment as tc:MODELS
+  {cfg.subject_prefix}:update-models           Refresh cache, then attach models-cache.json
+  {cfg.subject_prefix}:model-search TEXT       Search existing model cache only
   {cfg.subject_prefix}:model-list [flags]      Run ttychatter.python --models with safe filter flags
-  {cfg.subject_prefix}:models [flags]          Alias for model-list when flags are supplied
+  {cfg.subject_prefix}:models [flags]          Alias for model-list
   {cfg.subject_prefix}:list-models [flags]     Alias for model-list
   {cfg.subject_prefix}:models-list [flags]     Alias for model-list
   {cfg.subject_prefix}:show-models [flags]     Alias for model-list
@@ -1494,7 +1672,7 @@ def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
     models_token = cfg.models_subject_token if cfg else "MODELS"
     command_token = cfg.command_subject_token if cfg else "CMD"
     mailbot_token = cfg.mailbot_subject_token if cfg else "MAILBOT"
-    return textwrap.dedent(f'''    .TH TTYCHATTER.MAILBOT 1 "May 2026" "ttychatter.mailbot {VERSION}" "User Commands"
+    return textwrap.dedent(f"""    .TH TTYCHATTER.MAILBOT 1 "May 2026" "ttychatter.mailbot {VERSION}" "User Commands"
     .SH NAME
     ttychatter.mailbot \\- email transport adapter and remote control surface for ttychatter
     .SH SYNOPSIS
@@ -1502,7 +1680,7 @@ def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
     [--config-file PATH] [--once|--daemon|--dry-run] [--doctor] [--list-candidates]
     .PP
     .B ttychatter.mailbot
-    [--config|--raw-config] [--sessions|--list-sessions] [--manpage] [--update-models]
+    [--config|--raw-config] [--sessions|--list-sessions] [--manpage] [--model-cache] [--model-search TEXT] [--update-models] [--delete-session SESSION]
     .PP
     .B ttychatter.mailbot
     [--set KEY VALUE] [--unset KEY] [--set-imap-password [--gpg]] [--set-smtp-password [--gpg]]
@@ -1512,37 +1690,39 @@ def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
     or handles a local mailbot control command. Replies are sent by sendmail or SMTP.
     .PP
     The 0.4 command grammar reserves braces for ttychatter chat sessions and uses
-    bare subjects for mailbot controls.
+    bare subjects for mailbot controls. Version 0.4.1 makes model-cache operations
+    cache-only unless the operator explicitly runs update-models.
     .SH CHAT SUBJECTS
-    Ordinary chat subjects use this form:
-    .PP
+    .TP
     .B {subject_prefix}:{{session-name}}
-    .PP
-    The special chat subject
-    .PP
+    Send the message body to the named ttychatter session.
+    .TP
     .B {subject_prefix}:{{new}}
-    .PP
-    starts a new unnamed chat from the mailbot side. The mailbot passes no session
-    argument to ttychatter.python, so ttychatter.python creates its normal
-    session-YYYY-MM-DD-HH-MM-SS log name.
+    Start a new unnamed chat. The mailbot passes no session argument, so
+    ttychatter.python creates its normal session-YYYY-MM-DD-HH-MM-SS log name.
     .SH CONTROL SUBJECTS
-    The preferred control forms are:
-    .PP
+    .TP
     .B {subject_prefix}:{config_token}
-    .PP
-    export or apply the mailbot config attachment.
-    .PP
+    Export or apply the mailbot config attachment.
+    .TP
     .B {subject_prefix}:{models_token}
-    .PP
-    run ttychatter.python --update-models and attach the resulting models-cache.json.
-    .PP
+    Attach the existing MODEL_CACHE_FILE as models-cache.json. This is cache-only;
+    it does not call ttychatter.python --update-models and does not ping OpenRouter.
+    .TP
+    .B {subject_prefix}:{models_token} TEXT
+    Search the existing model cache for TEXT. This is also cache-only.
+    .TP
     .B {subject_prefix}:{command_token}
-    .PP
-    run the first nonempty message-body line as a mailbot command.
-    .PP
+    Run the first nonempty message-body line as a mailbot command.
+    .TP
     .B {subject_prefix}:command args
-    .PP
-    run a mailbot command directly from the subject.
+    Run a mailbot command directly from the subject.
+    .TP
+    .B {subject_prefix}:delete{{session-name}}
+    Delete the named session log from SESSION_DIR. The supplied name must already be the exact sanitized session name.
+    .TP
+    .B {subject_prefix}:rm{{session-name}}
+    Alias for delete{{session-name}}.
     .PP
     Legacy subjects {subject_prefix}:{{{config_token}}}, {subject_prefix}:{{{mailbot_token}}},
     and {subject_prefix}:{{{mailbot_token}:command args}} remain accepted for compatibility,
@@ -1550,7 +1730,7 @@ def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
     .SH SUPPORTED COMMANDS
     .TP
     .B help
-    Return the email command summary. Example subject: {subject_prefix}:help.
+    Return the email command summary.
     .TP
     .B manpage
     Return the configured external manpage as an email attachment when found,
@@ -1569,16 +1749,30 @@ def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
     .B rename-session OLD NEW
     Rename a session log after sanitizing both names.
     .TP
+    .B delete-session SESSION
+    Delete a session log. Aliases: delete, rm, remove-session, rm-session. The
+    target must resolve inside SESSION_DIR and the supplied name must already be
+    the exact sanitized session name. Subject shortcuts {subject_prefix}:delete{{SESSION}}
+    and {subject_prefix}:rm{{SESSION}} are accepted.
+    .TP
+    .B model-cache
+    Attach the existing MODEL_CACHE_FILE as models-cache.json. This command never
+    refreshes the cache. Alias: models-cache.
+    .TP
+    .B model-search TEXT
+    Search the existing model cache for TEXT. This command never refreshes the cache.
+    Aliases: search-models, models-search, model-list-search.
+    .TP
     .B update-models
     Run ttychatter.python --update-models, then attach the resulting models-cache.json
     when the cache file is present and smaller than MAX_OUTGOING_ATTACHMENT_BYTES.
-    The subject {subject_prefix}:{models_token} is the preferred shorthand.
+    This is the explicit live refresh command.
     .TP
     .B model-list [FLAGS]
-    Run ttychatter.python --models. Aliases: models, list-models, models-list, show-models. The safe model-list flags are
-    --all, --sort VALUE, --modellist-sort-tokens, --min-input-tokens N,
-    --min-output-tokens N, --hide-preview, --show-preview, --require-tokens,
-    --allow-missing-tokens, and --model-type VALUE.
+    Run ttychatter.python --models. Aliases: models, list-models, models-list, show-models.
+    The safe model-list flags are --all, --sort VALUE, --modellist-sort-tokens,
+    --min-input-tokens N, --min-output-tokens N, --hide-preview, --show-preview,
+    --require-tokens, --allow-missing-tokens, and --model-type VALUE.
     .TP
     .B routers [FLAGS]
     Run ttychatter.python --routers with the same safe model-list flags.
@@ -1617,22 +1811,15 @@ def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
     Return ttychatter.python --credits output.
     .SH LOCAL CONFIG OUTPUT
     The local --config command prints the parsed effective config, not a byte-for-byte
-    copy of the config file. It includes PROCESS_USER, HOME,
-    TTYCHATTER_MAILBOT_CONFIG, XDG_CONFIG_HOME, CONFIG_FILE, CONFIG_EXISTS,
-    CONFIG_READABLE, and CONFIG_MODE to make wrong-user and wrong-path mistakes
-    visible. Unknown keys and comments are not shown there; use --raw-config to
-    print the actual config file with plaintext password lines redacted. The
-    default config path is TTYCHATTER_MAILBOT_CONFIG, then
-    XDG_CONFIG_HOME/ttychatter/mailbot/config, then ~/.config/ttychatter/mailbot/config;
-    --config-file PATH has final precedence.
+    copy of the config file. Use --raw-config to print the actual config file with
+    plaintext password lines redacted. The default config path is
+    TTYCHATTER_MAILBOT_CONFIG, then XDG_CONFIG_HOME/ttychatter/mailbot/config,
+    then ~/.config/ttychatter/mailbot/config; --config-file PATH has final precedence.
     .SH CONFIG COMMAND
-    The subject
-    .PP
-    .B {subject_prefix}:{config_token}
-    .PP
-    exports the mailbot config as an attachment. Reply with an edited config
-    attachment using the same subject to replace the config; a timestamped backup is kept.
-    Plaintext IMAP_PASSWORD and SMTP_PASSWORD values are redacted on export.
+    The subject {subject_prefix}:{config_token} exports the mailbot config as an
+    attachment. Reply with an edited config attachment using the same subject to
+    replace the config; a timestamped backup is kept. Plaintext IMAP_PASSWORD and
+    SMTP_PASSWORD values are redacted on export.
     .SH CONFIGURATION KEYS
     Core keys include IMAP_HOST, IMAP_PORT, IMAP_SSL, IMAP_USER, IMAP_PASSWORD,
     IMAP_PASSWORD_GPG_FILE, SEND_METHOD, SENDMAIL_PATH, SMTP_HOST, SMTP_PORT,
@@ -1644,50 +1831,26 @@ def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
     TTYCHATTER_CONTROL_TIMEOUT, MAILBOT_MANPAGE_FILE, SESSION_DIR, ATTACHMENT_DIR,
     MODEL_CACHE_FILE, WORK_DIR, PROCESSED_DB, SESSION_LIST_HEAD_LINES,
     SESSION_LIST_TAIL_LINES, SESSION_LIST_MAX_SESSIONS, SESSION_PREVIEW_LINE_CHARS,
-    SESSION_SEARCH_MAX_MATCHES, MAX_COMMAND_OUTPUT_BYTES, MAX_OUTGOING_ATTACHMENT_BYTES,
-    REPLY_SUBJECT_PREFIX, and INCLUDE_TTYCHATTER_STDERR.
+    SESSION_SEARCH_MAX_MATCHES, MODEL_SEARCH_MAX_MATCHES, MAX_COMMAND_OUTPUT_BYTES,
+    MAX_OUTGOING_ATTACHMENT_BYTES, REPLY_SUBJECT_PREFIX, and INCLUDE_TTYCHATTER_STDERR.
     .SH SECURITY
-    ALLOWED_FROM is required. The mailbot should use a private mailbox and a distinct
-    MAIL_FROM address where practical. Commands are not shell-expanded, but email is
-    not a good channel for secrets; use the local --set-imap-password and
+    ALLOWED_FROM is required. Commands are allowlisted and are not shell-expanded.
+    Email is not a good channel for secrets; use the local --set-imap-password and
     --set-smtp-password commands for passwords.
     .SH GPG PASSWORD FILES
     With --gpg, the mailbot stores IMAP and SMTP passwords in external gpg files and
-    decrypts them with gpg --quiet --decrypt at runtime. Version 0.3.1 passes GPG_TTY
-    automatically to gpg when the mailbot has a controlling terminal, trims trailing
-    CR/LF from decrypted password files, and prints process user, HOME, and GPG_TTY
-    in gpg-agent diagnostics. For interactive tests, also set export GPG_TTY=$(tty)
-    and test the password file directly with gpg --decrypt as the mailbot user.
-    Do not diagnose this by switching to root unless the service is actually
-    configured to run as root; root changes HOME, GNUPGHOME, and the gpg-agent socket
-    and may load a different config. Unattended daemon, cron, rc, or systemd launches
-    need gpg-agent to have the passphrase already cached, or should use a mode-0600
-    plaintext password line or SEND_METHOD=sendmail where appropriate.
-    .SH IMAP LOGIN DIAGNOSTICS
-    Version 0.3.1 rejects empty IMAP_USER, empty IMAP password, and CR/LF in IMAP
-    login values before sending LOGIN. A server reply such as LOGIN command error:
-    BAD usually means the command syntax was invalid, commonly due to an empty user,
-    a password with carriage return/newline, or running with a different user/HOME
-    than the configured mailbot account. Use --config and --doctor to confirm the
-    loaded config and process user.
+    decrypts them with gpg --quiet --decrypt at runtime. For interactive tests, set
+    export GPG_TTY=$(tty) and test the password file directly with gpg --decrypt as
+    the mailbot user. Do not diagnose this by switching to root unless the service
+    is actually configured to run as root.
     .SH MANPAGE LOOKUP
     The email manpage command and the local --manpage command use the first readable
-    manpage found.  The lookup order is TTYCHATTER_MAILBOT_MANPAGE_FILE when
-    set, otherwise MAILBOT_MANPAGE_FILE, then ~/.config/ttychatter/mailbot/ttychatter.mailbot.1,
-    the directory beside the script, the directory beside argv[0], XDG/user man1
-    directories, system man1 directories, then the current working directory.
-    Matching .1.gz files are accepted. If no external file is found, the embedded
-    fallback is used.
+    manpage found. The lookup order is TTYCHATTER_MAILBOT_MANPAGE_FILE, then
+    MAILBOT_MANPAGE_FILE, then config, executable, XDG/user man1, system man1, and
+    current working directory candidates. Matching .1.gz files are accepted. If no
+    external file is found, the embedded fallback is used.
     .SH FILES
     Default config: ~/.config/ttychatter/mailbot/config
-    .PP
-    Config path environment override: TTYCHATTER_MAILBOT_CONFIG
-    .PP
-    Preferred local manpage: ~/.config/ttychatter/mailbot/ttychatter.mailbot.1
-    .PP
-    Alternate user manpage: ~/.local/share/man/man1/ttychatter.mailbot.1
-    .PP
-    System manpage: /usr/local/share/man/man1/ttychatter.mailbot.1
     .PP
     Default processed-message database: ~/.local/state/ttychatter/mailbot/processed-ids.txt
     .PP
@@ -1697,8 +1860,7 @@ def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
     .SH EXIT STATUS
     0 indicates success. Nonzero status indicates configuration, IMAP, SMTP,
     sendmail, or ttychatter subprocess failure.
-    ''').strip() + "\n"
-
+    """).strip() + "\n"
 
 def mailbot_manpage_candidates(cfg: Optional[Config] = None) -> List[Path]:
     """Return external manpage candidates, most specific first.
@@ -1805,10 +1967,14 @@ def validate_model_list_args(args: List[str]) -> Tuple[bool, List[str], str]:
 
 
 def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = False) -> Tuple[bool, str, List[ReplyAttachment]]:
-    try:
-        tokens = shlex.split(command_line or "help")
-    except ValueError as exc:
-        return False, f"could not parse command: {exc}\n", []
+    braced_delete = parse_braced_delete_command(command_line or "")
+    if braced_delete is not None:
+        tokens = braced_delete
+    else:
+        try:
+            tokens = shlex.split(command_line or "help")
+        except ValueError as exc:
+            return False, f"could not parse command: {exc}\n", []
     if not tokens:
         tokens = ["help"]
     command = tokens[0].strip().lower().replace("_", "-")
@@ -1827,8 +1993,22 @@ def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = Fal
         "show-models": "models",
         "update-model-list": "update-models",
         "update-model-cache": "update-models",
-        "model-cache": "update-models",
-        "models-cache": "update-models",
+        "refresh-models": "update-models",
+        "refresh-model-cache": "update-models",
+        "cache-models": "model-cache",
+        "cached-models": "model-cache",
+        "models-cache": "model-cache",
+        "model-json": "model-cache",
+        "search-models": "model-search",
+        "models-search": "model-search",
+        "model-list-search": "model-search",
+        "find-model": "model-search",
+        "find-models": "model-search",
+        "grep-models": "model-search",
+        "delete": "delete-session",
+        "rm": "delete-session",
+        "remove-session": "delete-session",
+        "rm-session": "delete-session",
         "router-list": "routers",
         "faves": "favorites",
         "unbookmark-model": "unfavorite-model",
@@ -1873,6 +2053,34 @@ def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = Fal
             return True, rename_session_file(cfg, args[0], args[1]), []
         except Exception as exc:
             return False, f"rename-session failed: {exc}\n", []
+
+    if command == "delete-session":
+        if len(args) != 1:
+            return False, "usage: delete-session SESSION or delete{SESSION}\n", []
+        try:
+            name, target = validated_session_log_target(cfg, args[0])
+        except Exception as exc:
+            return False, f"delete-session failed: {exc}\n", []
+        if dry_run:
+            return True, f"[dry-run] would delete session: {name}\npath: {target}\n", []
+        try:
+            return True, delete_session_file(cfg, args[0]), []
+        except Exception as exc:
+            return False, f"delete-session failed: {exc}\n", []
+
+    if command == "model-cache":
+        if args:
+            return False, "usage: model-cache\n", []
+        if dry_run:
+            return True, f"[dry-run] would attach existing cache only: {cfg.model_cache_file}\n", []
+        return model_cache_reply(cfg)
+
+    if command == "model-search":
+        query = " ".join(args).strip()
+        if not query:
+            return False, "usage: model-search TEXT\n", []
+        ok, body = search_model_cache(cfg, query)
+        return ok, body, []
 
     if command == "update-models":
         if args:
@@ -2291,6 +2499,7 @@ def print_config(cfg: Config) -> None:
     print(f"SESSION_LIST_MAX_SESSIONS={cfg.session_list_max_sessions}")
     print(f"SESSION_PREVIEW_LINE_CHARS={cfg.session_preview_line_chars}")
     print(f"SESSION_SEARCH_MAX_MATCHES={cfg.session_search_max_matches}")
+    print(f"MODEL_SEARCH_MAX_MATCHES={cfg.model_search_max_matches}")
     print(f"MAX_COMMAND_OUTPUT_BYTES={cfg.max_command_output_bytes}")
     print(f"MAX_OUTGOING_ATTACHMENT_BYTES={cfg.max_outgoing_attachment_bytes}")
     print(f"REPLY_SUBJECT_PREFIX={cfg.reply_subject_prefix}")
@@ -2335,7 +2544,10 @@ USAGE
     {PROGRAM} --list-candidates
     {PROGRAM} --sessions
     {PROGRAM} --manpage
+    {PROGRAM} --model-cache
+    {PROGRAM} --model-search TEXT
     {PROGRAM} --update-models
+    {PROGRAM} --delete-session SESSION [--dry-run]
     {PROGRAM} --config
     {PROGRAM} --raw-config
     {PROGRAM} --set KEY VALUE
@@ -2347,16 +2559,20 @@ USAGE
 
 MAIL SUBJECTS
     tc:CONFIG                    Export/apply mailbot config attachment
-    tc:MODELS                    Refresh ttychatter model cache and attach JSON
+    tc:MODELS                    Attach existing models-cache.json; no refresh
+    tc:MODELS TEXT               Search existing model cache for TEXT
     tc:CMD                       Run first nonempty body line as a command
     tc:command args              Run a mailbot command directly
+    tc:delete{{session-name}}      Delete a ttychatter session log
+    tc:rm{{session-name}}          Alias for delete{{session-name}}
     tc:{{session-name}}          Send body to ttychatter session
     tc:{{new}}                   Let ttychatter create its default timestamped session
 
 DESCRIPTION
     Reads unread mail from IMAP. Braced subjects tc:{{session}} are ordinary
-    ttychatter chats. Bare subjects tc:CONFIG, tc:MODELS, and tc:command args
-    are mailbot control commands.
+    ttychatter chats. Bare subjects tc:CONFIG, tc:MODELS, tc:CMD,
+    tc:delete{{session}}, tc:rm{{session}}, and tc:command args are mailbot
+    control commands. tc:update-models is the explicit model-cache refresh path.
 
 CONFIG PATH
     If --config-file is omitted, the path is resolved as:
@@ -2380,7 +2596,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sessions", action="store_true")
     parser.add_argument("--list-sessions", action="store_true")
     parser.add_argument("--manpage", action="store_true")
+    parser.add_argument("--model-cache", action="store_true")
+    parser.add_argument("--model-search", metavar="TEXT")
     parser.add_argument("--update-models", action="store_true")
+    parser.add_argument("--delete-session", metavar="SESSION")
     parser.add_argument("--config", action="store_true")
     parser.add_argument("--raw-config", action="store_true")
     parser.add_argument("--set", nargs=2, metavar=("KEY", "VALUE"))
@@ -2410,8 +2629,20 @@ def main() -> int:
     if args.sessions or args.list_sessions:
         print(format_session_list_with_previews(cfg), end="")
         return 0
+    if args.model_cache:
+        ok, body, _attachments = dispatch_mailbot_command(cfg, "model-cache", dry_run=args.dry_run)
+        print(body, end="")
+        return 0 if ok else 1
+    if args.model_search:
+        ok, body, _attachments = dispatch_mailbot_command(cfg, "model-search " + shlex.quote(args.model_search), dry_run=args.dry_run)
+        print(body, end="")
+        return 0 if ok else 1
     if args.update_models:
         ok, body, _attachments = dispatch_mailbot_command(cfg, "update-models", dry_run=args.dry_run)
+        print(body, end="")
+        return 0 if ok else 1
+    if args.delete_session:
+        ok, body, _attachments = dispatch_mailbot_command(cfg, "delete-session " + shlex.quote(args.delete_session), dry_run=args.dry_run)
         print(body, end="")
         return 0 if ok else 1
 

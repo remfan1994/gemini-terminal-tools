@@ -1,4 +1,4 @@
-ttychatter.mailbot 0.4.0
+ttychatter.mailbot 0.4.1
 =========================
 
 ttychatter.mailbot is a conservative IMAP/sendmail or IMAP/SMTP transport
@@ -6,9 +6,10 @@ adapter for ttychatter. It watches unread mail, accepts only ALLOWED_FROM
 senders, passes ordinary chat messages to ttychatter.python, and replies by
 email.
 
-The mailbot is deliberately not an OpenRouter client. It delegates model cache
-updates, model lists, session context, memory, favorites, attachments, and chat
-behavior to ttychatter.python.
+The mailbot is deliberately not an OpenRouter client. It delegates explicit
+model-cache updates, formatted model-list commands, session context, memory,
+favorites, attachments, and chat behavior to ttychatter.python. Read-only cache
+retrieval and cache search are handled locally from MODEL_CACHE_FILE.
 
 Main features
 -------------
@@ -27,12 +28,14 @@ Main features
           tc:{new}
 
     - Config export/update by email through tc:CONFIG.
-    - Remote model-cache refresh through tc:MODELS, with models-cache.json
-      returned by email when the cache can be attached.
+    - Read-only model-cache retrieval through tc:MODELS, with the existing
+      models-cache.json returned by email when the cache can be attached.
+    - Explicit model-cache refresh through tc:update-models.
+    - Cached model-list search through tc:model-search TEXT.
     - Mailbot control commands through bare tc:command subjects or through
       tc:CMD with the command on the first nonempty body line.
     - Session listing with head/tail previews from each .log file.
-    - Session search and rename commands.
+    - Session search, rename, and delete commands.
     - Remote retrieval of the mailbot manpage.
     - Safe allowlisted ttychatter utility commands over email.
 
@@ -54,6 +57,8 @@ Typical local commands
     ttychatter.mailbot --list-candidates
     ttychatter.mailbot --sessions
     ttychatter.mailbot --manpage
+    ttychatter.mailbot --model-cache >/tmp/models-cache.json
+    ttychatter.mailbot --model-search claude
     ttychatter.mailbot --update-models --dry-run
     ttychatter.mailbot --config
     ttychatter.mailbot --raw-config
@@ -66,7 +71,8 @@ Mail subject grammar
 Control subjects are bare. Chat-session subjects are braced.
 
     tc:CONFIG                    Export or apply mailbot config
-    tc:MODELS                    Refresh model cache and attach models-cache.json
+    tc:MODELS                    Attach existing cached models-cache.json; no refresh
+    tc:MODELS TEXT               Search existing cached model list; no refresh
     tc:CMD                       Run first nonempty body line as a command
     tc:command args              Run a mailbot command directly
     tc:{session-name}            Send body to a ttychatter session
@@ -77,9 +83,12 @@ Examples:
 
     Subject: tc:CONFIG
     Subject: tc:MODELS
+    Subject: tc:MODELS claude
     Subject: tc:sessions
     Subject: tc:manpage
     Subject: tc:search gpg-agent
+    Subject: tc:delete{old-session}
+    Subject: tc:model-search claude
     Subject: tc:model-list --all --sort context
     Subject: tc:routers --model-type chat --require-tokens
     Subject: tc:{mailbot-test}
@@ -135,10 +144,26 @@ not shell-expanded.
     rename-session OLD NEW
         Rename a session log after sanitizing names. Dry-run does not rename.
 
-    update-models | update-model-list | update-model-cache | model-cache | models-cache
+    delete-session SESSION
+    delete{SESSION}
+    rm{SESSION}
+        Delete one session log from SESSION_DIR after resolving it as a
+        sanitized .log name. Dry-run does not delete.
+
+    model-cache | cache-models | cached-models | models-cache | model-json
+        Attach the existing MODEL_CACHE_FILE as models-cache.json. This command
+        is read-only and never contacts OpenRouter. tc:MODELS is the preferred
+        subject shorthand.
+
+    tc:MODELS TEXT
+    model-search TEXT | search-models TEXT | models-search TEXT | model-list-search TEXT | find-model TEXT | find-models TEXT | grep-models TEXT
+        Search the existing cached model list for TEXT. This command is
+        read-only and never contacts OpenRouter.
+
+    update-models | update-model-list | update-model-cache | refresh-models
         Run ttychatter.python --update-models and attach models-cache.json when
-        the resulting cache is present and small enough to send. tc:MODELS is
-        the preferred subject shorthand.
+        the resulting cache is present and small enough to send. This is the
+        explicit network refresh command.
 
     model-list [FLAGS]
     list-models [FLAGS]
@@ -146,8 +171,8 @@ not shell-expanded.
     show-models [FLAGS]
     models [FLAGS]
         Run ttychatter.python --models with only safe model-list flags. The
-        subject tc:MODELS with no flags is reserved for the cache refresh
-        command; use tc:model-list for a plain model-list command.
+        subject tc:MODELS with no flags is reserved for read-only cache
+        retrieval; use tc:model-list for a formatted model-list command.
 
     routers [FLAGS]
         Run ttychatter.python --routers with the same safe model-list flags.
@@ -253,6 +278,7 @@ Important config keys
     SESSION_LIST_MAX_SESSIONS=50
     SESSION_PREVIEW_LINE_CHARS=220
     SESSION_SEARCH_MAX_MATCHES=100
+    MODEL_SEARCH_MAX_MATCHES=100
     MAX_COMMAND_OUTPUT_BYTES=200000
     MAX_OUTGOING_ATTACHMENT_BYTES=8388608
 
@@ -395,6 +421,13 @@ or set the environment override:
 
 Version notes
 -------------
+
+0.4.1
+    Corrects tc:MODELS and model-cache semantics. tc:MODELS/model-cache now
+    attach the already-downloaded MODEL_CACHE_FILE without refreshing it or
+    contacting OpenRouter. The explicit refresh command remains update-models.
+    Adds cached model-list search through model-search/search-models. Adds
+    delete-session plus compact tc:delete{SESSION} and tc:rm{SESSION}.
 
 0.4.0
     Replaces the mixed tc:{CONFIG} and tc:{MAILBOT:...} public syntax with bare

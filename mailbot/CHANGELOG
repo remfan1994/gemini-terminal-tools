@@ -1,3 +1,33 @@
+ttychatter.mailbot 0.4.1
+=========================
+
+Bug fixes
+---------
+- Corrected the model-cache command family. tc:MODELS, model-cache,
+  models-cache, and cached-models now attach the existing MODEL_CACHE_FILE only;
+  they do not run ttychatter.python --update-models and do not contact
+  OpenRouter.
+- Kept update-models, update-model-list, update-model-cache, refresh-models,
+  and refresh-model-cache as the explicit model-cache refresh commands.
+
+New features
+------------
+- Added model-search TEXT, with aliases search-models, models-search,
+  find-model, find-models, and grep-models. It searches the already-downloaded
+  model cache and never refreshes it.
+- Added tc:MODELS TEXT as a shorthand for cached model-list search.
+- Added delete-session SESSION for deleting a session log under SESSION_DIR.
+- Added compact delete subjects tc:delete{SESSION} and tc:rm{SESSION}.
+- Added MODEL_SEARCH_MAX_MATCHES, default 100.
+
+Notes
+-----
+- tc:MODELS now means read-only cache retrieval. Use tc:update-models when a
+  network refresh is wanted.
+- delete-session is deliberately conservative: it resolves the target as a
+  sanitized .log file under SESSION_DIR, supports dry-run, and refuses paths
+  outside SESSION_DIR.
+
 ttychatter.mailbot 0.4.0
 =========================
 

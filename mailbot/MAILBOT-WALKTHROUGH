@@ -174,12 +174,45 @@ subject:
 The mailbot writes a timestamped backup before replacing the config. Dry-run
 never writes the config.
 
+Retrieve cached model list by email
+-----------------------------------
+
+Send:
+
+    Subject: tc:MODELS
+
+The mailbot attaches the existing MODEL_CACHE_FILE as:
+
+    models-cache.json
+
+This is read-only. It does not run ttychatter.python --update-models and does
+not contact OpenRouter. If the cache is missing or stale, refresh it explicitly:
+
+    Subject: tc:update-models
+
+Search cached models by email
+-----------------------------
+
+Search the already-downloaded model cache without contacting OpenRouter:
+
+    Subject: tc:MODELS claude
+
+or:
+
+    Subject: tc:model-search claude
+
+or:
+
+    Subject: tc:search-models
+
+    claude
+
 Refresh model cache by email
 ----------------------------
 
 Send:
 
-    Subject: tc:MODELS
+    Subject: tc:update-models
 
 The mailbot runs:
 
@@ -195,10 +228,29 @@ If ttychatter output reports:
 
 the mailbot uses that path. Otherwise it falls back to MODEL_CACHE_FILE.
 
-List models without refreshing cache
-------------------------------------
+Delete a session by email
+-------------------------
 
-Use model-list, list-models, models-list, show-models, or models with flags for a ttychatter --models query:
+Delete one session log from SESSION_DIR:
+
+    Subject: tc:delete{old-session}
+
+or:
+
+    Subject: tc:rm{old-session}
+
+The long command form is also accepted:
+
+    Subject: tc:delete-session old-session
+
+Dry-run reports what would be deleted without removing the file. The mailbot
+resolves the name as a sanitized .log file under SESSION_DIR and refuses paths
+outside that directory.
+
+List models with ttychatter formatting
+--------------------------------------
+
+Use model-list, list-models, models-list, show-models, or models with flags for a ttychatter --models query. This is separate from tc:MODELS; ttychatter.python --models may use the cache or may refresh it if ttychatter's own cache-display path decides the cache is missing.
 
     Subject: tc:model-list --all --sort context
 
@@ -345,6 +397,7 @@ Troubleshooting checklist
 3. Subject syntax failures:
 
        control: tc:CONFIG, tc:MODELS, tc:CMD, tc:command args
+                tc:MODELS is read-only cache retrieval; tc:update-models refreshes
        chat:    tc:{session-name}, tc:{new}
 
 4. GPG failure:
