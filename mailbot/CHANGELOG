@@ -1,0 +1,121 @@
+ttychatter.mailbot 0.3.0
+=========================
+
+New features
+------------
+- Added tc:{MAILBOT:...} email control commands, separate from ordinary
+  tc:{session} chat messages and tc:{CONFIG} config messages.
+- Added tc:{MAILBOT:update-models}, update-model-list, update-model-cache, and
+  model-cache aliases. The command runs ttychatter.python --update-models and
+  returns models-cache.json by email when the resulting cache exists and is not
+  larger than MAX_OUTGOING_ATTACHMENT_BYTES.
+- Added tc:{MAILBOT:sessions}, list, list-sessions, and session-list aliases.
+  Session listing now includes newest-first session names plus modified time,
+  byte count, line count, and short head/tail previews from each session log.
+- Added tc:{MAILBOT:manpage}, manual, get-manpage, and fetch-manpage aliases.
+  The reply attaches ttychatter.mailbot.1 so the operator can retrieve the
+  mailbot manpage by email.
+- Added external manpage lookup for the manpage command and --manpage. Lookup
+  supports TTYCHATTER_MAILBOT_MANPAGE_FILE, MAILBOT_MANPAGE_FILE, the mailbot
+  config directory, the executable directory, XDG/user man1 directories, system
+  man1 directories, the current working directory, and matching .1.gz files.
+  If no external manpage is found, the embedded fallback is used.
+- Added session search and rename commands: search, search-session, and
+  rename-session.
+- Added allowlisted ttychatter utility commands over email: models, routers,
+  favorites, favorite-model, unfavorite-model, test-model, ttyconfig,
+  ttydoctor, credits, show-memory, clear-memory, tty-set, and tty-unset.
+- Added safe body-line argument completion for commands that commonly need
+  arguments, so tc:{MAILBOT:search} can take its search text from the first
+  nonempty body line.
+- Added local CLI helpers --sessions, --list-sessions, --manpage, and
+  --update-models.
+
+Configuration
+-------------
+- Added MAILBOT_SUBJECT_TOKEN, default MAILBOT.
+- Added MAILBOT_MANPAGE_FILE for an explicit external manpage path.
+- Added MODEL_CACHE_FILE for the expected ttychatter model cache path when
+  ttychatter output does not report one.
+- Added TTYCHATTER_CONTROL_TIMEOUT for noninteractive ttychatter utility
+  commands.
+- Added SESSION_LIST_HEAD_LINES, SESSION_LIST_TAIL_LINES,
+  SESSION_LIST_MAX_SESSIONS, and SESSION_PREVIEW_LINE_CHARS for session list
+  previews.
+- Added SESSION_SEARCH_MAX_MATCHES for bounded session searches.
+- Added MAX_COMMAND_OUTPUT_BYTES and MAX_OUTGOING_ATTACHMENT_BYTES for email
+  reply and attachment limits.
+
+Compatibility
+-------------
+- The install name remains ttychatter.mailbot. The temporary
+  ttychatter.mailbot.enhanced.py filename was only a staging artifact and is
+  not required.
+- Existing 0.2.x command-line options remain accepted.
+- Existing 0.2.x config keys remain accepted.
+- REPLY_METHOD remains accepted as an alias for SEND_METHOD.
+- SENDMAIL_PATH remains accepted as an alias for SENDMAIL.
+- Ordinary tc:{session} mail continues to delegate chat behavior to
+  ttychatter.python --loopback.
+
+Safety notes
+------------
+- tc:{MAILBOT:...} commands are honored only after the normal ALLOWED_FROM
+  sender check passes.
+- Control commands are allowlisted and are not shell-expanded.
+- TTYCHATTER_EXTRA_ARGS is used only for ordinary loopback chat calls, not for
+  mailbot utility/control calls.
+- tty-set refuses OPENROUTER_API_KEY and API_KEY by email; set secrets locally.
+- --dry-run does not send replies, mark messages seen, record processed
+  Message-IDs, replace config, rename sessions, or refresh model caches.
+- update-models returns command output even when the cache cannot be attached,
+  and reports the cache path or attachment error in the reply body.
+
+Notes
+-----
+- Install the manpage as ttychatter.mailbot.1. If a generated artifact is named
+  ttychatter.mailbot.1.updated, copy or install it under the canonical name, or
+  point MAILBOT_MANPAGE_FILE directly at that file.
+- The mailbot remains an IMAP poller and ttychatter transport adapter. It still
+  does not implement OpenRouter request logic directly.
+
+ttychatter.mailbot 0.2.1
+=========================
+
+Bug fixes
+---------
+- Rewrote sender allowlist handling so an exact ALLOWED_FROM address is honored.
+- Removed the overbroad self-sender rejection that blocked setups using the same local mailbox for MAIL_FROM and ALLOWED_FROM.
+- ALLOWED_FROM now accepts comma, semicolon, or whitespace separated addresses, plus the wildcard * for temporary testing.
+- --list-candidates now prints the configured allowlist in sender skip reasons, making allowlist bugs visible without marking messages read.
+
+Notes
+-----
+- For production, a distinct MAIL_FROM such as ttychatter@example.org is still cleaner. The allowlist, processed Message-ID database, and strict tc:{...} subject parser remain the real mailbot safety controls.
+
+ttychatter.mailbot 0.2.0
+=========================
+
+Bug fixes
+---------
+- Rewrote IMAP candidate inspection to use BODY.PEEK[] instead of RFC822/BODY[] fetches.
+- Dry-run no longer marks unread messages as read merely by inspecting them.
+- Skipped messages are left unread so the operator can see and correct sender/subject/config problems.
+- IMAP and GPG runtime errors are caught and printed as clear command-line errors instead of Python tracebacks.
+
+New features
+------------
+- Added --list-candidates to show unread candidate messages, From, Subject, Message-ID, and skip/match reason without modifying mailbox state.
+- Added tc:{CONFIG} mail workflow.
+- tc:{CONFIG} with no config attachment replies with the current mailbot config as a text attachment.
+- tc:{CONFIG} with an edited config attachment applies the new config, after creating a timestamped backup.
+- Dry-run for tc:{CONFIG} never writes config or marks the message read.
+- Plaintext IMAP_PASSWORD and SMTP_PASSWORD lines are redacted from config exports.
+- Added CONFIG_SUBJECT_TOKEN config key, default CONFIG.
+- Added CONFIG_UPDATE_REQUIRES_ATTACHMENT config key for documentation and future policy tightening.
+
+Notes
+-----
+- tc:{CONFIG} is only honored after the normal ALLOWED_FROM check passes.
+- Config editing by email is intentionally attachment-based so a normal message body cannot accidentally replace the config.
+- The mailbot remains an IMAP poller and ttychatter transport adapter. It still does not implement OpenRouter logic directly.

@@ -1,0 +1,245 @@
+ttychatter.mailbot 0.3.0
+=========================
+
+ttychatter.mailbot is a conservative IMAP/sendmail or IMAP/SMTP transport
+adapter for ttychatter. It watches unread mail for subjects like tc:{session},
+passes ordinary messages to ttychatter.python, and replies by email.
+
+The mailbot is deliberately not an OpenRouter client. It delegates model lists,
+session context, memory, favorites, attachments, and chat behavior to
+ttychatter.python. Version 0.3.0 adds an email remote-control surface for safe
+ttychatter utility commands.
+
+Main features
+-------------
+
+    - IMAP BODY.PEEK[] inspection, so dry-run and skipped messages do not become
+      read merely because the bot inspected them.
+    - ALLOWED_FROM sender gate with exact case-insensitive address matching.
+    - Ordinary email-to-ttychatter chat sessions with attachment pass-through.
+    - Config export/update by email through tc:{CONFIG}.
+    - Mailbot control commands through tc:{MAILBOT:command args}.
+    - Remote model-cache refresh with models-cache.json returned by email.
+    - Session listing with head/tail previews from each .log file.
+    - Session search and rename commands.
+    - Remote retrieval of the mailbot manpage.
+    - Safe allowlisted ttychatter utility commands over email.
+
+Files
+-----
+
+Install or ship these files together:
+
+    ttychatter.mailbot
+    ttychatter.mailbot.1
+    README
+    MAILBOT-WALKTHROUGH
+
+Typical local commands
+----------------------
+
+    ttychatter.mailbot --doctor
+    ttychatter.mailbot --list-candidates
+    ttychatter.mailbot --sessions
+    ttychatter.mailbot --manpage
+    ttychatter.mailbot --update-models --dry-run
+    ttychatter.mailbot --once --dry-run
+    ttychatter.mailbot --once
+
+Mail subjects
+-------------
+
+    tc:{session-name}              Send body to a ttychatter session
+    tc:{new}                       Start a timestamped ttychatter session
+    tc:{CONFIG}                    Export or apply mailbot config
+    tc:{MAILBOT:help}              Return mailbot command help
+    tc:{MAILBOT:sessions}          List sessions with head/tail previews
+    tc:{MAILBOT:update-models}     Refresh model cache and attach JSON
+    tc:{MAILBOT:manpage}           Return ttychatter.mailbot.1 by email
+
+Control commands may also be sent as:
+
+    Subject: tc:{MAILBOT}
+
+    command args
+
+Email control commands
+----------------------
+
+All commands require an ALLOWED_FROM sender.
+
+    help
+        Return the command summary.
+
+    manpage | manual | get-manpage | fetch-manpage
+        Attach ttychatter.mailbot.1 to the reply. The bot uses
+        MAILBOT_MANPAGE_FILE or another installed external manpage when present,
+        and falls back to the embedded manpage otherwise.
+
+    config
+        Attach the public/redacted mailbot config. Equivalent to tc:{CONFIG}
+        without a config attachment.
+
+    sessions | list | list-sessions | session-list
+        List session logs newest first, with modified time, size, line count,
+        and short previews from the head and tail of each log.
+
+    search TEXT
+        Search all session logs.
+
+    search-session SESSION TEXT
+        Search one session log.
+
+    rename-session OLD NEW
+        Rename a session log after sanitizing names. Dry-run does not rename.
+
+    update-models | update-model-list | update-model-cache | model-cache
+        Run ttychatter.python --update-models and attach models-cache.json when
+        the resulting cache is present and small enough to send.
+
+    models [FLAGS]
+    routers [FLAGS]
+        Run ttychatter.python --models or --routers with only these safe flags:
+
+            --all
+            --sort VALUE
+            --modellist-sort-tokens
+            --min-input-tokens N
+            --min-output-tokens N
+            --hide-preview
+            --show-preview
+            --require-tokens
+            --allow-missing-tokens
+            --model-type VALUE
+
+    favorites | faves
+    favorite-model MODEL
+    unfavorite-model MODEL | unbookmark-model MODEL
+    test-model MODEL
+        Manage/list/test ttychatter model favorites and model availability.
+
+    ttyconfig | ttyconfig-summary
+    ttydoctor | doctor
+    credits
+    show-memory SESSION
+    clear-memory SESSION
+    tty-set KEY VALUE
+    tty-unset KEY
+        Run selected ttychatter.python utility commands. tty-set refuses
+        OPENROUTER_API_KEY and API_KEY by email; set secrets locally.
+
+Config-over-email
+-----------------
+
+Send an allowed message with:
+
+    tc:{CONFIG}
+
+No attachment means: send me the current public config as an attachment named
+ttychatter-mailbot-config.txt. Plaintext password values are redacted.
+
+An edited text config attachment means: replace the current config after making
+a timestamped backup. Dry-run never writes config.
+
+Important config keys
+---------------------
+
+    IMAP_HOST=localhost
+    IMAP_PORT=993
+    IMAP_SSL=1
+    IMAP_USER=user@example.net
+    IMAP_PASSWORD_GPG_FILE=~/.config/ttychatter/mailbot/imap-password.gpg
+    IMAP_MAILBOX=INBOX
+
+    MAIL_FROM=ttychatter@example.net
+    ALLOWED_FROM=you@example.net
+
+    SEND_METHOD=sendmail
+    SENDMAIL=/usr/sbin/sendmail
+
+    TTYCHATTER_COMMAND=/home/user/bin/ttychatter.python
+    SESSION_DIR=~/.local/share/ttychatter/openrouter/sessions
+    ATTACHMENT_DIR=~/.local/share/ttychatter/openrouter/attachments
+    MODEL_CACHE_FILE=~/.config/ttychatter/openrouter/models-cache.json
+
+    SUBJECT_PREFIX=tc
+    CONFIG_SUBJECT_TOKEN=CONFIG
+    MAILBOT_SUBJECT_TOKEN=MAILBOT
+    MAILBOT_MANPAGE_FILE=
+
+    TTYCHATTER_CONTROL_TIMEOUT=180
+    SESSION_LIST_HEAD_LINES=3
+    SESSION_LIST_TAIL_LINES=3
+    SESSION_LIST_MAX_SESSIONS=50
+    SESSION_PREVIEW_LINE_CHARS=220
+    SESSION_SEARCH_MAX_MATCHES=100
+    MAX_COMMAND_OUTPUT_BYTES=200000
+    MAX_OUTGOING_ATTACHMENT_BYTES=8388608
+
+Security
+--------
+
+Set ALLOWED_FROM and keep it narrow. The wildcard * exists for temporary local
+testing only. Do not run a production mailbot that accepts arbitrary senders.
+
+Email is not a secret channel. Do not use tty-set for API keys or passwords.
+Use ttychatter.python --set-api-key locally, and use ttychatter.mailbot
+--set-imap-password --gpg or --set-smtp-password --gpg for mail passwords.
+
+The mailbot does not shell-expand email commands. Control commands are
+allowlisted. TTYCHATTER_EXTRA_ARGS is appended only to ordinary loopback chat
+calls, not to utility/control calls.
+
+Manpage lookup
+--------------
+
+The manpage command and --manpage use an external file first and an embedded
+fallback second. The lookup order is:
+
+    TTYCHATTER_MAILBOT_MANPAGE_FILE from environment, when set
+    MAILBOT_MANPAGE_FILE from config
+    ~/.config/ttychatter/mailbot/ttychatter.mailbot.1
+    ~/.config/ttychatter/mailbot/ttychatter.mailbot.1.gz
+    directory beside the script/ttychatter.mailbot.1
+    directory beside the script/ttychatter.mailbot.1.gz
+    directory beside argv[0]/ttychatter.mailbot.1
+    directory beside argv[0]/ttychatter.mailbot.1.gz
+    $XDG_DATA_HOME/man/man1/ttychatter.mailbot.1
+    $XDG_DATA_HOME/man/man1/ttychatter.mailbot.1.gz
+    ~/.local/share/man/man1/ttychatter.mailbot.1
+    ~/.local/share/man/man1/ttychatter.mailbot.1.gz
+    /usr/local/share/man/man1/ttychatter.mailbot.1
+    /usr/local/share/man/man1/ttychatter.mailbot.1.gz
+    /usr/local/man/man1/ttychatter.mailbot.1
+    /usr/local/man/man1/ttychatter.mailbot.1.gz
+    /usr/share/man/man1/ttychatter.mailbot.1
+    /usr/share/man/man1/ttychatter.mailbot.1.gz
+    current working directory/ttychatter.mailbot.1
+    current working directory/ttychatter.mailbot.1.gz
+
+For a normal install, name the file ttychatter.mailbot.1. The artifact suffix
+.updated is only a staging name. For an arbitrary location or filename, set:
+
+    MAILBOT_MANPAGE_FILE=/path/to/ttychatter.mailbot.1
+
+or set the environment override:
+
+    TTYCHATTER_MAILBOT_MANPAGE_FILE=/path/to/ttychatter.mailbot.1
+
+Version notes
+-------------
+
+0.3.0
+    Adds tc:{MAILBOT:...} email commands, remote model-cache refresh with cache
+    attachment, session listings with head/tail previews, session search/rename,
+    mailbot manpage retrieval by email with external manpage lookup, local
+    --sessions, local --manpage, and local --update-models.
+
+0.2.1
+    ALLOWED_FROM matching is exact, case-insensitive, and may contain comma,
+    semicolon, or whitespace separated addresses. A configured sender is no
+    longer rejected merely because it is also MAIL_FROM.
+
+0.2.0
+    Uses IMAP BODY.PEEK[] for inspection so dry-run and skipped messages do not
+    become read merely because the bot looked at them.
