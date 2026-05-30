@@ -49,7 +49,7 @@ from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
 PROGRAM = "ttychatter.mailbot"
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 
 DEFAULT_CONFIG_DIR = Path.home() / ".config" / "ttychatter" / "mailbot"
 DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config"
@@ -58,6 +58,8 @@ DEFAULT_CACHE_DIR = Path.home() / ".cache" / "ttychatter" / "mailbot"
 DEFAULT_SESSION_DIR = Path.home() / ".local" / "share" / "ttychatter" / "openrouter" / "sessions"
 DEFAULT_ATTACHMENT_DIR = Path.home() / ".local" / "share" / "ttychatter" / "openrouter" / "attachments"
 DEFAULT_MODEL_CACHE_FILE = Path.home() / ".config" / "ttychatter" / "openrouter" / "models-cache.json"
+CONFIG_ENV_VAR = "TTYCHATTER_MAILBOT_CONFIG"
+
 
 
 # ---------------------------------------------------------------------------
@@ -74,6 +76,7 @@ DEFAULT_MODEL_CACHE_FILE = Path.home() / ".config" / "ttychatter" / "openrouter"
 @dataclass
 class Config:
     config_file: Path = DEFAULT_CONFIG_FILE
+    config_load_notes: List[str] = field(default_factory=list)
 
     imap_host: str = "localhost"
     imap_port: int = 993
@@ -85,6 +88,8 @@ class Config:
 
     send_method: str = "sendmail"  # sendmail or smtp
     config_subject_token: str = "CONFIG"
+    models_subject_token: str = "MODELS"
+    command_subject_token: str = "CMD"
     mailbot_subject_token: str = "MAILBOT"
     mailbot_manpage_file: Optional[Path] = None
     config_update_requires_attachment: bool = True
@@ -139,8 +144,121 @@ class ReplyAttachment:
     subtype: str = "plain"
 
 
+@dataclass
+class SubjectRequest:
+    kind: str  # session, config, or command
+    value: str
+    raw: str = ""
+    legacy: bool = False
+
+
 def expand_path(value: str) -> Path:
     return Path(os.path.expandvars(os.path.expanduser(value))).resolve()
+
+
+KNOWN_CONFIG_KEYS = {
+    "IMAP_HOST", "IMAP_PORT", "IMAP_SSL", "IMAP_USER", "IMAP_PASSWORD",
+    "IMAP_PASSWORD_GPG_FILE", "IMAP_MAILBOX", "SEND_METHOD", "REPLY_METHOD",
+    "SENDMAIL", "SENDMAIL_PATH", "SMTP_HOST", "SMTP_PORT", "SMTP_SSL",
+    "SMTP_STARTTLS", "SMTP_USER", "SMTP_PASSWORD", "SMTP_PASSWORD_GPG_FILE",
+    "MAIL_FROM", "MAIL_TO", "ALLOWED_FROM", "SUBJECT_PREFIX", "POLL_INTERVAL",
+    "MAX_MESSAGES_PER_RUN", "MAX_BODY_BYTES", "MAX_ATTACHMENT_BYTES",
+    "PROCESS_ATTACHMENTS", "MARK_SEEN", "TTYCHATTER_COMMAND",
+    "TTYCHATTER_EXTRA_ARGS", "SESSION_DIR", "ATTACHMENT_DIR", "WORK_DIR",
+    "PROCESSED_DB", "REPLY_SUBJECT_PREFIX", "INCLUDE_TTYCHATTER_STDERR",
+    "CONFIG_SUBJECT_TOKEN", "MODELS_SUBJECT_TOKEN", "COMMAND_SUBJECT_TOKEN",
+    "MAILBOT_SUBJECT_TOKEN", "MAILBOT_MANPAGE_FILE",
+    "CONFIG_UPDATE_REQUIRES_ATTACHMENT", "MODEL_CACHE_FILE",
+    "TTYCHATTER_CONTROL_TIMEOUT", "SESSION_LIST_HEAD_LINES",
+    "SESSION_LIST_TAIL_LINES", "SESSION_LIST_MAX_SESSIONS",
+    "SESSION_PREVIEW_LINE_CHARS", "SESSION_SEARCH_MAX_MATCHES",
+    "MAX_COMMAND_OUTPUT_BYTES", "MAX_OUTGOING_ATTACHMENT_BYTES",
+}
+
+SECRET_CONFIG_KEYS = {"IMAP_PASSWORD", "SMTP_PASSWORD"}
+
+
+def strip_config_quotes(value: str) -> str:
+    """Strip one simple matching quote pair from a config value.
+
+    Config files are KEY=VALUE, but operators often write shell-looking values
+    such as KEY="value".  This is intentionally not a full shell parser; it only
+    removes one outer matching single-quote or double-quote pair.
+    """
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+def parse_config_line(raw: str) -> Optional[Tuple[str, str]]:
+    """Parse one mailbot config line.
+
+    Accepted syntax is KEY=VALUE, with optional whitespace around KEY and VALUE.
+    For compatibility with shell-style files copied from rc examples, an
+    optional leading "export " is ignored.  Keys are normalized to uppercase.
+    Lines that are blank, comments, or lack '=' return None.
+    """
+    line = raw.strip().lstrip("\ufeff")
+    if not line or line.startswith("#") or "=" not in line:
+        return None
+    if line.lower().startswith("export "):
+        line = line[len("export "):].lstrip()
+    key, value = line.split("=", 1)
+    key = key.strip().upper()
+    if not key:
+        return None
+    return key, strip_config_quotes(value)
+
+
+def config_line_key(raw: str) -> str:
+    parsed = parse_config_line(raw)
+    return parsed[0] if parsed else ""
+
+
+def config_parse_summary(path: Path) -> Tuple[int, List[str]]:
+    recognized = 0
+    ignored: List[str] = []
+    if not path.exists():
+        return recognized, ignored
+    for lineno, raw in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parsed = parse_config_line(raw)
+        if parsed is None:
+            ignored.append(f"line {lineno}: not KEY=VALUE")
+            continue
+        key, _value = parsed
+        if key in KNOWN_CONFIG_KEYS:
+            recognized += 1
+        elif key != "CONFIG_FILE":
+            ignored.append(f"line {lineno}: unknown key {key}")
+    return recognized, ignored
+
+
+def default_config_dir() -> Path:
+    xdg_config_home = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    if xdg_config_home:
+        return expand_path(xdg_config_home) / "ttychatter" / "mailbot"
+    return Path.home() / ".config" / "ttychatter" / "mailbot"
+
+
+def default_config_file() -> Path:
+    env_path = os.environ.get(CONFIG_ENV_VAR, "").strip()
+    if env_path:
+        return expand_path(env_path)
+    return default_config_dir() / "config"
+
+
+def resolve_config_file(cli_value: Optional[str]) -> Path:
+    if cli_value:
+        return expand_path(cli_value)
+    return default_config_file()
+
+
+def default_config_file_string() -> str:
+    return str(default_config_file())
 
 
 def parse_bool(value: str, default: bool = False) -> bool:
@@ -187,14 +305,15 @@ def set_config_value(config_file: Path, key: str, value: str) -> None:
     if config_file.exists():
         lines = config_file.read_text(encoding="utf-8", errors="replace").splitlines()
     out: List[str] = []
+    wanted = key.upper()
     for line in lines:
-        if line.strip().startswith(f"{key}="):
-            out.append(f"{key}={value}")
+        if config_line_key(line) == wanted:
+            out.append(f"{wanted}={value}")
             replaced = True
         else:
             out.append(line)
     if not replaced:
-        out.append(f"{key}={value}")
+        out.append(f"{key.upper()}={value}")
     config_file.write_text("\n".join(out) + "\n", encoding="utf-8")
     try:
         os.chmod(config_file, 0o600)
@@ -205,23 +324,32 @@ def set_config_value(config_file: Path, key: str, value: str) -> None:
 def unset_config_value(config_file: Path, key: str) -> None:
     if not config_file.exists():
         return
+    wanted = key.upper()
     lines = config_file.read_text(encoding="utf-8", errors="replace").splitlines()
-    out = [line for line in lines if not line.strip().startswith(f"{key}=")]
+    out = [line for line in lines if config_line_key(line) != wanted]
     config_file.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
 
 
 def load_config(path: Path = DEFAULT_CONFIG_FILE) -> Config:
     cfg = Config(config_file=path)
+    # Password-file defaults follow the selected config file. This keeps
+    # --config-file and TTYCHATTER_MAILBOT_CONFIG coherent.
+    cfg.imap_password_gpg_file = path.parent / "imap-password.gpg"
+    cfg.smtp_password_gpg_file = path.parent / "smtp-password.gpg"
     if not path.exists():
+        cfg.config_load_notes.append(f"config file not found: {path}")
         return cfg
 
-    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
+    for lineno, raw in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
             continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip()
+        parsed = parse_config_line(raw)
+        if parsed is None:
+            cfg.config_load_notes.append(f"ignored line {lineno}: expected KEY=VALUE")
+            continue
+        key, value = parsed
+        known = True
 
         if key == "IMAP_HOST": cfg.imap_host = value
         elif key == "IMAP_PORT": cfg.imap_port = parse_int(value, cfg.imap_port)
@@ -266,6 +394,8 @@ def load_config(path: Path = DEFAULT_CONFIG_FILE) -> Config:
         elif key == "REPLY_SUBJECT_PREFIX": cfg.reply_subject_prefix = value
         elif key == "INCLUDE_TTYCHATTER_STDERR": cfg.include_ttychatter_stderr = parse_bool(value, cfg.include_ttychatter_stderr)
         elif key == "CONFIG_SUBJECT_TOKEN": cfg.config_subject_token = value
+        elif key == "MODELS_SUBJECT_TOKEN": cfg.models_subject_token = value
+        elif key == "COMMAND_SUBJECT_TOKEN": cfg.command_subject_token = value
         elif key == "MAILBOT_SUBJECT_TOKEN": cfg.mailbot_subject_token = value
         elif key == "MAILBOT_MANPAGE_FILE": cfg.mailbot_manpage_file = expand_path(value) if value else None
         elif key == "CONFIG_UPDATE_REQUIRES_ATTACHMENT": cfg.config_update_requires_attachment = parse_bool(value, cfg.config_update_requires_attachment)
@@ -278,6 +408,13 @@ def load_config(path: Path = DEFAULT_CONFIG_FILE) -> Config:
         elif key == "SESSION_SEARCH_MAX_MATCHES": cfg.session_search_max_matches = max(1, parse_int(value, cfg.session_search_max_matches))
         elif key == "MAX_COMMAND_OUTPUT_BYTES": cfg.max_command_output_bytes = max(1000, parse_int(value, cfg.max_command_output_bytes))
         elif key == "MAX_OUTGOING_ATTACHMENT_BYTES": cfg.max_outgoing_attachment_bytes = max(1, parse_int(value, cfg.max_outgoing_attachment_bytes))
+        elif key == "CONFIG_FILE":
+            pass
+        else:
+            known = False
+
+        if not known:
+            cfg.config_load_notes.append(f"ignored line {lineno}: unknown key {key}")
 
     # Environment overrides are useful on servers, cron jobs, and test runs.
     cfg.imap_password = os.environ.get("TTYCHATTER_IMAP_PASSWORD", cfg.imap_password)
@@ -447,31 +584,146 @@ def imap_login_failure(exc: Exception, cfg: Config) -> RuntimeError:
 # ---------------------------------------------------------------------------
 
 
+
 def subject_regex(prefix: str) -> re.Pattern[str]:
+    """Return the braced-session matcher for older callers/tests."""
+    return subject_braced_regex(prefix)
+
+
+def subject_braced_regex(prefix: str) -> re.Pattern[str]:
     return re.compile(rf"\b{re.escape(prefix)}:\{{([^}}]+)\}}")
 
 
+def subject_bare_regex(prefix: str) -> re.Pattern[str]:
+    # Bare control subjects intentionally do not accept braces.  The whole
+    # remainder of the Subject header is the command line, so subjects such as
+    # "Re: tc:search mailbot" and "tc:model-list --all" work.
+    return re.compile(rf"\b{re.escape(prefix)}:(?!\{{)([^\r\n]+)")
+
+
+def token_equals(value: str, token: str) -> bool:
+    return (value or "").strip().casefold() == (token or "").strip().casefold()
+
+
+def first_shell_token(text: str) -> str:
+    try:
+        parts = shlex.split(text or "")
+    except ValueError:
+        parts = (text or "").split()
+    return parts[0] if parts else ""
+
+
+def split_first_word(text: str) -> Tuple[str, str]:
+    text = (text or "").strip()
+    if not text:
+        return "", ""
+    first = first_shell_token(text)
+    if first:
+        return first, text[len(first):].strip()
+    parts = text.split(None, 1)
+    return parts[0], parts[1] if len(parts) > 1 else ""
+
+
 def parse_session_from_subject(subject: str, prefix: str) -> Optional[str]:
-    match = subject_regex(prefix).search(subject or "")
+    """Return the braced session token, if any."""
+    match = subject_braced_regex(prefix).search(subject or "")
     if not match:
         return None
-    session = match.group(1).strip()
-    if not session:
+    token = match.group(1).strip()
+    return token or None
+
+
+def is_config_token(token: str, cfg: Config) -> bool:
+    return token_equals(token, cfg.config_subject_token)
+
+
+def strip_command_envelope(token: str, cfg: Config) -> str:
+    """Remove tc:CMD and legacy tc:{MAILBOT:...} wrappers.
+
+    The canonical 0.4 control forms are tc:CONFIG, tc:MODELS, tc:CMD, and
+    tc:command args.  Braced MAILBOT forms remain only as compatibility aliases.
+    """
+    token = (token or "").strip()
+    if not token:
+        return ""
+
+    legacy = (cfg.mailbot_subject_token or "MAILBOT").strip()
+    legacy_lower = legacy.casefold()
+    lower = token.casefold()
+    if legacy_lower and lower == legacy_lower:
+        return ""
+    if legacy_lower and lower.startswith(legacy_lower + ":"):
+        return token[len(legacy) + 1:].strip()
+
+    command_token = (cfg.command_subject_token or "CMD").strip()
+    command_lower = command_token.casefold()
+    aliases = {command_lower, "cmds", "command", "commands"}
+    first, rest = split_first_word(token)
+    if first.casefold() in aliases:
+        return rest
+    for marker in (command_token + ":", "CMD:", "CMDS:", "COMMAND:", "COMMANDS:"):
+        if lower.startswith(marker.casefold()):
+            return token[len(marker):].strip()
+    return token
+
+
+def legacy_mailbot_command_from_token(token: str, body: str, cfg: Config) -> Optional[str]:
+    """Translate legacy MAILBOT braced tokens into a command line."""
+    token = (token or "").strip()
+    legacy = (cfg.mailbot_subject_token or "MAILBOT").strip()
+    if not token or not legacy:
         return None
-    if session.lower() == "new":
-        return "session-" + time.strftime("%Y-%m-%d-%H-%M-%S")
-    return session
+    lower = token.casefold()
+    legacy_lower = legacy.casefold()
+    if lower == legacy_lower or lower.startswith(legacy_lower + ":"):
+        stripped = strip_command_envelope(token, cfg)
+        return maybe_append_body_arguments(stripped, body) if stripped else (first_command_line_from_body(body) or "help")
+    return None
+
+
+def parse_subject_request(subject: str, cfg: Config, body: str = "") -> Optional[SubjectRequest]:
+    subject = subject or ""
+
+    braced = subject_braced_regex(cfg.subject_prefix).search(subject)
+    if braced:
+        token = braced.group(1).strip()
+        if not token:
+            return None
+        if is_config_token(token, cfg):
+            return SubjectRequest("config", cfg.config_subject_token, raw=token, legacy=True)
+        legacy_command = legacy_mailbot_command_from_token(token, body, cfg)
+        if legacy_command is not None:
+            return SubjectRequest("command", legacy_command, raw=token, legacy=True)
+        # tc:{new} deliberately remains the literal session request.  run_ttychatter()
+        # passes no session argument for it, letting ttychatter.python create its own
+        # default session-YYYY-MM-DD-HH-MM-SS name.
+        return SubjectRequest("session", token, raw=token)
+
+    bare = subject_bare_regex(cfg.subject_prefix).search(subject)
+    if not bare:
+        return None
+    command_text = bare.group(1).strip()
+    if not command_text:
+        return None
+
+    first, rest = split_first_word(command_text)
+    if is_config_token(first, cfg) and not rest:
+        return SubjectRequest("config", cfg.config_subject_token, raw=command_text)
+
+    stripped = strip_command_envelope(command_text, cfg)
+    if stripped != command_text:
+        return SubjectRequest("command", maybe_append_body_arguments(stripped, body) if stripped else (first_command_line_from_body(body) or "help"), raw=command_text)
+
+    models_token = (cfg.models_subject_token or "MODELS").strip()
+    if token_equals(first, models_token) and not rest:
+        return SubjectRequest("command", "update-models", raw=command_text)
+
+    return SubjectRequest("command", maybe_append_body_arguments(command_text, body), raw=command_text)
 
 
 def is_config_request(session: str, cfg: Config) -> bool:
-    """Return true when a tc:{...} token names the protected config workflow.
-
-    The mailbot intentionally treats tc:{CONFIG} as a transport-control command,
-    not as an AI session name.  This keeps configuration editing through mail
-    explicit, visible, and auditable.  The command still must pass the normal
-    ALLOWED_FROM check before it can do anything.
-    """
-    return session.strip().lower() == cfg.config_subject_token.strip().lower()
+    """Return true for the configured config workflow token."""
+    return is_config_token(session, cfg)
 
 
 def decode_part_payload(part: Message) -> str:
@@ -568,10 +820,11 @@ def looks_like_config_text(text: str) -> bool:
         line = raw.strip()
         if not line or line.startswith('#'):
             continue
-        if '=' not in line:
+        parsed = parse_config_line(raw)
+        if parsed is None:
             return False
-        key, _ = line.split('=', 1)
-        if not re.match(r'^[A-Z0-9_]+$', key.strip()):
+        key, _value = parsed
+        if key not in KNOWN_CONFIG_KEYS:
             return False
         useful += 1
     return useful > 0
@@ -582,7 +835,7 @@ def find_config_attachment(msg: Message, max_attachment_bytes: int) -> Optional[
 
     The config-over-email workflow is intentionally attachment-based.  The bot
     sends the current config as an attached text file, the user edits that file,
-    and then mails it back with subject tc:{CONFIG}.  Requiring an attachment
+    and then mails it back with subject tc:CONFIG.  Requiring an attachment
     avoids accidentally treating a normal email body as a replacement config.
     """
     for part in msg.walk():
@@ -606,7 +859,7 @@ def find_config_attachment(msg: Message, max_attachment_bytes: int) -> Optional[
 
 
 def build_config_reply(cfg: Config, original: Message, body: str, attachment_text: Optional[str] = None) -> EmailMessage:
-    """Build a reply for tc:{CONFIG}.
+    """Build a reply for tc:CONFIG.
 
     If attachment_text is provided, it is attached as a text/plain config file.
     This is the safe round-trip path: request config, receive attachment, edit
@@ -614,7 +867,7 @@ def build_config_reply(cfg: Config, original: Message, body: str, attachment_tex
     """
     reply_to = parseaddr(original.get('Reply-To') or original.get('From') or '')[1]
     dest = cfg.mail_to or reply_to
-    subject = original.get('Subject', f'{cfg.subject_prefix}:{{{cfg.config_subject_token}}}')
+    subject = original.get('Subject', f'{cfg.subject_prefix}:CONFIG')
     msg = EmailMessage()
     msg['From'] = cfg.mail_from or cfg.smtp_user or cfg.imap_user
     msg['To'] = dest
@@ -633,15 +886,15 @@ def public_config_text(cfg: Config) -> str:
     """Return the current config file, redacting plaintext password lines.
 
     The goal is editable configuration without accidentally emailing secrets in
-    the clear.  Encrypted password file paths are safe to show; plaintext
+    the clear. Encrypted password file paths are safe to show; plaintext
     password values are replaced with a comment.
     """
     if not cfg.config_file.exists():
         return '# ttychatter.mailbot config does not exist yet\n'
-    out=[]
+    out = []
     for raw in cfg.config_file.read_text(encoding='utf-8', errors='replace').splitlines():
-        if raw.strip().startswith(('IMAP_PASSWORD=', 'SMTP_PASSWORD=')):
-            key=raw.split('=',1)[0]
+        key = config_line_key(raw)
+        if key in SECRET_CONFIG_KEYS:
             out.append(f'# {key}=REDACTED_BY_TTYCHATTER_MAILBOT')
         else:
             out.append(raw)
@@ -711,7 +964,7 @@ def allowed_sender(sender: str, cfg: Config) -> bool:
     sending and receiving during setup, and an explicit ALLOWED_FROM entry should
     be respected.
 
-    Loop prevention belongs elsewhere: exact tc:{...} subjects, processed
+    Loop prevention belongs elsewhere: exact tc:COMMAND/tc:{session} subjects, processed
     Message-IDs, dry-run safety, and optional deployment advice to use a distinct
     MAIL_FROM such as ttychatter@example.org.  Therefore this function now does
     only one job: compare the parsed sender against the configured allowlist.
@@ -939,18 +1192,23 @@ def rename_session_file(cfg: Config, old: str, new: str) -> str:
     return f"renamed session: {old_name} -> {new_name}\n"
 
 
+
 def run_ttychatter(cfg: Config, session: str, body: str, attachments: List[Path]) -> Tuple[int, str, str]:
     cfg.session_dir.mkdir(parents=True, exist_ok=True)
     cfg.attachment_dir.mkdir(parents=True, exist_ok=True)
 
-    session_name = session_log_path(cfg, session).stem
+    requested_session = (session or "").strip()
+    let_ttychatter_name_session = requested_session.casefold() == "new"
+    session_name = "" if let_ttychatter_name_session else session_log_path(cfg, requested_session).stem
+
     cmd = shlex.split(cfg.ttychatter_command)
     cmd.append("--loopback")
     for extra in shlex.split(cfg.ttychatter_extra_args):
         cmd.append(extra)
     for path in attachments:
         cmd.extend(["--attach", str(path)])
-    cmd.append(session_name)
+    if session_name:
+        cmd.append(session_name)
 
     proc = subprocess.run(
         cmd,
@@ -960,6 +1218,27 @@ def run_ttychatter(cfg: Config, session: str, body: str, attachments: List[Path]
         text=True,
     )
     return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+
+
+def ttychatter_session_from_stderr(stderr_text: str) -> str:
+    for raw in (stderr_text or "").splitlines():
+        line = raw.strip()
+        if not line.lower().startswith("session:"):
+            continue
+        value = line.split(":", 1)[1].strip()
+        if not value:
+            continue
+        path = Path(value)
+        return path.stem if path.suffix == ".log" else path.name or value
+    return ""
+
+
+def display_session_name(requested_session: str, stderr_text: str) -> str:
+    requested = (requested_session or "").strip()
+    if requested.casefold() == "new":
+        detected = ttychatter_session_from_stderr(stderr_text)
+        return detected or "new (ttychatter default timestamped session)"
+    return sanitize_session_name(requested)
 
 
 def run_ttychatter_cli(cfg: Config, args: List[str], input_text: str = "", timeout: Optional[int] = None) -> Tuple[int, str, str]:
@@ -1070,7 +1349,7 @@ def build_control_reply(
     sender = message_sender(original)
     reply_to = parseaddr(original.get("Reply-To") or original.get("From") or sender)[1]
     dest = cfg.mail_to or reply_to
-    subject = original.get("Subject", f"tc:{{{cfg.mailbot_subject_token}}}")
+    subject = original.get("Subject", f"{cfg.subject_prefix}:help")
 
     msg = EmailMessage()
     msg["From"] = cfg.mail_from or cfg.smtp_user or cfg.imap_user
@@ -1099,14 +1378,18 @@ def build_control_reply(
     return msg
 
 
+BODY_ARG_COMMANDS = {
+    "models", "routers", "model-list", "models-list", "list-models", "show-models",
+    "search", "search-session", "rename-session", "favorite-model",
+    "unfavorite-model", "test-model", "show-memory", "clear-memory",
+    "tty-set", "tty-unset",
+}
+
+
 def is_mailbot_request(session: str, cfg: Config) -> bool:
-    token = (session or "").strip()
-    prefix = (cfg.mailbot_subject_token or "MAILBOT").strip()
-    if not token or not prefix:
-        return False
-    lower = token.lower()
-    prefix_lower = prefix.lower()
-    return lower == prefix_lower or lower.startswith(prefix_lower + ":")
+    # Legacy compatibility only. New flat tc:<command> requests are identified
+    # by parse_subject_request() before this helper is needed.
+    return legacy_mailbot_command_from_token(session, "", cfg) is not None
 
 
 def first_command_line_from_body(body: str) -> str:
@@ -1122,87 +1405,96 @@ def first_command_line_from_body(body: str) -> str:
     return ""
 
 
+def maybe_append_body_arguments(command: str, body: str) -> str:
+    command = (command or "").strip()
+    if not command:
+        return ""
+    body_line = first_command_line_from_body(body)
+    if not body_line:
+        return command
+    try:
+        parsed = shlex.split(command)
+    except ValueError:
+        return command
+    if len(parsed) == 1 and parsed[0].lower().replace("_", "-") in BODY_ARG_COMMANDS:
+        return command + " " + body_line
+    return command
+
+
 def mailbot_command_line(session: str, body: str, cfg: Config) -> str:
-    token = (session or "").strip()
-    prefix = (cfg.mailbot_subject_token or "MAILBOT").strip()
-    prefix_lower = prefix.lower()
-    lower = token.lower()
-    if lower.startswith(prefix_lower + ":"):
-        command = token[len(prefix) + 1 :].strip()
-        if command:
-            body_line = first_command_line_from_body(body)
-            body_arg_commands = {
-                "models", "routers", "search", "search-session", "rename-session",
-                "favorite-model", "unfavorite-model", "test-model", "show-memory",
-                "clear-memory", "tty-set", "tty-unset",
-            }
-            try:
-                parsed = shlex.split(command)
-            except ValueError:
-                return command
-            if len(parsed) == 1 and parsed[0].lower().replace("_", "-") in body_arg_commands and body_line:
-                return command + " " + body_line
-            return command
-    return first_command_line_from_body(body) or "help"
+    # Legacy compatibility wrapper for callers that still pass a MAILBOT token.
+    return legacy_mailbot_command_from_token(session, body, cfg) or first_command_line_from_body(body) or "help"
 
 
 def mailbot_command_help(cfg: Config) -> str:
-    return f"""ttychatter.mailbot email commands
+    return f'''ttychatter.mailbot email commands
 
-Address mail to the bot from an ALLOWED_FROM sender. Use one of these subject forms:
+Address mail to the bot from an ALLOWED_FROM sender. Preferred subject forms:
 
+  {cfg.subject_prefix}:CONFIG
+  {cfg.subject_prefix}:MODELS
+  {cfg.subject_prefix}:CMD
+  {cfg.subject_prefix}:command args
   {cfg.subject_prefix}:{{session-name}}
   {cfg.subject_prefix}:{{new}}
-  {cfg.subject_prefix}:{{{cfg.config_subject_token}}}
-  {cfg.subject_prefix}:{{{cfg.mailbot_subject_token}:command args}}
-  {cfg.subject_prefix}:{{{cfg.mailbot_subject_token}}} with the command on the first nonempty body line
 
 Chat:
-  Any ordinary subject token is treated as a ttychatter session name. Attachments are passed through to ttychatter when PROCESS_ATTACHMENTS=1.
+  Braced tokens name ttychatter sessions. {cfg.subject_prefix}:{{new}} passes no session argument so ttychatter.python creates its normal session-YYYY-MM-DD-HH-MM-SS name. Attachments are passed through when PROCESS_ATTACHMENTS=1.
 
-Mailbot/config:
-  help                         Show this command list
-  manpage | manual             Return the mailbot manpage as an attachment
-  config                       Export mailbot config; same as {cfg.subject_prefix}:{{{cfg.config_subject_token}}}
+Config/models/control:
+  {cfg.subject_prefix}:CONFIG                  Export/apply mailbot config attachment
+  {cfg.subject_prefix}:MODELS                  Run ttychatter.python --update-models and attach models-cache.json
+  {cfg.subject_prefix}:CMD                     Run the first nonempty body line as a command
+  {cfg.subject_prefix}:help                    Show this command list
+  {cfg.subject_prefix}:manpage | manual        Return the mailbot manpage as an attachment
 
 Sessions:
-  sessions                     List session names with head/tail log previews
-  search TEXT                  Search all session logs
-  search-session SESSION TEXT  Search one session log
-  rename-session OLD NEW       Rename a session log
+  {cfg.subject_prefix}:sessions                List session names with head/tail log previews
+  {cfg.subject_prefix}:search TEXT             Search all session logs
+  {cfg.subject_prefix}:search-session SESSION TEXT
+                                    Search one session log
+  {cfg.subject_prefix}:rename-session OLD NEW  Rename a session log
 
 Model cache and model list:
-  update-models                Run ttychatter.python --update-models and attach models-cache.json
-  models [model-list flags]    Run ttychatter.python --models with safe filter flags
-  routers [model-list flags]   Run ttychatter.python --routers with safe filter flags
+  {cfg.subject_prefix}:MODELS                  Refresh model cache and attach models-cache.json
+  {cfg.subject_prefix}:model-list [flags]      Run ttychatter.python --models with safe filter flags
+  {cfg.subject_prefix}:models [flags]          Alias for model-list when flags are supplied
+  {cfg.subject_prefix}:list-models [flags]     Alias for model-list
+  {cfg.subject_prefix}:models-list [flags]     Alias for model-list
+  {cfg.subject_prefix}:show-models [flags]     Alias for model-list
+  {cfg.subject_prefix}:routers [flags]         Run ttychatter.python --routers with safe filter flags
 
 Model favorites/tests:
-  favorites                    Run ttychatter.python --favorites
-  favorite-model MODEL         Run ttychatter.python --favorite-model MODEL
-  unfavorite-model MODEL       Run ttychatter.python --unfavorite-model MODEL
-  test-model MODEL             Run ttychatter.python --test-model MODEL
+  {cfg.subject_prefix}:favorites               Run ttychatter.python --favorites
+  {cfg.subject_prefix}:favorite-model MODEL    Run ttychatter.python --favorite-model MODEL
+  {cfg.subject_prefix}:unfavorite-model MODEL  Run ttychatter.python --unfavorite-model MODEL
+  {cfg.subject_prefix}:test-model MODEL        Run ttychatter.python --test-model MODEL
 
 Ttychatter utilities:
-  ttyconfig                    Run ttychatter.python --config
-  ttydoctor                    Run ttychatter.python --doctor
-  credits                      Run ttychatter.python --credits
-  show-memory SESSION          Run ttychatter.python --show-memory SESSION
-  clear-memory SESSION         Run ttychatter.python --clear-memory SESSION
-  tty-set KEY VALUE            Run ttychatter.python --set KEY VALUE
-  tty-unset KEY                Run ttychatter.python --unset KEY
+  {cfg.subject_prefix}:ttyconfig               Run ttychatter.python --config
+  {cfg.subject_prefix}:ttydoctor               Run ttychatter.python --doctor
+  {cfg.subject_prefix}:credits                 Run ttychatter.python --credits
+  {cfg.subject_prefix}:show-memory SESSION     Run ttychatter.python --show-memory SESSION
+  {cfg.subject_prefix}:clear-memory SESSION    Run ttychatter.python --clear-memory SESSION
+  {cfg.subject_prefix}:tty-set KEY VALUE       Run ttychatter.python --set KEY VALUE
+  {cfg.subject_prefix}:tty-unset KEY           Run ttychatter.python --unset KEY
+
+Compatibility:
+  Legacy subjects {cfg.subject_prefix}:{{CONFIG}} and {cfg.subject_prefix}:{{MAILBOT:command args}} are still accepted, but new mail should use the bare control form above.
 
 Safe model-list flags:
   --all --sort VALUE --modellist-sort-tokens --min-input-tokens N --min-output-tokens N
   --hide-preview --show-preview --require-tokens --allow-missing-tokens --model-type VALUE
-"""
+'''
 
 
 def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
     subject_prefix = cfg.subject_prefix if cfg else "tc"
     config_token = cfg.config_subject_token if cfg else "CONFIG"
+    models_token = cfg.models_subject_token if cfg else "MODELS"
+    command_token = cfg.command_subject_token if cfg else "CMD"
     mailbot_token = cfg.mailbot_subject_token if cfg else "MAILBOT"
-    return textwrap.dedent(f'''\
-    .TH TTYCHATTER.MAILBOT 1 "May 2026" "ttychatter.mailbot {VERSION}" "User Commands"
+    return textwrap.dedent(f'''    .TH TTYCHATTER.MAILBOT 1 "May 2026" "ttychatter.mailbot {VERSION}" "User Commands"
     .SH NAME
     ttychatter.mailbot \\- email transport adapter and remote control surface for ttychatter
     .SH SYNOPSIS
@@ -1210,7 +1502,7 @@ def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
     [--config-file PATH] [--once|--daemon|--dry-run] [--doctor] [--list-candidates]
     .PP
     .B ttychatter.mailbot
-    [--config] [--sessions|--list-sessions] [--manpage] [--update-models]
+    [--config|--raw-config] [--sessions|--list-sessions] [--manpage] [--update-models]
     .PP
     .B ttychatter.mailbot
     [--set KEY VALUE] [--unset KEY] [--set-imap-password [--gpg]] [--set-smtp-password [--gpg]]
@@ -1219,26 +1511,46 @@ def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
     extracts a subject token, and either sends the message body to ttychatter.python
     or handles a local mailbot control command. Replies are sent by sendmail or SMTP.
     .PP
+    The 0.4 command grammar reserves braces for ttychatter chat sessions and uses
+    bare subjects for mailbot controls.
+    .SH CHAT SUBJECTS
     Ordinary chat subjects use this form:
     .PP
     .B {subject_prefix}:{{session-name}}
     .PP
-    The special session name "new" creates a timestamped session.
-    .SH EMAIL COMMANDS
-    Mailbot commands are addressed with either of these forms:
+    The special chat subject
     .PP
-    .B {subject_prefix}:{{{mailbot_token}:command args}}
+    .B {subject_prefix}:{{new}}
     .PP
-    or
+    starts a new unnamed chat from the mailbot side. The mailbot passes no session
+    argument to ttychatter.python, so ttychatter.python creates its normal
+    session-YYYY-MM-DD-HH-MM-SS log name.
+    .SH CONTROL SUBJECTS
+    The preferred control forms are:
     .PP
-    .B {subject_prefix}:{{{mailbot_token}}}
+    .B {subject_prefix}:{config_token}
     .PP
-    with the command on the first nonempty line of the message body.
+    export or apply the mailbot config attachment.
     .PP
-    Supported commands:
+    .B {subject_prefix}:{models_token}
+    .PP
+    run ttychatter.python --update-models and attach the resulting models-cache.json.
+    .PP
+    .B {subject_prefix}:{command_token}
+    .PP
+    run the first nonempty message-body line as a mailbot command.
+    .PP
+    .B {subject_prefix}:command args
+    .PP
+    run a mailbot command directly from the subject.
+    .PP
+    Legacy subjects {subject_prefix}:{{{config_token}}}, {subject_prefix}:{{{mailbot_token}}},
+    and {subject_prefix}:{{{mailbot_token}:command args}} remain accepted for compatibility,
+    but new mail should use the bare control subjects.
+    .SH SUPPORTED COMMANDS
     .TP
     .B help
-    Return the email command summary.
+    Return the email command summary. Example subject: {subject_prefix}:help.
     .TP
     .B manpage
     Return the configured external manpage as an email attachment when found,
@@ -1248,7 +1560,8 @@ def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
     List saved session names with short head and tail previews from each session log.
     .TP
     .B search TEXT
-    Search all session logs for TEXT.
+    Search all session logs for TEXT. If the subject is only {subject_prefix}:search,
+    the first nonempty body line supplies TEXT.
     .TP
     .B search-session SESSION TEXT
     Search a single session log for TEXT.
@@ -1259,11 +1572,13 @@ def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
     .B update-models
     Run ttychatter.python --update-models, then attach the resulting models-cache.json
     when the cache file is present and smaller than MAX_OUTGOING_ATTACHMENT_BYTES.
+    The subject {subject_prefix}:{models_token} is the preferred shorthand.
     .TP
-    .B models [FLAGS]
-    Run ttychatter.python --models. The safe model-list flags are --all, --sort VALUE,
-    --modellist-sort-tokens, --min-input-tokens N, --min-output-tokens N, --hide-preview,
-    --show-preview, --require-tokens, --allow-missing-tokens, and --model-type VALUE.
+    .B model-list [FLAGS]
+    Run ttychatter.python --models. Aliases: models, list-models, models-list, show-models. The safe model-list flags are
+    --all, --sort VALUE, --modellist-sort-tokens, --min-input-tokens N,
+    --min-output-tokens N, --hide-preview, --show-preview, --require-tokens,
+    --allow-missing-tokens, and --model-type VALUE.
     .TP
     .B routers [FLAGS]
     Run ttychatter.python --routers with the same safe model-list flags.
@@ -1300,10 +1615,20 @@ def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
     .TP
     .B credits
     Return ttychatter.python --credits output.
+    .SH LOCAL CONFIG OUTPUT
+    The local --config command prints the parsed effective config, not a byte-for-byte
+    copy of the config file. It includes PROCESS_USER, HOME,
+    TTYCHATTER_MAILBOT_CONFIG, XDG_CONFIG_HOME, CONFIG_FILE, CONFIG_EXISTS,
+    CONFIG_READABLE, and CONFIG_MODE to make wrong-user and wrong-path mistakes
+    visible. Unknown keys and comments are not shown there; use --raw-config to
+    print the actual config file with plaintext password lines redacted. The
+    default config path is TTYCHATTER_MAILBOT_CONFIG, then
+    XDG_CONFIG_HOME/ttychatter/mailbot/config, then ~/.config/ttychatter/mailbot/config;
+    --config-file PATH has final precedence.
     .SH CONFIG COMMAND
     The subject
     .PP
-    .B {subject_prefix}:{{{config_token}}}
+    .B {subject_prefix}:{config_token}
     .PP
     exports the mailbot config as an attachment. Reply with an edited config
     attachment using the same subject to replace the config; a timestamped backup is kept.
@@ -1313,10 +1638,10 @@ def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
     IMAP_PASSWORD_GPG_FILE, SEND_METHOD, SENDMAIL_PATH, SMTP_HOST, SMTP_PORT,
     SMTP_SSL, SMTP_STARTTLS, SMTP_USER, SMTP_PASSWORD, SMTP_PASSWORD_GPG_FILE,
     MAIL_FROM, MAIL_TO, ALLOWED_FROM, SUBJECT_PREFIX, CONFIG_SUBJECT_TOKEN,
-    MAILBOT_SUBJECT_TOKEN, POLL_INTERVAL, MAX_MESSAGES_PER_RUN, MAX_BODY_BYTES,
-    MAX_ATTACHMENT_BYTES, PROCESS_ATTACHMENTS, MARK_SEEN, TTYCHATTER_COMMAND,
-    TTYCHATTER_EXTRA_ARGS, TTYCHATTER_CONTROL_TIMEOUT, MAILBOT_MANPAGE_FILE,
-    SESSION_DIR, ATTACHMENT_DIR,
+    MODELS_SUBJECT_TOKEN, COMMAND_SUBJECT_TOKEN, MAILBOT_SUBJECT_TOKEN,
+    POLL_INTERVAL, MAX_MESSAGES_PER_RUN, MAX_BODY_BYTES, MAX_ATTACHMENT_BYTES,
+    PROCESS_ATTACHMENTS, MARK_SEEN, TTYCHATTER_COMMAND, TTYCHATTER_EXTRA_ARGS,
+    TTYCHATTER_CONTROL_TIMEOUT, MAILBOT_MANPAGE_FILE, SESSION_DIR, ATTACHMENT_DIR,
     MODEL_CACHE_FILE, WORK_DIR, PROCESSED_DB, SESSION_LIST_HEAD_LINES,
     SESSION_LIST_TAIL_LINES, SESSION_LIST_MAX_SESSIONS, SESSION_PREVIEW_LINE_CHARS,
     SESSION_SEARCH_MAX_MATCHES, MAX_COMMAND_OUTPUT_BYTES, MAX_OUTGOING_ATTACHMENT_BYTES,
@@ -1328,7 +1653,7 @@ def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
     --set-smtp-password commands for passwords.
     .SH GPG PASSWORD FILES
     With --gpg, the mailbot stores IMAP and SMTP passwords in external gpg files and
-    decrypts them with gpg --quiet --decrypt at runtime.  Version 0.3.1 passes GPG_TTY
+    decrypts them with gpg --quiet --decrypt at runtime. Version 0.3.1 passes GPG_TTY
     automatically to gpg when the mailbot has a controlling terminal, trims trailing
     CR/LF from decrypted password files, and prints process user, HOME, and GPG_TTY
     in gpg-agent diagnostics. For interactive tests, also set export GPG_TTY=$(tty)
@@ -1355,6 +1680,8 @@ def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
     fallback is used.
     .SH FILES
     Default config: ~/.config/ttychatter/mailbot/config
+    .PP
+    Config path environment override: TTYCHATTER_MAILBOT_CONFIG
     .PP
     Preferred local manpage: ~/.config/ttychatter/mailbot/ttychatter.mailbot.1
     .PP
@@ -1494,9 +1821,14 @@ def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = Fal
         "list": "sessions",
         "list-sessions": "sessions",
         "session-list": "sessions",
+        "model-list": "models",
+        "models-list": "models",
+        "list-models": "models",
+        "show-models": "models",
         "update-model-list": "update-models",
         "update-model-cache": "update-models",
         "model-cache": "update-models",
+        "models-cache": "update-models",
         "router-list": "routers",
         "faves": "favorites",
         "unbookmark-model": "unfavorite-model",
@@ -1633,18 +1965,19 @@ def fetch_message_peek(conn: imaplib.IMAP4, uid: bytes) -> Optional[Message]:
 
 def candidate_skip_reason(cfg: Config, msg: Message, uid: bytes, processed: set[str]) -> str:
     subject = msg.get("Subject", "")
-    session = parse_session_from_subject(subject, cfg.subject_prefix)
+    body = extract_body(msg, cfg.max_body_bytes)
+    request = parse_subject_request(subject, cfg, body)
     sender = message_sender(msg)
     msgid = msg.get("Message-ID", f"imap-uid-{uid.decode(errors='replace')}")
-    if not session:
-        return f"skip: subject does not contain {cfg.subject_prefix}:{{...}}"
+    if request is None:
+        return f"skip: subject does not contain {cfg.subject_prefix}:COMMAND or {cfg.subject_prefix}:{{session}}"
     if not allowed_sender(sender, cfg):
         return f"skip: sender not allowed ({sender or 'empty sender'}); allowed={','.join(cfg.allowed_from) or 'empty'}"
     if msgid in processed:
         return "skip: Message-ID already processed"
-    if is_config_request(session, cfg):
+    if request.kind == "config":
         return "match: mailbot config command"
-    if is_mailbot_request(session, cfg):
+    if request.kind == "command":
         return "match: mailbot control command"
     return "match: ttychatter session"
 
@@ -1660,7 +1993,7 @@ def process_config_message(cfg: Config, conn: imaplib.IMAP4, uid: bytes, msg: Me
         body = (
             "ttychatter.mailbot config export\n"
             "\n"
-            "Edit the attached config file and mail it back with the same subject tc:{CONFIG}.\n"
+            "Edit the attached config file and mail it back with the same subject tc:CONFIG.\n"
             "Plaintext password values are redacted; encrypted password file paths are preserved.\n"
         )
         reply = build_config_reply(cfg, msg, body, attachment_text=public_config_text(cfg))
@@ -1683,14 +2016,14 @@ def process_config_message(cfg: Config, conn: imaplib.IMAP4, uid: bytes, msg: Me
     return True
 
 
-def process_mailbot_command_message(cfg: Config, conn: imaplib.IMAP4, uid: bytes, msg: Message, session: str, dry_run: bool = False) -> bool:
+def process_mailbot_command_message(cfg: Config, conn: imaplib.IMAP4, uid: bytes, msg: Message, command_line: str, dry_run: bool = False) -> bool:
     msgid = msg.get("Message-ID", f"imap-uid-{uid.decode(errors='replace')}")
     processed = load_processed(cfg.processed_db)
     if msgid in processed:
         return False
 
     body = extract_body(msg, cfg.max_body_bytes)
-    command_line = mailbot_command_line(session, body, cfg)
+    command_line = maybe_append_body_arguments(command_line, body) if command_line else (first_command_line_from_body(body) or "help")
     ok, output, attachments = dispatch_mailbot_command(cfg, command_line, dry_run=dry_run)
     reply = build_control_reply(cfg, msg, command_line, output, ok, attachments)
 
@@ -1710,8 +2043,9 @@ def process_message(cfg: Config, conn: imaplib.IMAP4, uid: bytes, dry_run: bool 
         return False
     msgid = msg.get("Message-ID", f"imap-uid-{uid.decode(errors='replace')}")
     subject = msg.get("Subject", "")
-    session = parse_session_from_subject(subject, cfg.subject_prefix)
-    if not session:
+    body_for_command = extract_body(msg, cfg.max_body_bytes)
+    request = parse_subject_request(subject, cfg, body_for_command)
+    if request is None:
         return False
     if not allowed_sender(message_sender(msg), cfg):
         return False
@@ -1719,12 +2053,13 @@ def process_message(cfg: Config, conn: imaplib.IMAP4, uid: bytes, dry_run: bool 
     processed = load_processed(cfg.processed_db)
     if msgid in processed:
         return False
-    if is_config_request(session, cfg):
+    if request.kind == "config":
         return process_config_message(cfg, conn, uid, msg, dry_run=dry_run)
-    if is_mailbot_request(session, cfg):
-        return process_mailbot_command_message(cfg, conn, uid, msg, session, dry_run=dry_run)
+    if request.kind == "command":
+        return process_mailbot_command_message(cfg, conn, uid, msg, request.value, dry_run=dry_run)
 
-    body = extract_body(msg, cfg.max_body_bytes)
+    session = request.value
+    body = body_for_command
     if not body:
         body = "(empty email body)"
 
@@ -1735,7 +2070,8 @@ def process_message(cfg: Config, conn: imaplib.IMAP4, uid: bytes, dry_run: bool 
         if not dry_run:
             rc, output, stderr_text = run_ttychatter(cfg, session, body, attachments)
         ok = rc == 0
-        reply = build_reply(cfg, msg, session, output if ok else stderr_text or output, stderr_text, ok)
+        reply_session = display_session_name(session, stderr_text)
+        reply = build_reply(cfg, msg, reply_session, output if ok else stderr_text or output, stderr_text, ok)
         if not dry_run:
             send_reply(cfg, reply)
             remember_processed(cfg.processed_db, msgid)
@@ -1820,10 +2156,42 @@ def run_daemon(cfg: Config, dry_run: bool = False) -> int:
 # ---------------------------------------------------------------------------
 
 
+def config_readable(path: Path) -> bool:
+    try:
+        return path.is_file() and os.access(path, os.R_OK)
+    except OSError:
+        return False
+
+
+def config_mode_string(path: Path) -> str:
+    try:
+        return oct(path.stat().st_mode & 0o777)
+    except OSError:
+        return "missing"
+
+
+def print_raw_config(cfg: Config) -> None:
+    print(public_config_text(cfg), end="")
+
+
 def doctor(cfg: Config) -> int:
     checks: List[Tuple[str, bool, str]] = []
     checks.append(("process user", True, f"{getpass.getuser()} HOME={Path.home()}"))
+    env_cfg = os.environ.get(CONFIG_ENV_VAR, "").strip()
+    checks.append(("config env", True, f"{CONFIG_ENV_VAR}={env_cfg}" if env_cfg else "not set"))
+    xdg_cfg = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    checks.append(("xdg config home", True, f"XDG_CONFIG_HOME={xdg_cfg}" if xdg_cfg else "not set"))
     checks.append(("config file", cfg.config_file.exists(), str(cfg.config_file)))
+    checks.append(("config readable", config_readable(cfg.config_file), f"mode {config_mode_string(cfg.config_file)}"))
+    parsed_keys, ignored_lines = config_parse_summary(cfg.config_file)
+    if cfg.config_file.exists():
+        ignored_detail = "; ".join(ignored_lines[:5])
+        if len(ignored_lines) > 5:
+            ignored_detail += f"; ... {len(ignored_lines) - 5} more"
+        detail = f"{parsed_keys} recognized"
+        if ignored_lines:
+            detail += f", {len(ignored_lines)} ignored ({ignored_detail})"
+        checks.append(("config parsed keys", parsed_keys > 0, detail))
     checks.append(("imap host", bool(cfg.imap_host), cfg.imap_host))
     checks.append(("imap user", bool(cfg.imap_user), cfg.imap_user or "missing"))
     imap_password_source_ok = bool(cfg.imap_password or cfg.imap_password_gpg_file.exists())
@@ -1852,8 +2220,10 @@ def doctor(cfg: Config) -> int:
     rc = 0
     for name, ok, detail in checks:
         print(f"{'OK' if ok else 'FAIL'}\t{name}\t{detail}")
-        if not ok and name in {"config file", "imap user", "imap password source", "allowed from", "mail from", "ttychatter command"}:
+        if not ok and name in {"config file", "config readable", "config parsed keys", "imap user", "imap password source", "allowed from", "mail from", "ttychatter command"}:
             rc = 1
+    for note in cfg.config_load_notes:
+        print(f"WARN\tconfig parse\t{note}")
     return rc
 
 
@@ -1861,7 +2231,21 @@ def print_config(cfg: Config) -> None:
     # Never print password values.  Showing that a password source exists is
     # enough for diagnostics and avoids accidental secret disclosure in forum
     # posts or bug reports.
+    print(f"PROCESS_USER={getpass.getuser()}")
+    print(f"HOME={Path.home()}")
+    print(f"{CONFIG_ENV_VAR}={os.environ.get(CONFIG_ENV_VAR, '').strip()}")
+    print(f"XDG_CONFIG_HOME={os.environ.get('XDG_CONFIG_HOME', '').strip()}")
     print(f"CONFIG_FILE={cfg.config_file}")
+    print(f"CONFIG_EXISTS={int(cfg.config_file.exists())}")
+    print(f"CONFIG_READABLE={int(config_readable(cfg.config_file))}")
+    print(f"CONFIG_MODE={config_mode_string(cfg.config_file)}")
+    parsed_keys, ignored_lines = config_parse_summary(cfg.config_file)
+    print(f"CONFIG_RECOGNIZED_KEYS={parsed_keys}")
+    print(f"CONFIG_IGNORED_LINES={len(ignored_lines)}")
+    if not cfg.config_file.exists():
+        print("CONFIG_NOTE=no config file was read; values below are defaults plus environment overrides")
+    for note in cfg.config_load_notes:
+        print(f"CONFIG_LOAD_NOTE={note}")
     print(f"IMAP_HOST={cfg.imap_host}")
     print(f"IMAP_PORT={cfg.imap_port}")
     print(f"IMAP_SSL={int(cfg.imap_ssl)}")
@@ -1883,6 +2267,8 @@ def print_config(cfg: Config) -> None:
     print(f"ALLOWED_FROM={','.join(cfg.allowed_from)}")
     print(f"SUBJECT_PREFIX={cfg.subject_prefix}")
     print(f"CONFIG_SUBJECT_TOKEN={cfg.config_subject_token}")
+    print(f"MODELS_SUBJECT_TOKEN={cfg.models_subject_token}")
+    print(f"COMMAND_SUBJECT_TOKEN={cfg.command_subject_token}")
     print(f"MAILBOT_SUBJECT_TOKEN={cfg.mailbot_subject_token}")
     print(f"MAILBOT_MANPAGE_FILE={cfg.mailbot_manpage_file or ''}")
     print(f"CONFIG_UPDATE_REQUIRES_ATTACHMENT={int(cfg.config_update_requires_attachment)}")
@@ -1951,6 +2337,7 @@ USAGE
     {PROGRAM} --manpage
     {PROGRAM} --update-models
     {PROGRAM} --config
+    {PROGRAM} --raw-config
     {PROGRAM} --set KEY VALUE
     {PROGRAM} --unset KEY
     {PROGRAM} --set-imap-password [--gpg]
@@ -1959,18 +2346,22 @@ USAGE
     {PROGRAM} --help
 
 MAIL SUBJECTS
-    tc:{{session-name}}              Send body to ttychatter session
-    tc:{{new}}                       Start a timestamped ttychatter session
-    tc:{{CONFIG}}                    Export/apply mailbot config attachment
-    tc:{{MAILBOT:help}}              Return mailbot command help
-    tc:{{MAILBOT:sessions}}          List sessions with head/tail previews
-    tc:{{MAILBOT:update-models}}     Refresh ttychatter model cache and attach JSON
-    tc:{{MAILBOT:manpage}}           Return the mailbot manpage attachment
+    tc:CONFIG                    Export/apply mailbot config attachment
+    tc:MODELS                    Refresh ttychatter model cache and attach JSON
+    tc:CMD                       Run first nonempty body line as a command
+    tc:command args              Run a mailbot command directly
+    tc:{{session-name}}          Send body to ttychatter session
+    tc:{{new}}                   Let ttychatter create its default timestamped session
 
 DESCRIPTION
-    Reads unread mail from IMAP, extracts messages whose subject contains
-    tc:{{session}}, sends ordinary messages to ttychatter, and handles explicit
-    tc:{{MAILBOT:...}} control commands by email.
+    Reads unread mail from IMAP. Braced subjects tc:{{session}} are ordinary
+    ttychatter chats. Bare subjects tc:CONFIG, tc:MODELS, and tc:command args
+    are mailbot control commands.
+
+CONFIG PATH
+    If --config-file is omitted, the path is resolved as:
+    TTYCHATTER_MAILBOT_CONFIG, then XDG_CONFIG_HOME/ttychatter/mailbot/config,
+    then ~/.config/ttychatter/mailbot/config.
 
 SECURITY
     ALLOWED_FROM is required. Mail from other senders is ignored. Commands are
@@ -1980,7 +2371,7 @@ SECURITY
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--config-file", default=str(DEFAULT_CONFIG_FILE))
+    parser.add_argument("--config-file", default=None)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--daemon", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -1991,6 +2382,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manpage", action="store_true")
     parser.add_argument("--update-models", action="store_true")
     parser.add_argument("--config", action="store_true")
+    parser.add_argument("--raw-config", action="store_true")
     parser.add_argument("--set", nargs=2, metavar=("KEY", "VALUE"))
     parser.add_argument("--unset", metavar="KEY")
     parser.add_argument("--set-imap-password", action="store_true")
@@ -2010,7 +2402,7 @@ def main() -> int:
         print(f"{PROGRAM} version {VERSION}")
         return 0
 
-    cfg = load_config(expand_path(args.config_file))
+    cfg = load_config(resolve_config_file(args.config_file))
 
     if args.manpage:
         print(mailbot_manpage(cfg), end="")
@@ -2031,6 +2423,9 @@ def main() -> int:
         return 0
     if args.config:
         print_config(cfg)
+        return 0
+    if args.raw_config:
+        print_raw_config(cfg)
         return 0
     if args.set_imap_password:
         return set_password_command(cfg, "imap", args.gpg)

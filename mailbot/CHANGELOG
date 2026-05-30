@@ -1,3 +1,84 @@
+ttychatter.mailbot 0.4.0
+=========================
+
+Command syntax
+--------------
+- Replaced the public email control syntax with bare control subjects:
+  tc:CONFIG, tc:MODELS, tc:CMD, and tc:command args.
+- Braced subjects are now reserved for ordinary ttychatter chat sessions:
+  tc:{session-name} and tc:{new}.
+- tc:{new} now passes no session argument to ttychatter.python, allowing
+  ttychatter.python to create its regular default session-YYYY-MM-DD-HH-MM-SS
+  name instead of the mailbot inventing the name first.
+- Added tc:MODELS as the preferred shorthand for update-models. It runs
+  ttychatter.python --update-models and returns models-cache.json when the
+  cache can be attached.
+- Added tc:CMD as a body-command envelope; the first nonempty body line is used
+  as the mailbot command.
+- Added direct bare command subjects such as tc:sessions, tc:manpage,
+  tc:search TEXT, tc:model-list --all, and tc:routers --model-type chat.
+- Added model-list and list-models aliases for ttychatter.python --models so a
+  plain tc:MODELS can remain the cache refresh command.
+
+Compatibility
+-------------
+- Legacy tc:{CONFIG}, tc:{MAILBOT}, and tc:{MAILBOT:command args} subjects are
+  still accepted after ALLOWED_FROM passes, but they are no longer the
+  documented primary syntax.
+- MAILBOT_SUBJECT_TOKEN remains accepted for that legacy command envelope.
+- Added MODELS_SUBJECT_TOKEN, default MODELS, and COMMAND_SUBJECT_TOKEN,
+  default CMD.
+
+Notes
+-----
+- The command parser remains allowlisted and non-shell-expanded.
+- The mailbot still delegates chat behavior, model-cache updates, model lists,
+  memory, sessions, attachments, and OpenRouter interaction to ttychatter.python.
+
+ttychatter.mailbot 0.3.4
+=========================
+
+Command syntax
+--------------
+- Flattened the preferred email control syntax. Use tc:CONFIG for config export/update, tc:MODELS for model-cache refresh with models-cache.json attachment, and tc:<command> for other allowlisted mailbot commands.
+- Ordinary ttychatter chat sessions remain braced as tc:{session_name}; tc:{new} still creates an unnamed timestamped session through the usual ttychatter session naming path.
+- Added model-list, models-list, list-models, and show-models command aliases for ttychatter.python --models so the reserved tc:MODELS subject can mean cache refresh without ambiguity.
+- Commands that need arguments can still take them from the first nonempty message body line, for example Subject: tc:search with the search text in the body.
+
+Compatibility
+-------------
+- Legacy tc:{CONFIG}, tc:{MAILBOT:command args}, and tc:{MAILBOT} messages remain accepted as compatibility aliases.
+- MAILBOT_SUBJECT_TOKEN remains in the config for legacy compatibility, but new mail should not need the MAILBOT namespace.
+
+ttychatter.mailbot 0.3.3
+=========================
+
+Diagnostics and config parsing
+------------------------------
+- --config now makes wrong-user, wrong-HOME, wrong-XDG_CONFIG_HOME, and wrong-config-file mistakes explicit.
+- --raw-config prints the actual loaded config file with plaintext IMAP_PASSWORD and SMTP_PASSWORD lines redacted.
+- The default config path now resolves TTYCHATTER_MAILBOT_CONFIG first, then XDG_CONFIG_HOME/ttychatter/mailbot/config, then ~/.config/ttychatter/mailbot/config.
+- Config parsing now accepts shell-style export KEY=VALUE lines and treats keys case-insensitively, while still writing canonical KEY=VALUE lines.
+- Password .gpg default paths now follow the selected config file directory when --config-file, TTYCHATTER_MAILBOT_CONFIG, or XDG_CONFIG_HOME is used.
+
+Notes
+-----
+- This release is aimed at diagnosing cases where --config appears incomplete while a different file under .config/ttychatter/mailbot contains the expected values.
+- If direct gpg --decrypt of the configured password file fails, the mailbot cannot reach IMAP; fix gpg-agent/pinentry first or use a protected plaintext/environment password source.
+
+ttychatter.mailbot 0.3.2
+=========================
+
+Diagnostics
+-----------
+- Added --raw-config to print the actual loaded config file with plaintext IMAP_PASSWORD and SMTP_PASSWORD lines redacted.
+- --config now prints PROCESS_USER, HOME, TTYCHATTER_MAILBOT_CONFIG, CONFIG_FILE, CONFIG_EXISTS, CONFIG_READABLE, and CONFIG_MODE before the parsed/effective config.
+- Added TTYCHATTER_MAILBOT_CONFIG as an environment override for the default config path. --config-file PATH still has final precedence.
+
+Notes
+-----
+- --config is intentionally a parsed/effective config report, not a literal file dump. If it looks incomplete while the file on disk looks complete, compare CONFIG_FILE with the file you edited, check command -v ttychatter.mailbot, and compare ttychatter.mailbot --version with ./ttychatter.mailbot --version.
+
 ttychatter.mailbot 0.3.1
 =========================
 
