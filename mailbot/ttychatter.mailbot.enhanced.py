@@ -28,6 +28,7 @@ from collections import deque
 import email
 import email.policy
 import getpass
+import gzip
 import html
 import imaplib
 import mimetypes
@@ -85,6 +86,7 @@ class Config:
     send_method: str = "sendmail"  # sendmail or smtp
     config_subject_token: str = "CONFIG"
     mailbot_subject_token: str = "MAILBOT"
+    mailbot_manpage_file: Optional[Path] = None
     config_update_requires_attachment: bool = True
     sendmail_path: str = "/usr/sbin/sendmail"
 
@@ -265,6 +267,7 @@ def load_config(path: Path = DEFAULT_CONFIG_FILE) -> Config:
         elif key == "INCLUDE_TTYCHATTER_STDERR": cfg.include_ttychatter_stderr = parse_bool(value, cfg.include_ttychatter_stderr)
         elif key == "CONFIG_SUBJECT_TOKEN": cfg.config_subject_token = value
         elif key == "MAILBOT_SUBJECT_TOKEN": cfg.mailbot_subject_token = value
+        elif key == "MAILBOT_MANPAGE_FILE": cfg.mailbot_manpage_file = expand_path(value) if value else None
         elif key == "CONFIG_UPDATE_REQUIRES_ATTACHMENT": cfg.config_update_requires_attachment = parse_bool(value, cfg.config_update_requires_attachment)
         elif key == "MODEL_CACHE_FILE": cfg.model_cache_file = expand_path(value)
         elif key == "TTYCHATTER_CONTROL_TIMEOUT": cfg.ttychatter_control_timeout = max(1, parse_int(value, cfg.ttychatter_control_timeout))
@@ -279,6 +282,9 @@ def load_config(path: Path = DEFAULT_CONFIG_FILE) -> Config:
     # Environment overrides are useful on servers, cron jobs, and test runs.
     cfg.imap_password = os.environ.get("TTYCHATTER_IMAP_PASSWORD", cfg.imap_password)
     cfg.smtp_password = os.environ.get("TTYCHATTER_SMTP_PASSWORD", cfg.smtp_password)
+    env_manpage = os.environ.get("TTYCHATTER_MAILBOT_MANPAGE_FILE", "").strip()
+    if env_manpage:
+        cfg.mailbot_manpage_file = expand_path(env_manpage)
     return cfg
 
 
@@ -1085,7 +1091,7 @@ Safe model-list flags:
 """
 
 
-def mailbot_manpage(cfg: Optional[Config] = None) -> str:
+def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
     subject_prefix = cfg.subject_prefix if cfg else "tc"
     config_token = cfg.config_subject_token if cfg else "CONFIG"
     mailbot_token = cfg.mailbot_subject_token if cfg else "MAILBOT"
@@ -1203,7 +1209,8 @@ def mailbot_manpage(cfg: Optional[Config] = None) -> str:
     MAIL_FROM, MAIL_TO, ALLOWED_FROM, SUBJECT_PREFIX, CONFIG_SUBJECT_TOKEN,
     MAILBOT_SUBJECT_TOKEN, POLL_INTERVAL, MAX_MESSAGES_PER_RUN, MAX_BODY_BYTES,
     MAX_ATTACHMENT_BYTES, PROCESS_ATTACHMENTS, MARK_SEEN, TTYCHATTER_COMMAND,
-    TTYCHATTER_EXTRA_ARGS, TTYCHATTER_CONTROL_TIMEOUT, SESSION_DIR, ATTACHMENT_DIR,
+    TTYCHATTER_EXTRA_ARGS, TTYCHATTER_CONTROL_TIMEOUT, MAILBOT_MANPAGE_FILE,
+    SESSION_DIR, ATTACHMENT_DIR,
     MODEL_CACHE_FILE, WORK_DIR, PROCESSED_DB, SESSION_LIST_HEAD_LINES,
     SESSION_LIST_TAIL_LINES, SESSION_LIST_MAX_SESSIONS, SESSION_PREVIEW_LINE_CHARS,
     SESSION_SEARCH_MAX_MATCHES, MAX_COMMAND_OUTPUT_BYTES, MAX_OUTGOING_ATTACHMENT_BYTES,
@@ -1225,6 +1232,73 @@ def mailbot_manpage(cfg: Optional[Config] = None) -> str:
     0 indicates success. Nonzero status indicates configuration, IMAP, SMTP,
     sendmail, or ttychatter subprocess failure.
     ''').strip() + "\n"
+
+
+def mailbot_manpage_candidates(cfg: Optional[Config] = None) -> List[Path]:
+    """Return external manpage candidates, most specific first.
+
+    The mailbot can still fall back to its compiled-in manpage.  This lookup is
+    intentionally simple so a packaged install can keep documentation in normal
+    man(1) locations, while a single-user install can keep it beside the config
+    or beside the executable.
+    """
+    candidates: List[Path] = []
+
+    def add(path: Optional[Path]) -> None:
+        if path is None:
+            return
+        try:
+            path = path.expanduser().resolve()
+        except Exception:
+            path = path.expanduser()
+        if path not in candidates:
+            candidates.append(path)
+
+    if cfg and cfg.mailbot_manpage_file:
+        add(cfg.mailbot_manpage_file)
+
+    if cfg:
+        add(cfg.config_file.parent / "ttychatter.mailbot.1")
+        add(cfg.config_file.parent / "ttychatter.mailbot.1.gz")
+
+    for base in [Path.cwd(), Path(__file__).resolve().parent, Path(sys.argv[0]).resolve().parent]:
+        add(base / "ttychatter.mailbot.1")
+        add(base / "ttychatter.mailbot.1.gz")
+
+    xdg_data_home = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share")))
+    for man_dir in [
+        xdg_data_home / "man" / "man1",
+        Path.home() / ".local" / "share" / "man" / "man1",
+        Path("/usr/local/share/man/man1"),
+        Path("/usr/local/man/man1"),
+        Path("/usr/share/man/man1"),
+    ]:
+        add(man_dir / "ttychatter.mailbot.1")
+        add(man_dir / "ttychatter.mailbot.1.gz")
+
+    return candidates
+
+
+def read_manpage_file(path: Path) -> str:
+    if path.suffix == ".gz":
+        with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
+            return fh.read().rstrip() + "\n"
+    return path.read_text(encoding="utf-8", errors="replace").rstrip() + "\n"
+
+
+def external_mailbot_manpage(cfg: Optional[Config] = None) -> Optional[str]:
+    for path in mailbot_manpage_candidates(cfg):
+        try:
+            if path.is_file():
+                return read_manpage_file(path)
+        except OSError:
+            continue
+    return None
+
+
+def mailbot_manpage(cfg: Optional[Config] = None) -> str:
+    return external_mailbot_manpage(cfg) or embedded_mailbot_manpage(cfg)
+
 
 
 def validate_model_list_args(args: List[str]) -> Tuple[bool, List[str], str]:
@@ -1607,6 +1681,8 @@ def doctor(cfg: Config) -> int:
     checks.append(("gpg", gpg_available(), "found" if gpg_available() else "not found"))
     checks.append(("ttychatter command", bool(cfg.ttychatter_command), cfg.ttychatter_command))
     checks.append(("model cache file", True, str(cfg.model_cache_file)))
+    found_manpage = next((p for p in mailbot_manpage_candidates(cfg) if p.is_file()), None)
+    checks.append(("mailbot manpage", True, str(found_manpage) if found_manpage else "embedded fallback"))
     for label, path in [
         ("session dir", cfg.session_dir),
         ("attachment dir", cfg.attachment_dir),
@@ -1653,6 +1729,7 @@ def print_config(cfg: Config) -> None:
     print(f"SUBJECT_PREFIX={cfg.subject_prefix}")
     print(f"CONFIG_SUBJECT_TOKEN={cfg.config_subject_token}")
     print(f"MAILBOT_SUBJECT_TOKEN={cfg.mailbot_subject_token}")
+    print(f"MAILBOT_MANPAGE_FILE={cfg.mailbot_manpage_file or ''}")
     print(f"CONFIG_UPDATE_REQUIRES_ATTACHMENT={int(cfg.config_update_requires_attachment)}")
     print(f"SESSION_LIST_HEAD_LINES={cfg.session_list_head_lines}")
     print(f"SESSION_LIST_TAIL_LINES={cfg.session_list_tail_lines}")
