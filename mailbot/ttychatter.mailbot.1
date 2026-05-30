@@ -352,6 +352,51 @@ MANPAGE LOOKUP
     MAILBOT_MANPAGE_FILE. If no external file is found, the embedded fallback
     is used.
 
+GPG PASSWORD TROUBLESHOOTING
+    When IMAP_PASSWORD is unset and IMAP_PASSWORD_GPG_FILE exists, the mailbot
+    decrypts that file before opening the IMAP connection. A run such as
+    ttychatter.mailbot --once can therefore fail before any mail is processed if
+    gpg-agent or pinentry cannot unlock the password file.
+
+    Agent/pinentry failures often look like:
+
+        gpg: problem with the agent: Permission denied
+        gpg: decryption failed: Bad session key
+
+    Test the same decrypt as the mailbot user:
+
+        export GPG_TTY=$(tty)
+        gpgconf --launch gpg-agent
+        gpg-connect-agent updatestartuptty /bye
+        gpg --decrypt ~/.config/ttychatter/mailbot/imap-password.gpg >/dev/null
+
+    If a bad passphrase is cached, run:
+
+        gpgconf --kill gpg-agent
+
+    Also verify that ~/.gnupg and the configured password .gpg file are owned by
+    the mailbot user and have restrictive permissions. Do not diagnose this by
+    switching to root unless the service is actually configured to run as root;
+    root changes HOME, GNUPGHOME, and the gpg-agent socket and can make the
+    failure appear as a different IMAP problem. For unattended daemon runs, the
+    gpg-agent passphrase must already be cached, or the deployment must use a
+    protected plaintext IMAP_PASSWORD line, a TTYCHATTER_IMAP_PASSWORD
+    environment override, or another local secret manager.
+
+    If root or another user shows:
+
+        IMAP error: LOGIN command error: BAD
+
+    first confirm that the intended config is being read:
+
+        ttychatter.mailbot --config
+        ttychatter.mailbot --doctor
+
+    A BAD login command is usually a syntax problem such as empty IMAP_USER, a
+    password containing a carriage return or newline, or running with a different
+    user/HOME than the configured mailbot account. Version 0.3.1 rejects empty
+    IMAP_USER/password values and CR/LF in login values before sending LOGIN.
+
 IMAP SAFETY
     The mailbot inspects unread candidates using IMAP BODY.PEEK[]. Ordinary
     RFC822/BODY fetches may set the \Seen flag. Dry-run, candidate listing,
@@ -373,6 +418,26 @@ SECURITY NOTES
     chat calls, not for utility/control calls. Do not send passwords, API keys,
     or other long-lived secrets through email.
 
+GPG PASSWORD FILES
+    With --gpg, the mailbot stores IMAP and SMTP passwords in external gpg
+    files and decrypts them with gpg --quiet --decrypt at runtime. For an
+    interactive shell, make sure GPG_TTY names the real terminal:
+
+        export GPG_TTY=$(tty)
+
+    Version 0.3.1 also passes GPG_TTY automatically to gpg when the mailbot has
+    a controlling terminal, trims trailing CR/LF from decrypted password files,
+    and prints the process user, HOME, and GPG_TTY in gpg-agent diagnostics. If
+    gpg still reports an agent or pinentry error, test the password file
+    directly as the same user:
+
+        gpg --decrypt ~/.config/ttychatter/mailbot/imap-password.gpg
+
+    For cron, rc, systemd, or other unattended launches, gpg-agent must already
+    have the passphrase cached, or the deployment must use plaintext
+    IMAP_PASSWORD/SMTP_PASSWORD lines protected by a mode-0600 config file.
+    SEND_METHOD=sendmail avoids SMTP password decryption.
+
 FILES
     ~/.config/ttychatter/mailbot/config
     ~/.config/ttychatter/mailbot/imap-password.gpg
@@ -389,4 +454,4 @@ EXIT STATUS
     sendmail, or ttychatter subprocess failure.
 
 VERSION
-    ttychatter.mailbot version 0.3.0
+    ttychatter.mailbot version 0.3.1

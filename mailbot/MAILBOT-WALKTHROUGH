@@ -1,7 +1,7 @@
 ttychatter.mailbot walkthrough
 ==============================
 
-This walkthrough assumes the enhanced 0.3.0 mailbot is installed as
+This walkthrough assumes the enhanced 0.3.1 mailbot is installed as
 /home/r94/bin/ttychatter.mailbot and ttychatter.python is installed as
 /home/r94/bin/ttychatter.python.
 
@@ -83,11 +83,39 @@ Notes:
 --------------------------
 
     export GPG_TTY=$(tty)
+    gpgconf --launch gpg-agent
+    gpg-connect-agent updatestartuptty /bye
     /home/r94/bin/ttychatter.mailbot --set-imap-password --gpg
 
 For SMTP sending, also run:
 
     /home/r94/bin/ttychatter.mailbot --set-smtp-password --gpg
+
+If --once later fails with:
+
+    gpg: problem with the agent: Permission denied
+    gpg: decryption failed: Bad session key
+
+first test the password file directly as the same user:
+
+    export GPG_TTY=$(tty)
+    gpgconf --launch gpg-agent
+    gpg-connect-agent updatestartuptty /bye
+    gpg --decrypt /home/r94/.config/ttychatter/mailbot/imap-password.gpg >/dev/null
+
+If the agent has cached a bad passphrase, clear it and retry:
+
+    gpgconf --kill gpg-agent
+
+Do not diagnose this by switching to root unless the mailbot service is
+actually configured to run as root. Root changes HOME, GNUPGHOME, and the
+gpg-agent socket. If a root test changes the error to:
+
+    IMAP error: LOGIN command error: BAD
+
+confirm which config is being read with --config and --doctor. A BAD login
+command is usually an empty IMAP_USER, a password containing CR/LF, or a
+different user/HOME than the configured mailbot account.
 
 5. Check diagnostics
 --------------------
@@ -325,6 +353,10 @@ Common causes:
     - Subject does not contain tc:{...}.
     - From address is not in ALLOWED_FROM.
     - Message-ID was already processed.
+    - The command is being run as a different Unix user than the configured
+      mailbot account. Check HOME and CONFIG_FILE in --doctor output.
+    - IMAP_PASSWORD_GPG_FILE cannot be decrypted by the mailbot user. Test with
+      gpg --decrypt as that same user.
     - TTYCHATTER_COMMAND points to the wrong path.
     - SESSION_DIR or ATTACHMENT_DIR is not writable.
     - models-cache.json is larger than MAX_OUTGOING_ATTACHMENT_BYTES.

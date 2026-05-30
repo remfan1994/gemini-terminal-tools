@@ -1,4 +1,4 @@
-ttychatter.mailbot 0.3.0
+ttychatter.mailbot 0.3.1
 =========================
 
 ttychatter.mailbot is a conservative IMAP/sendmail or IMAP/SMTP transport
@@ -176,6 +176,49 @@ Important config keys
     MAX_COMMAND_OUTPUT_BYTES=200000
     MAX_OUTGOING_ATTACHMENT_BYTES=8388608
 
+
+GPG password troubleshooting
+----------------------------
+
+When IMAP_PASSWORD is unset and IMAP_PASSWORD_GPG_FILE exists, --once must
+decrypt that file before it can connect to IMAP. A failure such as:
+
+    gpg: problem with the agent: Permission denied
+    gpg: decryption failed: Bad session key
+
+means gpg-agent or pinentry could not unlock the configured password file, or
+the wrong passphrase is cached. Test the same decrypt as the mailbot user:
+
+    export GPG_TTY=$(tty)
+    gpgconf --launch gpg-agent
+    gpg-connect-agent updatestartuptty /bye
+    gpg --decrypt ~/.config/ttychatter/mailbot/imap-password.gpg >/dev/null
+
+If a bad passphrase is cached, run:
+
+    gpgconf --kill gpg-agent
+
+Also check ownership and permissions for ~/.gnupg and the configured .gpg
+password file. Do not diagnose this by switching to root unless the service is
+actually configured to run as root; root changes HOME, GNUPGHOME, and the
+gpg-agent socket. For unattended daemon runs, gpg-agent must already have the
+passphrase cached; otherwise use a protected plaintext IMAP_PASSWORD line, a
+TTYCHATTER_IMAP_PASSWORD environment override, or another local secret manager.
+
+If root or another user changes the error to:
+
+    IMAP error: LOGIN command error: BAD
+
+first confirm that the intended config is being read:
+
+    ttychatter.mailbot --config
+    ttychatter.mailbot --doctor
+
+A BAD login command usually means an empty IMAP_USER, a password containing a
+carriage return or newline, or a different user/HOME than the configured
+mailbot account. Version 0.3.1 rejects those local login-value problems before
+sending LOGIN.
+
 Security
 --------
 
@@ -228,6 +271,12 @@ or set the environment override:
 
 Version notes
 -------------
+
+0.3.1
+    Improves GPG password-file diagnostics, sets GPG_TTY automatically when a
+    controlling terminal is available, documents gpg-agent/pinentry fixes, and
+    adds local IMAP login-value validation for empty user/password and CR/LF
+    syntax traps.
 
 0.3.0
     Adds tc:{MAILBOT:...} email commands, remote model-cache refresh with cache

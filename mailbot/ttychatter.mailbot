@@ -49,7 +49,7 @@ from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
 PROGRAM = "ttychatter.mailbot"
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 
 DEFAULT_CONFIG_DIR = Path.home() / ".config" / "ttychatter" / "mailbot"
 DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config"
@@ -302,16 +302,76 @@ def gpg_available() -> bool:
     return which("gpg") is not None
 
 
+def gpg_subprocess_environment() -> dict:
+    """Return an environment suitable for invoking gpg from this process.
+
+    gpg-agent/pinentry frequently needs GPG_TTY in order to ask for a
+    passphrase.  Interactive shells often export it, but a mailbot test run
+    such as `ttychatter.mailbot --once` should not depend on shell startup
+    files doing that correctly.  If this process has a controlling tty, pass
+    that location to gpg.  Daemon/service runs without a tty still need an
+    already-unlocked agent, plaintext config secrets, sendmail delivery, or a
+    deployment-specific secret manager.
+    """
+    env = os.environ.copy()
+    if env.get("GPG_TTY"):
+        return env
+    for stream in (sys.stdin, sys.stderr, sys.stdout):
+        try:
+            if stream.isatty():
+                env["GPG_TTY"] = os.ttyname(stream.fileno())
+                break
+        except Exception:
+            continue
+    return env
+
+
+def gpg_failure(action: str, path: Path, stderr: str) -> RuntimeError:
+    detail = (stderr or "").strip()
+    lines = [f"gpg failed {action} {path}"]
+    if detail:
+        lines.append(detail)
+    lower = detail.lower()
+    if (
+        "problem with the agent" in lower
+        or "bad session key" in lower
+        or "no pinentry" in lower
+        or "inappropriate ioctl" in lower
+        or "permission denied" in lower
+    ):
+        lines.extend([
+            "",
+            "This usually means gpg-agent or pinentry could not unlock the password file.",
+            f"Process user: {getpass.getuser()}",
+            f"HOME: {Path.home()}",
+            f"GPG_TTY: {os.environ.get('GPG_TTY', '') or '(unset)'}",
+            "Try the same decrypt as the mailbot user:",
+            f"  gpg --decrypt {shlex.quote(str(path))}",
+            "For an interactive shell, also try:",
+            "  export GPG_TTY=$(tty)",
+            "  gpgconf --kill gpg-agent",
+            f"  gpg --decrypt {shlex.quote(str(path))}",
+            "Check that ~/.gnupg is owned by the mailbot user and is not group/world writable.",
+            "Do not test this by switching to root unless the daemon is actually intended to run as root; root changes HOME, GNUPGHOME, and the gpg-agent socket.",
+            "For unattended daemon runs, the agent must already be unlocked/cached, or use a plaintext password line protected by config-file permissions, or use SEND_METHOD=sendmail to avoid SMTP password decryption.",
+        ])
+    return RuntimeError("\n".join(lines))
+
+
 def decrypt_gpg_file(path: Path) -> str:
     proc = subprocess.run(
         ["gpg", "--quiet", "--decrypt", str(path)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=gpg_subprocess_environment(),
     )
     if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.strip() or f"gpg failed decrypting {path}")
-    return proc.stdout.strip("\n")
+        raise gpg_failure("decrypting", path, proc.stderr)
+    # Trim transport line endings added by echo(1) or edited secret files while
+    # preserving other characters in the password. A literal CR/LF cannot be
+    # used in an IMAP LOGIN atom and commonly produces a server-side BAD reply.
+    return proc.stdout.rstrip("\r\n")
 
 
 def encrypt_secret_to_gpg(path: Path, secret: str) -> None:
@@ -322,9 +382,10 @@ def encrypt_secret_to_gpg(path: Path, secret: str) -> None:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=gpg_subprocess_environment(),
     )
     if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.strip() or f"gpg failed encrypting {path}")
+        raise gpg_failure("encrypting", path, proc.stderr)
     try:
         os.chmod(path, 0o600)
     except OSError:
@@ -333,10 +394,46 @@ def encrypt_secret_to_gpg(path: Path, secret: str) -> None:
 
 def load_password(plain: str, gpg_path: Path) -> str:
     if plain:
-        return plain
+        return plain.rstrip("\r\n")
     if gpg_path.exists():
         return decrypt_gpg_file(gpg_path)
     return ""
+
+
+def password_source_description(plain: str, gpg_path: Path) -> str:
+    if plain:
+        return "plaintext config/environment"
+    if gpg_path.exists():
+        return f"gpg file {gpg_path}"
+    return f"missing; set plaintext password or create {gpg_path}"
+
+
+def reject_imap_login_value(label: str, value: str) -> None:
+    if not value:
+        raise RuntimeError(f"{label} is unset; check CONFIG_FILE with --config")
+    if "\r" in value or "\n" in value:
+        raise RuntimeError(
+            f"{label} contains a carriage return or newline. Re-enter it with "
+            f"{PROGRAM} --set-imap-password --gpg or edit the config so the value is one line."
+        )
+
+
+def imap_login_failure(exc: Exception, cfg: Config) -> RuntimeError:
+    text = str(exc)
+    lines = [
+        f"IMAP login failed for {cfg.imap_user!r} at {cfg.imap_host}:{cfg.imap_port}: {text}",
+        f"CONFIG_FILE={cfg.config_file}",
+        f"IMAP_PASSWORD_SOURCE={password_source_description(cfg.imap_password, cfg.imap_password_gpg_file)}",
+    ]
+    if "BAD" in text.upper():
+        lines.extend([
+            "The server rejected the LOGIN command syntax, not merely the credentials.",
+            "Common causes are an empty IMAP_USER, a password containing CR/LF, or running under a different user/HOME than the configured mailbot account.",
+            "Do not test by switching to root unless the service is configured to run as root; use --config-file if you must inspect a specific config.",
+        ])
+    else:
+        lines.append("Check the username, password, SSL/STARTTLS/port settings, and provider IMAP-login policy.")
+    return RuntimeError("\n".join(lines))
 
 
 # ---------------------------------------------------------------------------
@@ -581,12 +678,21 @@ def apply_config_attachment(cfg: Config, text: str) -> Path:
 
 
 def imap_connect(cfg: Config) -> imaplib.IMAP4:
+    reject_imap_login_value("IMAP_USER", cfg.imap_user)
     password = load_password(cfg.imap_password, cfg.imap_password_gpg_file)
+    reject_imap_login_value("IMAP password", password)
     if cfg.imap_ssl:
         conn: imaplib.IMAP4 = imaplib.IMAP4_SSL(cfg.imap_host, cfg.imap_port)
     else:
         conn = imaplib.IMAP4(cfg.imap_host, cfg.imap_port)
-    conn.login(cfg.imap_user, password)
+    try:
+        conn.login(cfg.imap_user, password)
+    except imaplib.IMAP4.error as exc:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+        raise imap_login_failure(exc, cfg)
     conn.select(cfg.imap_mailbox)
     return conn
 
@@ -1220,6 +1326,25 @@ def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
     MAIL_FROM address where practical. Commands are not shell-expanded, but email is
     not a good channel for secrets; use the local --set-imap-password and
     --set-smtp-password commands for passwords.
+    .SH GPG PASSWORD FILES
+    With --gpg, the mailbot stores IMAP and SMTP passwords in external gpg files and
+    decrypts them with gpg --quiet --decrypt at runtime.  Version 0.3.1 passes GPG_TTY
+    automatically to gpg when the mailbot has a controlling terminal, trims trailing
+    CR/LF from decrypted password files, and prints process user, HOME, and GPG_TTY
+    in gpg-agent diagnostics. For interactive tests, also set export GPG_TTY=$(tty)
+    and test the password file directly with gpg --decrypt as the mailbot user.
+    Do not diagnose this by switching to root unless the service is actually
+    configured to run as root; root changes HOME, GNUPGHOME, and the gpg-agent socket
+    and may load a different config. Unattended daemon, cron, rc, or systemd launches
+    need gpg-agent to have the passphrase already cached, or should use a mode-0600
+    plaintext password line or SEND_METHOD=sendmail where appropriate.
+    .SH IMAP LOGIN DIAGNOSTICS
+    Version 0.3.1 rejects empty IMAP_USER, empty IMAP password, and CR/LF in IMAP
+    login values before sending LOGIN. A server reply such as LOGIN command error:
+    BAD usually means the command syntax was invalid, commonly due to an empty user,
+    a password with carriage return/newline, or running with a different user/HOME
+    than the configured mailbot account. Use --config and --doctor to confirm the
+    loaded config and process user.
     .SH MANPAGE LOOKUP
     The email manpage command and the local --manpage command use the first readable
     manpage found.  The lookup order is TTYCHATTER_MAILBOT_MANPAGE_FILE when
@@ -1697,9 +1822,12 @@ def run_daemon(cfg: Config, dry_run: bool = False) -> int:
 
 def doctor(cfg: Config) -> int:
     checks: List[Tuple[str, bool, str]] = []
+    checks.append(("process user", True, f"{getpass.getuser()} HOME={Path.home()}"))
     checks.append(("config file", cfg.config_file.exists(), str(cfg.config_file)))
     checks.append(("imap host", bool(cfg.imap_host), cfg.imap_host))
     checks.append(("imap user", bool(cfg.imap_user), cfg.imap_user or "missing"))
+    imap_password_source_ok = bool(cfg.imap_password or cfg.imap_password_gpg_file.exists())
+    checks.append(("imap password source", imap_password_source_ok, password_source_description(cfg.imap_password, cfg.imap_password_gpg_file)))
     checks.append(("allowed from", bool(cfg.allowed_from), ", ".join(cfg.allowed_from) or "missing"))
     checks.append(("mail from", bool(cfg.mail_from or cfg.smtp_user or cfg.imap_user), cfg.mail_from or cfg.smtp_user or cfg.imap_user or "missing"))
     checks.append(("gpg", gpg_available(), "found" if gpg_available() else "not found"))
@@ -1724,7 +1852,7 @@ def doctor(cfg: Config) -> int:
     rc = 0
     for name, ok, detail in checks:
         print(f"{'OK' if ok else 'FAIL'}\t{name}\t{detail}")
-        if not ok and name in {"imap user", "allowed from", "mail from", "ttychatter command"}:
+        if not ok and name in {"config file", "imap user", "imap password source", "allowed from", "mail from", "ttychatter command"}:
             rc = 1
     return rc
 

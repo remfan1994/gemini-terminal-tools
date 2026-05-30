@@ -1,3 +1,31 @@
+ttychatter.mailbot 0.3.1
+=========================
+
+Bug fixes
+---------
+- Improved GPG password-file failure reporting so --once shows which .gpg file
+  failed and prints practical gpg-agent/pinentry recovery commands instead of
+  only relaying raw gpg stderr.
+- The mailbot now passes GPG_TTY to gpg automatically when the current process
+  has a controlling terminal, making manual --once and --set-*-password --gpg
+  runs less dependent on shell profile setup.
+- --doctor now reports the process user, HOME, and configured password source.
+- Rejects empty IMAP_USER/password values and CR/LF in IMAP login values before
+  sending LOGIN, replacing confusing server-side BAD errors with local errors.
+- Trims trailing CR/LF from decrypted password files while preserving the rest
+  of the password.
+
+Notes
+-----
+- A daemon or cron run without a controlling terminal still needs gpg-agent to
+  have the passphrase cached already, or it needs a deployment-specific secret
+  source such as a protected plaintext password line or environment override.
+- The GPG issue occurs before IMAP login and before any message processing. It
+  is not caused by tc:{MAILBOT:...} command dispatch.
+- Do not diagnose the normal-user GPG error by switching to root unless the
+  service is intended to run as root; root changes HOME, GNUPGHOME, and the
+  gpg-agent socket, and may load a different config.
+
 ttychatter.mailbot 0.3.0
 =========================
 
