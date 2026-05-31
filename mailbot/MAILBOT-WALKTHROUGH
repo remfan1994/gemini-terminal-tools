@@ -3,19 +3,19 @@ ttychatter.mailbot walkthrough
 
 This walkthrough assumes:
 
-    mailbot user:        r94
-    mailbot binary:      /home/r94/bin/ttychatter.mailbot
-    ttychatter binary:   /home/r94/bin/ttychatter.python
-    config file:         /home/r94/.config/ttychatter/mailbot/config
-    manpage:             /home/r94/bin/ttychatter.mailbot.1
-    session directory:   /home/r94/.local/share/ttychatter/openrouter/sessions
-    model cache:         /home/r94/.config/ttychatter/openrouter/models-cache.json
+    mailbot user:        $user
+    mailbot binary:      /home/$user/bin/ttychatter.mailbot
+    ttychatter binary:   /home/$user/bin/ttychatter.python
+    config file:         /home/$user/.config/ttychatter/mailbot/config
+    manpage:             /home/$user/bin/ttychatter.mailbot.1
+    session directory:   /home/$user/.local/share/ttychatter/openrouter/sessions
+    model cache:         /home/$user/.config/ttychatter/openrouter/models-cache.json
 
 Install files
 -------------
 
-    install -m 0755 ttychatter.mailbot /home/r94/bin/ttychatter.mailbot
-    install -m 0644 ttychatter.mailbot.1 /home/r94/bin/ttychatter.mailbot.1
+    install -m 0755 ttychatter.mailbot /home/$user/bin/ttychatter.mailbot
+    install -m 0644 ttychatter.mailbot.1 /home/$user/bin/ttychatter.mailbot.1
 
 For a system manpage install:
 
@@ -25,12 +25,12 @@ For a system manpage install:
 Minimum private config
 ----------------------
 
-Create /home/r94/.config/ttychatter/mailbot/config:
+Create /home/$user/.config/ttychatter/mailbot/config:
 
     IMAP_HOST=localhost
     IMAP_PORT=993
     IMAP_SSL=1
-    IMAP_USER=r94
+    IMAP_USER=$user
     IMAP_MAILBOX=INBOX
 
     SEND_METHOD=sendmail
@@ -49,17 +49,17 @@ Create /home/r94/.config/ttychatter/mailbot/config:
     MAILBOT_SUBJECT_TOKEN=MAILBOT
     BODY_COMMAND_SUBJECTS=MAILBOT,CMD
 
-    TTYCHATTER_COMMAND=/usr/local/bin/python3 /home/r94/bin/ttychatter.python
-    SESSION_DIR=/home/r94/.local/share/ttychatter/openrouter/sessions
-    ATTACHMENT_DIR=/home/r94/.local/share/ttychatter/openrouter/attachments
-    MODEL_CACHE_FILE=/home/r94/.config/ttychatter/openrouter/models-cache.json
+    TTYCHATTER_COMMAND=/usr/local/bin/python3 /home/$user/bin/ttychatter.python
+    SESSION_DIR=/home/$user/.local/share/ttychatter/openrouter/sessions
+    ATTACHMENT_DIR=/home/$user/.local/share/ttychatter/openrouter/attachments
+    MODEL_CACHE_FILE=/home/$user/.config/ttychatter/openrouter/models-cache.json
     MODEL_SEARCH_MAX_MATCHES=100
 
-    MAILBOT_MANPAGE_FILE=/home/r94/bin/ttychatter.mailbot.1
+    MAILBOT_MANPAGE_FILE=/home/$user/bin/ttychatter.mailbot.1
 
 Keep it private:
 
-    chmod 600 /home/r94/.config/ttychatter/mailbot/config
+    chmod 600 /home/$user/.config/ttychatter/mailbot/config
 
 Password source
 ---------------
@@ -70,11 +70,11 @@ Plaintext local password, protected by file mode:
 
 Encrypted password file:
 
-    /home/r94/bin/ttychatter.mailbot --set-imap-password --gpg
+    /home/$user/bin/ttychatter.mailbot --set-imap-password --gpg
 
 Then the config should contain:
 
-    IMAP_PASSWORD_GPG_FILE=/home/r94/.config/ttychatter/mailbot/imap-password.gpg
+    IMAP_PASSWORD_GPG_FILE=/home/$user/.config/ttychatter/mailbot/imap-password.gpg
 
 A cron or daemon process can decrypt that file only if gpg-agent can unlock it
 without an interactive prompt. If not, use a protected plaintext IMAP_PASSWORD
@@ -86,32 +86,32 @@ Initial diagnostics
 
 Run as the mailbot user, not root:
 
-    su -l r94
-    /home/r94/bin/ttychatter.mailbot --config-file /home/r94/.config/ttychatter/mailbot/config --config
-    /home/r94/bin/ttychatter.mailbot --config-file /home/r94/.config/ttychatter/mailbot/config --doctor
-    /home/r94/bin/ttychatter.mailbot --config-file /home/r94/.config/ttychatter/mailbot/config --list-candidates
-    /home/r94/bin/ttychatter.mailbot --config-file /home/r94/.config/ttychatter/mailbot/config --once --dry-run
+    su -l $user
+    /home/$user/bin/ttychatter.mailbot --config-file /home/$user/.config/ttychatter/mailbot/config --config
+    /home/$user/bin/ttychatter.mailbot --config-file /home/$user/.config/ttychatter/mailbot/config --doctor
+    /home/$user/bin/ttychatter.mailbot --config-file /home/$user/.config/ttychatter/mailbot/config --list-candidates
+    /home/$user/bin/ttychatter.mailbot --config-file /home/$user/.config/ttychatter/mailbot/config --once --dry-run
 
 If --config shows an incomplete config, make the path explicit with
 --config-file or set:
 
-    TTYCHATTER_MAILBOT_CONFIG=/home/r94/.config/ttychatter/mailbot/config
+    TTYCHATTER_MAILBOT_CONFIG=/home/$user/.config/ttychatter/mailbot/config
 
 Cron on OpenBSD
 ---------------
 
-Install the crontab for r94, not root:
+Install the crontab for $user, not root:
 
-    crontab -u r94 -e
+    crontab -u $user -e
 
 Example:
 
     SHELL=/bin/sh
-    HOME=/home/r94
-    PATH=/home/r94/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+    HOME=/home/$user
+    PATH=/home/$user/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
     MAILTO=""
 
-    */2 * * * * -s /bin/sh -c 'echo "----- mailbot cron start -----"; /bin/date; /usr/local/bin/python3 /home/r94/bin/ttychatter.mailbot --config-file /home/r94/.config/ttychatter/mailbot/config --once; rc=$?; echo "----- mailbot cron end rc=$rc -----"; exit $rc' >>/home/r94/.local/share/ttychatter/mailbot.log 2>&1
+    */2 * * * * -s /bin/sh -c 'echo "----- mailbot cron start -----"; /bin/date; /usr/local/bin/python3 /home/$user/bin/ttychatter.mailbot --config-file /home/$user/.config/ttychatter/mailbot/config --once; rc=$?; echo "----- mailbot cron end rc=$rc -----"; exit $rc' >>/home/$user/.local/share/ttychatter/mailbot.log 2>&1
 
 Use /usr/local/bin/python3 explicitly if the script shebang is
 #!/usr/bin/env python3 and cron has a sparse PATH.
@@ -226,7 +226,7 @@ Recommended public cleanup:
 
 Recommended public archive behavior:
 
-    PUBLIC_SESSION_INDEX_FILE=/home/r94/.local/state/ttychatter/mailbot/public-sessions.json
+    PUBLIC_SESSION_INDEX_FILE=/home/$user/.local/state/ttychatter/mailbot/public-sessions.json
     PUBLIC_SESSION_ARCHIVE_ON_DELETE=1
     PUBLIC_SESSION_ARCHIVE_USER_TOGGLE=1
     PUBLIC_SESSION_ARCHIVE_FAILURE_POLICY=keep
@@ -272,7 +272,7 @@ Public cleanup and archive
 Cleanup runs at the start of --once and --daemon polling. It can also be run
 locally:
 
-    /home/r94/bin/ttychatter.mailbot --config-file /home/r94/.config/ttychatter/mailbot/config --open-to-public --cleanup-public-sessions --dry-run
+    /home/$user/bin/ttychatter.mailbot --config-file /home/$user/.config/ttychatter/mailbot/config --open-to-public --cleanup-public-sessions --dry-run
 
 The default policy means:
 
@@ -308,8 +308,8 @@ If cron logs contain:
 
 use an absolute Python path in cron and in TTYCHATTER_COMMAND:
 
-    /usr/local/bin/python3 /home/r94/bin/ttychatter.mailbot ...
-    TTYCHATTER_COMMAND=/usr/local/bin/python3 /home/r94/bin/ttychatter.python
+    /usr/local/bin/python3 /home/$user/bin/ttychatter.mailbot ...
+    TTYCHATTER_COMMAND=/usr/local/bin/python3 /home/$user/bin/ttychatter.python
 
 If root sees an empty config, do not debug as root unless the bot is intended to
 run as root. The mailbot reads paths under the process user's HOME unless
