@@ -247,6 +247,21 @@ SEND_METHOD=sendmail
 SENDMAIL_PATH=/usr/sbin/sendmail
 TTYCHATTER_COMMAND=/usr/local/bin/python3 /home/mailbot/bin/ttychatter.python
 
+None of the following keys belong in the config:
+PROCESS_USER
+HOME
+TTYCHATTER_MAILBOT_CONFIG
+XDG_CONFIG_HOME
+CONFIG_EXISTS
+CONFIG_READABLE
+CONFIG_MODE
+CONFIG_RECOGNIZED_KEYS
+CONFIG_IGNORED_LINES
+CONFIG_NOTE
+CONFIG_LOAD_NOTE
+
+They will cause --doctor to WARN
+
 Public user behavior
 --------------------
 
