@@ -235,6 +235,18 @@ Recommended public archive behavior:
 Run public mode from cron by either setting OPEN_TO_PUBLIC=1 in the config or
 adding --open-to-public to the cron command.
 
+You need settings like:
+IMAP_HOST=localhost
+IMAP_PORT=143
+IMAP_SSL=0
+IMAP_USER=mailbot
+IMAP_PASSWORD=your_imap_password
+MAIL_FROM=mailbot@domain.tld
+ALLOWED_FROM=*
+SEND_METHOD=sendmail
+SENDMAIL_PATH=/usr/sbin/sendmail
+TTYCHATTER_COMMAND=/usr/local/bin/python3 /home/mailbot/bin/ttychatter.python
+
 Public user behavior
 --------------------
 
