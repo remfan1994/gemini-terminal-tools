@@ -7,6 +7,7 @@ This walkthrough assumes:
     mailbot binary:      /home/r94/bin/ttychatter.mailbot
     ttychatter binary:   /home/r94/bin/ttychatter.python
     config file:         /home/r94/.config/ttychatter/mailbot/config
+    manpage:             /home/r94/bin/ttychatter.mailbot.1
     session directory:   /home/r94/.local/share/ttychatter/openrouter/sessions
     model cache:         /home/r94/.config/ttychatter/openrouter/models-cache.json
 
@@ -18,10 +19,11 @@ Install files
 
 For a system manpage install:
 
+    doas mkdir -p /usr/local/share/man/man1
     doas install -m 0644 ttychatter.mailbot.1 /usr/local/share/man/man1/ttychatter.mailbot.1
 
-Minimum config
---------------
+Minimum private config
+----------------------
 
 Create /home/r94/.config/ttychatter/mailbot/config:
 
@@ -38,15 +40,20 @@ Create /home/r94/.config/ttychatter/mailbot/config:
     ALLOWED_FROM=you@example.org
 
     SUBJECT_PREFIX=tc
+    SUBJECT_SEPARATOR=:
+    SESSION_OPEN_DELIM={
+    SESSION_CLOSE_DELIM=}
     CONFIG_SUBJECT_TOKEN=CONFIG
     MODELS_SUBJECT_TOKEN=MODELS
     COMMAND_SUBJECT_TOKEN=CMD
     MAILBOT_SUBJECT_TOKEN=MAILBOT
+    BODY_COMMAND_SUBJECTS=MAILBOT,CMD
 
     TTYCHATTER_COMMAND=/usr/local/bin/python3 /home/r94/bin/ttychatter.python
     SESSION_DIR=/home/r94/.local/share/ttychatter/openrouter/sessions
     ATTACHMENT_DIR=/home/r94/.local/share/ttychatter/openrouter/attachments
     MODEL_CACHE_FILE=/home/r94/.config/ttychatter/openrouter/models-cache.json
+    MODEL_SEARCH_MAX_MATCHES=100
 
     MAILBOT_MANPAGE_FILE=/home/r94/bin/ttychatter.mailbot.1
 
@@ -77,123 +84,94 @@ manager appropriate to the host.
 Initial diagnostics
 -------------------
 
-Run as the same user that will run the cron or daemon:
+Run as the mailbot user, not root:
 
     su -l r94
-    /home/r94/bin/ttychatter.mailbot --version
-    /home/r94/bin/ttychatter.mailbot --config
-    /home/r94/bin/ttychatter.mailbot --doctor
-    /home/r94/bin/ttychatter.mailbot --list-candidates
-    /home/r94/bin/ttychatter.mailbot --once --dry-run
+    /home/r94/bin/ttychatter.mailbot --config-file /home/r94/.config/ttychatter/mailbot/config --config
+    /home/r94/bin/ttychatter.mailbot --config-file /home/r94/.config/ttychatter/mailbot/config --doctor
+    /home/r94/bin/ttychatter.mailbot --config-file /home/r94/.config/ttychatter/mailbot/config --list-candidates
+    /home/r94/bin/ttychatter.mailbot --config-file /home/r94/.config/ttychatter/mailbot/config --once --dry-run
 
-If --config shows the wrong CONFIG_FILE, fix the command line or environment
-before debugging IMAP, GPG, or mail syntax.
+If --config shows an incomplete config, make the path explicit with
+--config-file or set:
 
-0.4 mail syntax
+    TTYCHATTER_MAILBOT_CONFIG=/home/r94/.config/ttychatter/mailbot/config
+
+Cron on OpenBSD
 ---------------
 
-Control subjects are bare:
+Install the crontab for r94, not root:
 
-    tc:CONFIG
-    tc:MODELS
-    tc:CMD
-    tc:help
-    tc:sessions
-    tc:manpage
-    tc:search TEXT
+    crontab -u r94 -e
 
-Chat sessions are braced:
+Example:
 
-    tc:{session-name}
-    tc:{new}
+    SHELL=/bin/sh
+    HOME=/home/r94
+    PATH=/home/r94/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+    MAILTO=""
 
-tc:{new} passes no session argument to ttychatter.python. ttychatter.python
-therefore creates its regular default name, such as:
+    */2 * * * * -s /bin/sh -c 'echo "----- mailbot cron start -----"; /bin/date; /usr/local/bin/python3 /home/r94/bin/ttychatter.mailbot --config-file /home/r94/.config/ttychatter/mailbot/config --once; rc=$?; echo "----- mailbot cron end rc=$rc -----"; exit $rc' >>/home/r94/.local/share/ttychatter/mailbot.log 2>&1
 
-    session-2026-05-30-01-02-03
+Use /usr/local/bin/python3 explicitly if the script shebang is
+#!/usr/bin/env python3 and cron has a sparse PATH.
 
-Legacy subjects still accepted
-------------------------------
+Private-mode mail examples
+--------------------------
 
-The mailbot still accepts these older control subjects:
+Chat with a named session:
 
-    tc:{CONFIG}
-    tc:{MAILBOT}
-    tc:{MAILBOT:command args}
+    Subject: tc:{worklog}
 
-They are compatibility aliases. Use the bare 0.4 subjects for new mail.
+    Summarize where we left off.
 
-Send a test chat
-----------------
-
-From an allowed sender, send:
-
-    Subject: tc:{mailbot-test}
-
-    Say one sentence confirming this mailbot test.
-
-Then run:
-
-    /home/r94/bin/ttychatter.mailbot --once
-
-The reply should include:
-
-    ttychatter.mailbot success
-    session: mailbot-test
-
-Start a new unnamed chat
-------------------------
-
-Send:
+Start a new unnamed chat using ttychatter.python's own timestamped name:
 
     Subject: tc:{new}
 
-    Start a fresh session and summarize what this mail is testing.
+    Draft a short note about the build.
 
-The mailbot passes no session name to ttychatter.python. The reply should show
-the session name detected from ttychatter's loopback stderr when available.
+List sessions:
 
-Request config by email
------------------------
+    Subject: tc:sessions
 
-Send:
+Search sessions:
 
-    Subject: tc:CONFIG
+    Subject: tc:search cron
 
-With no config attachment, the reply attaches:
+Delete a session by exact sanitized name:
 
-    ttychatter-mailbot-config.txt
+    Subject: tc:delete{old-session}
 
-Plaintext IMAP_PASSWORD and SMTP_PASSWORD values are redacted.
+Use the body-command envelope:
 
-To update config by email, edit that attachment and send it back with the same
-subject:
+    Subject: tc:CMD
 
-    Subject: tc:CONFIG
+    model-search claude
 
-The mailbot writes a timestamped backup before replacing the config. Dry-run
-never writes the config.
+Use the MAILBOT body-command subject:
 
-Retrieve cached model list by email
------------------------------------
+    Subject: MAILBOT
 
-Send:
+    sessions
+
+Use MAILBOT as an AI prompt instead of a command:
+
+    Subject: MAILBOT
+
+    Explain the attached config. Do not modify anything.
+
+Because the first nonempty body line is not a known mailbot command, that body
+is treated as a chat prompt.
+
+Model cache commands
+--------------------
+
+Send the existing cache only, without refreshing:
 
     Subject: tc:MODELS
 
-The mailbot attaches the existing MODEL_CACHE_FILE as:
-
-    models-cache.json
-
-This is read-only. It does not run ttychatter.python --update-models and does
-not contact OpenRouter. If the cache is missing or stale, refresh it explicitly:
-
-    Subject: tc:update-models
-
-Search cached models by email
------------------------------
-
-Search the already-downloaded model cache without contacting OpenRouter:
+Search the existing cache only:
 
     Subject: tc:MODELS claude
 
@@ -201,217 +179,138 @@ or:
 
     Subject: tc:model-search claude
 
-or:
-
-    Subject: tc:search-models
-
-    claude
-
-Refresh model cache by email
-----------------------------
-
-Send:
+Refresh explicitly:
 
     Subject: tc:update-models
 
-The mailbot runs:
+Do not use tc:MODELS when you mean update-models. The two operations are now
+separate on purpose.
 
-    ttychatter.python --update-models
-
-Then it attaches the resulting cache as:
-
-    models-cache.json
-
-If ttychatter output reports:
-
-    updated model cache: /path/to/models-cache.json
-
-the mailbot uses that path. Otherwise it falls back to MODEL_CACHE_FILE.
-
-Delete a session by email
--------------------------
-
-Delete one session log from SESSION_DIR:
-
-    Subject: tc:delete{old-session}
-
-or:
-
-    Subject: tc:rm{old-session}
-
-The long command form is also accepted:
-
-    Subject: tc:delete-session old-session
-
-Dry-run reports what would be deleted without removing the file. The mailbot
-resolves the name as a sanitized .log file under SESSION_DIR and refuses paths
-outside that directory.
-
-List models with ttychatter formatting
---------------------------------------
-
-Use model-list, list-models, models-list, show-models, or models with flags for a ttychatter --models query. This is separate from tc:MODELS; ttychatter.python --models may use the cache or may refresh it if ttychatter's own cache-display path decides the cache is missing.
-
-    Subject: tc:model-list --all --sort context
-
-or put the arguments in the body:
-
-    Subject: tc:model-list
-
-    --all --sort context
-
-Router listing is similar:
-
-    Subject: tc:routers --model-type chat --require-tokens
-
-List sessions by email
+Output delivery config
 ----------------------
 
-Send:
+Default output settings:
 
-    Subject: tc:sessions
+    COMMAND_OUTPUT_MODE=auto
+    MODEL_CACHE_OUTPUT=auto
+    MODEL_SEARCH_OUTPUT=body
+    MODEL_LIST_OUTPUT=auto
+    SESSIONS_OUTPUT=body
+    CONFIG_OUTPUT=attachment
+    OUTPUT_INLINE_MAX_BYTES=50000
 
-The reply lists session logs newest first, with modified time, byte count, line
-count, and head/tail previews. Tune output with:
+Set MODEL_CACHE_OUTPUT=body when you want the cache text inline. Set
+MODEL_CACHE_OUTPUT=attachment when you always want models-cache.json attached.
+The auto policy uses the body for short readable results and attachments for
+large or structured results.
 
-    SESSION_LIST_HEAD_LINES=3
-    SESSION_LIST_TAIL_LINES=3
-    SESSION_LIST_MAX_SESSIONS=50
-    SESSION_PREVIEW_LINE_CHARS=220
+Public demo mode
+----------------
 
-Search sessions by email
-------------------------
+For a public demo mailbox, add:
 
-Direct subject:
+    OPEN_TO_PUBLIC=1
+    PUBLIC_SESSION_MODE=per-sender
+    PUBLIC_SESSION_PREFIX=public
+    PUBLIC_ALLOW_NAMED_SESSIONS=0
+    PUBLIC_ALLOWED_COMMANDS=help,manpage,model-cache,model-search,archive-session
+    RE_SESSION_SUBJECTS=public
 
-    Subject: tc:search gpg-agent
+Recommended public cleanup:
 
-Body argument form:
+    PUBLIC_SESSION_CLEANUP=1
+    PUBLIC_SESSION_IDLE_HOURS=72
+    PUBLIC_SESSION_TTL_HOURS=168
+    PUBLIC_SESSION_MAX_COUNT=200
+    PUBLIC_SESSION_MAX_TURNS=12
 
-    Subject: tc:search
+Recommended public archive behavior:
 
-    gpg-agent
+    PUBLIC_SESSION_INDEX_FILE=/home/r94/.local/state/ttychatter/mailbot/public-sessions.json
+    PUBLIC_SESSION_ARCHIVE_ON_DELETE=1
+    PUBLIC_SESSION_ARCHIVE_USER_TOGGLE=1
+    PUBLIC_SESSION_ARCHIVE_FAILURE_POLICY=keep
+    PUBLIC_SESSION_ARCHIVE_MAX_BYTES=1048576
 
-Single-session search:
+Run public mode from cron by either setting OPEN_TO_PUBLIC=1 in the config or
+adding --open-to-public to the cron command.
 
-    Subject: tc:search-session mailbot-test gpg-agent
+Public user behavior
+--------------------
 
-Rename a session by email
--------------------------
+A stranger can send:
 
-Send:
+    Subject: hello
 
-    Subject: tc:rename-session old-name new-name
+    What can this bot do?
 
-Dry-run prints what would happen and does not rename.
+The mailbot treats that as a prompt. The public sender does not need tc:.
+The reply subject contains the real public session name, for example:
 
-Fetch the mailbot manpage by email
-----------------------------------
+    Re: public-85956a993804cda1
 
-Send:
+If the user replies to that subject, the same session resumes.
 
+Public users can use only PUBLIC_ALLOWED_COMMANDS. With the recommended public
+allowlist, they may send:
+
+    Subject: tc:help
     Subject: tc:manpage
+    Subject: tc:model-cache
+    Subject: tc:model-search qwen
+    Subject: tc:archive-session status
+    Subject: tc:archive-session off
+    Subject: tc:archive-session on
 
-Aliases:
+They cannot edit config, update the model cache, rename/delete sessions, or run
+tty-set unless the operator deliberately adds those dangerous commands to
+PUBLIC_ALLOWED_COMMANDS.
 
-    tc:manual
-    tc:get-manpage
-    tc:fetch-manpage
+Public cleanup and archive
+--------------------------
 
-The reply attaches ttychatter.mailbot.1. The mailbot uses the first readable
-external manpage it finds, falling back to its embedded manpage.
+Cleanup runs at the start of --once and --daemon polling. It can also be run
+locally:
 
-Use tc:CMD for body-line commands
----------------------------------
+    /home/r94/bin/ttychatter.mailbot --config-file /home/r94/.config/ttychatter/mailbot/config --open-to-public --cleanup-public-sessions --dry-run
 
-Send:
+The default policy means:
 
-    Subject: tc:CMD
+    idle>72h       delete inactive public logs
+    ttl>168h       delete old public logs even if occasionally active
+    count>200      keep only the newest 200 public logs
+    max_turns=12   trim surviving logs to the last 12 user/assistant cycles
 
-    sessions
+If PUBLIC_SESSION_ARCHIVE_ON_DELETE=1, the bot emails the log to the recorded
+public sender before deleting it. With PUBLIC_SESSION_ARCHIVE_FAILURE_POLICY=keep,
+a failed archive send keeps the local log. With delete, cleanup deletes anyway.
 
-or:
+Config editing by email
+-----------------------
 
-    Subject: tc:CMD
+Request current config:
 
-    search mailbot-test
+    Subject: tc:CONFIG
 
-This is useful when a command is easier to write in the body than in the
-subject.
+The bot replies with an attached config file. Edit that attachment and send it
+back with the same subject. Plaintext IMAP_PASSWORD and SMTP_PASSWORD values are
+redacted from exported config. Password file paths are preserved.
 
-Other safe commands
--------------------
+In public mode, tc:CONFIG remains privileged. Non-ALLOWED_FROM public senders
+receive a refusal.
 
-Examples:
+Troubleshooting
+---------------
 
-    tc:ttydoctor
-    tc:ttyconfig
-    tc:credits
-    tc:favorites
-    tc:favorite-model openai/gpt-5
-    tc:unfavorite-model openai/gpt-5
-    tc:test-model openai/gpt-5
-    tc:show-memory mailbot-test
-    tc:clear-memory mailbot-test
-    tc:tty-set DEFAULT_MODEL openai/gpt-5
-    tc:tty-unset DEFAULT_MODEL
+If cron logs contain:
 
-tty-set refuses OPENROUTER_API_KEY and API_KEY by email. Set secrets locally.
+    env: python3: No such file or directory
 
-Cron example
-------------
+use an absolute Python path in cron and in TTYCHATTER_COMMAND:
 
-Install the cron job in r94's crontab, not root's, unless root is the intended
-mailbot account.
+    /usr/local/bin/python3 /home/r94/bin/ttychatter.mailbot ...
+    TTYCHATTER_COMMAND=/usr/local/bin/python3 /home/r94/bin/ttychatter.python
 
-    SHELL=/bin/sh
-    HOME=/home/r94
-    PATH=/home/r94/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
-    MAILTO=""
-
-    */2 * * * * -s /usr/local/bin/python3 /home/r94/bin/ttychatter.mailbot --config-file /home/r94/.config/ttychatter/mailbot/config --once >>/home/r94/.local/share/ttychatter/mailbot.log 2>&1
-
-On OpenBSD, -s prevents overlapping runs. Invoking the mailbot through the
-absolute Python path avoids cron PATH failures from #!/usr/bin/env python3.
-
-Check the log:
-
-    tail -f /home/r94/.local/share/ttychatter/mailbot.log
-
-Troubleshooting checklist
--------------------------
-
-1. Wrong user or wrong config:
-
-       ttychatter.mailbot --config
-       ttychatter.mailbot --doctor
-
-   Confirm PROCESS_USER, HOME, and CONFIG_FILE.
-
-2. No candidate messages:
-
-       ttychatter.mailbot --list-candidates
-
-   Look for sender allowlist failures or subject syntax failures.
-
-3. Subject syntax failures:
-
-       control: tc:CONFIG, tc:MODELS, tc:CMD, tc:command args
-                tc:MODELS is read-only cache retrieval; tc:update-models refreshes
-       chat:    tc:{session-name}, tc:{new}
-
-4. GPG failure:
-
-       export GPG_TTY=$(tty)
-       gpgconf --launch gpg-agent
-       gpg-connect-agent updatestartuptty /bye
-       gpg --decrypt ~/.config/ttychatter/mailbot/imap-password.gpg >/dev/null
-
-5. Cron says env cannot find python3:
-
-       use /usr/local/bin/python3 /home/r94/bin/ttychatter.mailbot
-       set TTYCHATTER_COMMAND=/usr/local/bin/python3 /home/r94/bin/ttychatter.python
-
-6. IMAP LOGIN command BAD:
-
-       check IMAP_USER, password source, CR/LF in passwords, and wrong HOME.
+If root sees an empty config, do not debug as root unless the bot is intended to
+run as root. The mailbot reads paths under the process user's HOME unless
+--config-file or TTYCHATTER_MAILBOT_CONFIG says otherwise.

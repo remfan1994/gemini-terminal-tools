@@ -1,0 +1,49 @@
+ttychatter.mailbot 0.5.0 verification
+======================================
+
+Validated locally in the sandbox:
+
+    python3 -m py_compile ttychatter.mailbot
+    ttychatter.mailbot --version
+    ttychatter.mailbot --help
+    ttychatter.mailbot --manpage
+    ttychatter.mailbot --config
+    ttychatter.mailbot --sessions
+
+Behavioral checks performed by importing the final script as a Python module:
+
+    - parsed tc:CONFIG as config
+    - parsed tc:MODELS as model-cache command
+    - parsed tc:MODELS TEXT as cache-only model search
+    - parsed tc:CMD with first body line as command
+    - parsed tc:delete{session} and tc:rm{session} as delete-session
+    - parsed tc:{session} as ordinary chat session
+    - parsed tc:{new} as ttychatter-default new session request
+    - parsed Subject: MAILBOT + known first body line as command
+    - parsed Subject: MAILBOT + non-command body text as chat prompt
+    - parsed Re: public-session-name as public resume request
+    - searched a fake models-cache.json without refreshing
+    - recorded a public session owner in PUBLIC_SESSION_INDEX_FILE
+    - produced public cleanup dry-run output that emails archive before deletion
+    - applied archive-opt-out and verified cleanup no longer attempted archive
+    - produced transcript-trim dry-run output for a long public log
+    - verified generated ttychatter.mailbot.1 matches ttychatter.mailbot --manpage
+    - verified script and docs are ASCII plaintext
+
+Not live-tested in this environment:
+
+    - Dovecot IMAP polling
+    - smtpd/sendmail delivery
+    - SMTP delivery
+    - GPG agent unlock
+    - real ttychatter.python chat execution
+    - real OpenRouter model-cache refresh
+
+Operational notes:
+
+    - Existing private-mode 0.4.1 syntax remains accepted.
+    - Public mode is inactive unless --open-to-public or OPEN_TO_PUBLIC=1 is used.
+    - PUBLIC_SESSION_ARCHIVE_FAILURE_POLICY defaults to keep, so an archive send
+      failure prevents local deletion of that public log.
+    - Use --cleanup-public-sessions --dry-run before enabling unattended public
+      cleanup on an existing deployment.

@@ -29,6 +29,7 @@ import email
 import email.policy
 import getpass
 import gzip
+import hashlib
 import html
 import json
 import imaplib
@@ -50,7 +51,7 @@ from pathlib import Path
 from typing import Any, Iterable, List, Optional, Tuple
 
 PROGRAM = "ttychatter.mailbot"
-VERSION = "0.4.1"
+VERSION = "0.5.0"
 
 DEFAULT_CONFIG_DIR = Path.home() / ".config" / "ttychatter" / "mailbot"
 DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config"
@@ -92,6 +93,7 @@ class Config:
     models_subject_token: str = "MODELS"
     command_subject_token: str = "CMD"
     mailbot_subject_token: str = "MAILBOT"
+    body_command_subjects: List[str] = field(default_factory=lambda: ["MAILBOT", "CMD"])
     mailbot_manpage_file: Optional[Path] = None
     config_update_requires_attachment: bool = True
     sendmail_path: str = "/usr/sbin/sendmail"
@@ -109,6 +111,32 @@ class Config:
     allowed_from: List[str] = field(default_factory=list)
 
     subject_prefix: str = "tc"
+    subject_separator: str = ":"
+    session_open_delim: str = "{"
+    session_close_delim: str = "}"
+    allow_commands_in_subject: bool = True
+    allow_body_command_subjects: bool = True
+    allow_bare_control_subjects: bool = True
+    allow_legacy_braced_control: bool = True
+    re_session_subjects: str = "public"  # no, public, or always
+
+    open_to_public: bool = False
+    public_session_mode: str = "per-sender"  # per-sender, per-message, or shared
+    public_session_prefix: str = "public"
+    public_shared_session: str = "public-demo"
+    public_allow_named_sessions: bool = False
+    public_allowed_commands: List[str] = field(default_factory=lambda: ["help", "manpage", "model-cache", "model-search", "archive-session"])
+    public_session_cleanup: bool = True
+    public_session_ttl_hours: int = 168
+    public_session_idle_hours: int = 72
+    public_session_max_count: int = 200
+    public_session_max_turns: int = 12
+    public_session_index_file: Path = DEFAULT_STATE_DIR / "public-sessions.json"
+    public_session_archive_on_delete: bool = True
+    public_session_archive_user_toggle: bool = True
+    public_session_archive_failure_policy: str = "keep"  # keep or delete
+    public_session_archive_max_bytes: int = 1048576
+
     poll_interval: int = 60
     max_messages_per_run: int = 10
     max_body_bytes: int = 50000
@@ -131,6 +159,13 @@ class Config:
     session_preview_line_chars: int = 220
     session_search_max_matches: int = 100
     model_search_max_matches: int = 100
+    command_output_mode: str = "auto"
+    model_cache_output: str = "auto"
+    model_search_output: str = "body"
+    model_list_output: str = "auto"
+    sessions_output: str = "body"
+    config_output: str = "attachment"
+    output_inline_max_bytes: int = 50000
     max_command_output_bytes: int = 200000
     max_outgoing_attachment_bytes: int = 8388608
 
@@ -148,10 +183,12 @@ class ReplyAttachment:
 
 @dataclass
 class SubjectRequest:
-    kind: str  # session, config, or command
+    kind: str  # session, config, command, or public-denied
     value: str
     raw: str = ""
     legacy: bool = False
+    body_override: Optional[str] = None
+    public_resume: bool = False
 
 
 def expand_path(value: str) -> Path:
@@ -169,12 +206,25 @@ KNOWN_CONFIG_KEYS = {
     "TTYCHATTER_EXTRA_ARGS", "SESSION_DIR", "ATTACHMENT_DIR", "WORK_DIR",
     "PROCESSED_DB", "REPLY_SUBJECT_PREFIX", "INCLUDE_TTYCHATTER_STDERR",
     "CONFIG_SUBJECT_TOKEN", "MODELS_SUBJECT_TOKEN", "COMMAND_SUBJECT_TOKEN",
-    "MAILBOT_SUBJECT_TOKEN", "MAILBOT_MANPAGE_FILE",
+    "MAILBOT_SUBJECT_TOKEN", "BODY_COMMAND_SUBJECTS", "MAILBOT_MANPAGE_FILE",
     "CONFIG_UPDATE_REQUIRES_ATTACHMENT", "MODEL_CACHE_FILE",
+    "SUBJECT_SEPARATOR", "SESSION_OPEN_DELIM", "SESSION_CLOSE_DELIM",
+    "ALLOW_COMMANDS_IN_SUBJECT", "ALLOW_BODY_COMMAND_SUBJECTS",
+    "ALLOW_BARE_CONTROL_SUBJECTS", "ALLOW_LEGACY_BRACED_CONTROL",
+    "RE_SESSION_SUBJECTS", "OPEN_TO_PUBLIC", "PUBLIC_SESSION_MODE",
+    "PUBLIC_SESSION_PREFIX", "PUBLIC_SHARED_SESSION",
+    "PUBLIC_ALLOW_NAMED_SESSIONS", "PUBLIC_ALLOWED_COMMANDS",
+    "PUBLIC_SESSION_CLEANUP", "PUBLIC_SESSION_TTL_HOURS",
+    "PUBLIC_SESSION_IDLE_HOURS", "PUBLIC_SESSION_MAX_COUNT",
+    "PUBLIC_SESSION_MAX_TURNS", "PUBLIC_SESSION_INDEX_FILE",
+    "PUBLIC_SESSION_ARCHIVE_ON_DELETE", "PUBLIC_SESSION_ARCHIVE_USER_TOGGLE",
+    "PUBLIC_SESSION_ARCHIVE_FAILURE_POLICY", "PUBLIC_SESSION_ARCHIVE_MAX_BYTES",
     "TTYCHATTER_CONTROL_TIMEOUT", "SESSION_LIST_HEAD_LINES",
     "SESSION_LIST_TAIL_LINES", "SESSION_LIST_MAX_SESSIONS",
     "SESSION_PREVIEW_LINE_CHARS", "SESSION_SEARCH_MAX_MATCHES",
-    "MODEL_SEARCH_MAX_MATCHES", "MAX_COMMAND_OUTPUT_BYTES",
+    "MODEL_SEARCH_MAX_MATCHES", "COMMAND_OUTPUT_MODE", "MODEL_CACHE_OUTPUT",
+    "MODEL_SEARCH_OUTPUT", "MODEL_LIST_OUTPUT", "SESSIONS_OUTPUT",
+    "CONFIG_OUTPUT", "OUTPUT_INLINE_MAX_BYTES", "MAX_COMMAND_OUTPUT_BYTES",
     "MAX_OUTGOING_ATTACHMENT_BYTES",
 }
 
@@ -301,6 +351,27 @@ def split_addresses(value: str) -> List[str]:
     return out
 
 
+
+def split_config_words(value: str) -> List[str]:
+    """Split comma, semicolon, or whitespace separated config words."""
+    return [item.strip() for item in re.split(r"[;,\s]+", value.strip()) if item.strip()]
+
+
+def normalize_keyword(value: str) -> str:
+    return (value or "").strip().lower().replace("_", "-")
+
+
+def normalize_output_mode(value: str, default: str = "auto") -> str:
+    value = normalize_keyword(value)
+    if value in {"body", "inline", "text"}:
+        return "body"
+    if value in {"attachment", "attach", "file"}:
+        return "attachment"
+    if value in {"auto", "default", ""}:
+        return default
+    return default
+
+
 def set_config_value(config_file: Path, key: str, value: str) -> None:
     config_file.parent.mkdir(parents=True, exist_ok=True)
     lines: List[str] = []
@@ -380,6 +451,32 @@ def load_config(path: Path = DEFAULT_CONFIG_FILE) -> Config:
         elif key == "ALLOWED_FROM": cfg.allowed_from = split_addresses(value)
 
         elif key == "SUBJECT_PREFIX": cfg.subject_prefix = value
+        elif key == "SUBJECT_SEPARATOR": cfg.subject_separator = value
+        elif key == "SESSION_OPEN_DELIM": cfg.session_open_delim = value
+        elif key == "SESSION_CLOSE_DELIM": cfg.session_close_delim = value
+        elif key == "ALLOW_COMMANDS_IN_SUBJECT": cfg.allow_commands_in_subject = parse_bool(value, cfg.allow_commands_in_subject)
+        elif key == "ALLOW_BODY_COMMAND_SUBJECTS": cfg.allow_body_command_subjects = parse_bool(value, cfg.allow_body_command_subjects)
+        elif key == "ALLOW_BARE_CONTROL_SUBJECTS": cfg.allow_bare_control_subjects = parse_bool(value, cfg.allow_bare_control_subjects)
+        elif key == "ALLOW_LEGACY_BRACED_CONTROL": cfg.allow_legacy_braced_control = parse_bool(value, cfg.allow_legacy_braced_control)
+        elif key == "RE_SESSION_SUBJECTS": cfg.re_session_subjects = normalize_keyword(value)
+
+        elif key == "OPEN_TO_PUBLIC": cfg.open_to_public = parse_bool(value, cfg.open_to_public)
+        elif key == "PUBLIC_SESSION_MODE": cfg.public_session_mode = normalize_keyword(value)
+        elif key == "PUBLIC_SESSION_PREFIX": cfg.public_session_prefix = sanitize_session_name(value)
+        elif key == "PUBLIC_SHARED_SESSION": cfg.public_shared_session = sanitize_session_name(value)
+        elif key == "PUBLIC_ALLOW_NAMED_SESSIONS": cfg.public_allow_named_sessions = parse_bool(value, cfg.public_allow_named_sessions)
+        elif key == "PUBLIC_ALLOWED_COMMANDS": cfg.public_allowed_commands = [normalize_keyword(x) for x in split_config_words(value)]
+        elif key == "PUBLIC_SESSION_CLEANUP": cfg.public_session_cleanup = parse_bool(value, cfg.public_session_cleanup)
+        elif key == "PUBLIC_SESSION_TTL_HOURS": cfg.public_session_ttl_hours = max(0, parse_int(value, cfg.public_session_ttl_hours))
+        elif key == "PUBLIC_SESSION_IDLE_HOURS": cfg.public_session_idle_hours = max(0, parse_int(value, cfg.public_session_idle_hours))
+        elif key == "PUBLIC_SESSION_MAX_COUNT": cfg.public_session_max_count = max(0, parse_int(value, cfg.public_session_max_count))
+        elif key == "PUBLIC_SESSION_MAX_TURNS": cfg.public_session_max_turns = max(0, parse_int(value, cfg.public_session_max_turns))
+        elif key == "PUBLIC_SESSION_INDEX_FILE": cfg.public_session_index_file = expand_path(value)
+        elif key == "PUBLIC_SESSION_ARCHIVE_ON_DELETE": cfg.public_session_archive_on_delete = parse_bool(value, cfg.public_session_archive_on_delete)
+        elif key == "PUBLIC_SESSION_ARCHIVE_USER_TOGGLE": cfg.public_session_archive_user_toggle = parse_bool(value, cfg.public_session_archive_user_toggle)
+        elif key == "PUBLIC_SESSION_ARCHIVE_FAILURE_POLICY": cfg.public_session_archive_failure_policy = normalize_keyword(value)
+        elif key == "PUBLIC_SESSION_ARCHIVE_MAX_BYTES": cfg.public_session_archive_max_bytes = max(1, parse_int(value, cfg.public_session_archive_max_bytes))
+
         elif key == "POLL_INTERVAL": cfg.poll_interval = max(1, parse_int(value, cfg.poll_interval))
         elif key == "MAX_MESSAGES_PER_RUN": cfg.max_messages_per_run = max(1, parse_int(value, cfg.max_messages_per_run))
         elif key == "MAX_BODY_BYTES": cfg.max_body_bytes = max(1, parse_int(value, cfg.max_body_bytes))
@@ -400,6 +497,7 @@ def load_config(path: Path = DEFAULT_CONFIG_FILE) -> Config:
         elif key == "MODELS_SUBJECT_TOKEN": cfg.models_subject_token = value
         elif key == "COMMAND_SUBJECT_TOKEN": cfg.command_subject_token = value
         elif key == "MAILBOT_SUBJECT_TOKEN": cfg.mailbot_subject_token = value
+        elif key == "BODY_COMMAND_SUBJECTS": cfg.body_command_subjects = split_config_words(value)
         elif key == "MAILBOT_MANPAGE_FILE": cfg.mailbot_manpage_file = expand_path(value) if value else None
         elif key == "CONFIG_UPDATE_REQUIRES_ATTACHMENT": cfg.config_update_requires_attachment = parse_bool(value, cfg.config_update_requires_attachment)
         elif key == "MODEL_CACHE_FILE": cfg.model_cache_file = expand_path(value)
@@ -410,6 +508,13 @@ def load_config(path: Path = DEFAULT_CONFIG_FILE) -> Config:
         elif key == "SESSION_PREVIEW_LINE_CHARS": cfg.session_preview_line_chars = max(20, parse_int(value, cfg.session_preview_line_chars))
         elif key == "SESSION_SEARCH_MAX_MATCHES": cfg.session_search_max_matches = max(1, parse_int(value, cfg.session_search_max_matches))
         elif key == "MODEL_SEARCH_MAX_MATCHES": cfg.model_search_max_matches = max(1, parse_int(value, cfg.model_search_max_matches))
+        elif key == "COMMAND_OUTPUT_MODE": cfg.command_output_mode = normalize_output_mode(value, cfg.command_output_mode)
+        elif key == "MODEL_CACHE_OUTPUT": cfg.model_cache_output = normalize_output_mode(value, cfg.model_cache_output)
+        elif key == "MODEL_SEARCH_OUTPUT": cfg.model_search_output = normalize_output_mode(value, cfg.model_search_output)
+        elif key == "MODEL_LIST_OUTPUT": cfg.model_list_output = normalize_output_mode(value, cfg.model_list_output)
+        elif key == "SESSIONS_OUTPUT": cfg.sessions_output = normalize_output_mode(value, cfg.sessions_output)
+        elif key == "CONFIG_OUTPUT": cfg.config_output = normalize_output_mode(value, cfg.config_output)
+        elif key == "OUTPUT_INLINE_MAX_BYTES": cfg.output_inline_max_bytes = max(1000, parse_int(value, cfg.output_inline_max_bytes))
         elif key == "MAX_COMMAND_OUTPUT_BYTES": cfg.max_command_output_bytes = max(1000, parse_int(value, cfg.max_command_output_bytes))
         elif key == "MAX_OUTGOING_ATTACHMENT_BYTES": cfg.max_outgoing_attachment_bytes = max(1, parse_int(value, cfg.max_outgoing_attachment_bytes))
         elif key == "CONFIG_FILE":
@@ -426,6 +531,22 @@ def load_config(path: Path = DEFAULT_CONFIG_FILE) -> Config:
     env_manpage = os.environ.get("TTYCHATTER_MAILBOT_MANPAGE_FILE", "").strip()
     if env_manpage:
         cfg.mailbot_manpage_file = expand_path(env_manpage)
+
+    if cfg.re_session_subjects not in {"no", "public", "always"}:
+        cfg.config_load_notes.append("RE_SESSION_SUBJECTS must be no, public, or always; using public")
+        cfg.re_session_subjects = "public"
+    if cfg.public_session_mode not in {"per-sender", "per-message", "shared"}:
+        cfg.config_load_notes.append("PUBLIC_SESSION_MODE must be per-sender, per-message, or shared; using per-sender")
+        cfg.public_session_mode = "per-sender"
+    if not cfg.public_session_prefix:
+        cfg.public_session_prefix = "public"
+    if not cfg.public_shared_session:
+        cfg.public_shared_session = "public-demo"
+    if cfg.public_session_archive_failure_policy not in {"keep", "delete"}:
+        cfg.config_load_notes.append("PUBLIC_SESSION_ARCHIVE_FAILURE_POLICY must be keep or delete; using keep")
+        cfg.public_session_archive_failure_policy = "keep"
+    if not cfg.body_command_subjects:
+        cfg.body_command_subjects = ["MAILBOT", "CMD"]
     return cfg
 
 
@@ -589,20 +710,216 @@ def imap_login_failure(exc: Exception, cfg: Config) -> RuntimeError:
 
 
 
+def subject_marker_from_parts(prefix: str, separator: str = ":") -> str:
+    prefix = (prefix or "").strip()
+    separator = separator if separator is not None else ":"
+    if not prefix:
+        return ""
+    if not separator:
+        return prefix
+    return prefix if prefix.endswith(separator) else prefix + separator
+
+
+def subject_marker(cfg: Config) -> str:
+    return subject_marker_from_parts(cfg.subject_prefix, cfg.subject_separator)
+
+
 def subject_regex(prefix: str) -> re.Pattern[str]:
     """Return the braced-session matcher for older callers/tests."""
     return subject_braced_regex(prefix)
 
 
-def subject_braced_regex(prefix: str) -> re.Pattern[str]:
-    return re.compile(rf"\b{re.escape(prefix)}:\{{([^}}]+)\}}")
+def subject_braced_regex(prefix: str, separator: str = ":", open_delim: str = "{", close_delim: str = "}") -> re.Pattern[str]:
+    marker = subject_marker_from_parts(prefix, separator)
+    open_delim = open_delim or "{"
+    close_delim = close_delim or "}"
+    return re.compile(rf"\b{re.escape(marker)}{re.escape(open_delim)}(.+?){re.escape(close_delim)}")
 
 
-def subject_bare_regex(prefix: str) -> re.Pattern[str]:
-    # Bare control subjects intentionally do not accept braces.  The whole
-    # remainder of the Subject header is the command line, so subjects such as
-    # "Re: tc:search mailbot" and "tc:model-list --all" work.
-    return re.compile(rf"\b{re.escape(prefix)}:(?!\{{)([^\r\n]+)")
+def subject_bare_regex(prefix: str, separator: str = ":", open_delim: str = "{") -> re.Pattern[str]:
+    # Bare control subjects intentionally do not accept the configured session
+    # opening delimiter. The whole remainder of the Subject header is the
+    # command line, so subjects such as "Re: tc:search mailbot" and
+    # "tc:model-list --all" work.
+    marker = subject_marker_from_parts(prefix, separator)
+    negative = rf"(?!{re.escape(open_delim)})" if open_delim else ""
+    return re.compile(rf"\b{re.escape(marker)}{negative}([^\r\n]+)")
+
+
+def strip_reply_prefixes(subject: str) -> Tuple[str, bool]:
+    text = (subject or "").strip()
+    saw_reply = False
+    while True:
+        match = re.match(r"^(?:(?:re|fw|fwd)\s*:\s*)", text, flags=re.IGNORECASE)
+        if not match:
+            break
+        saw_reply = True
+        text = text[match.end():].strip()
+    return text, saw_reply
+
+
+def re_session_candidate(subject: str, cfg: Config) -> Optional[str]:
+    stripped, saw_reply = strip_reply_prefixes(subject)
+    if not saw_reply or not stripped:
+        return None
+    # A reply to a normal control subject is still parsed by the normal tc:/bot
+    # grammar. This helper is only for the explicit "Re: session_name" shortcut.
+    if subject_marker(cfg) and stripped.casefold().startswith(subject_marker(cfg).casefold()):
+        return None
+    if stripped.casefold() in {x.casefold() for x in cfg.body_command_subjects}:
+        return None
+    # Keep the convention simple: the whole remaining subject is the candidate
+    # session name. Unsafe names are rejected later by session validation.
+    candidate = stripped.splitlines()[0].strip()
+    return candidate or None
+
+
+def body_after_first_command_line(body: str) -> str:
+    lines = (body or "").splitlines()
+    for idx, raw in enumerate(lines):
+        line = raw.strip()
+        if not line or line.startswith(">"):
+            continue
+        return "\n".join(lines[idx + 1:]).strip()
+    return ""
+
+
+def canonical_mailbot_command_word(word: str) -> str:
+    """Return the canonical command name for a first command word."""
+    command = normalize_keyword(word)
+    aliases = {
+        "?": "help",
+        "manual": "manpage",
+        "get-manpage": "manpage",
+        "fetch-manpage": "manpage",
+        "list": "sessions",
+        "list-sessions": "sessions",
+        "session-list": "sessions",
+        "model-list": "models",
+        "models-list": "models",
+        "list-models": "models",
+        "show-models": "models",
+        "update-model-list": "update-models",
+        "update-model-cache": "update-models",
+        "refresh-models": "update-models",
+        "refresh-model-cache": "update-models",
+        "cache-models": "model-cache",
+        "cached-models": "model-cache",
+        "models-cache": "model-cache",
+        "model-json": "model-cache",
+        "search-models": "model-search",
+        "models-search": "model-search",
+        "model-list-search": "model-search",
+        "find-model": "model-search",
+        "find-models": "model-search",
+        "grep-models": "model-search",
+        "delete": "delete-session",
+        "rm": "delete-session",
+        "remove-session": "delete-session",
+        "rm-session": "delete-session",
+        "router-list": "routers",
+        "faves": "favorites",
+        "unbookmark-model": "unfavorite-model",
+        "doctor": "ttydoctor",
+        "ttyconfig-summary": "ttyconfig",
+        "archive-public-session": "archive-session",
+        "archive-on-expire": "archive-session",
+        "public-archive": "archive-session",
+        "archive-opt-in": "archive-session",
+        "archive-opt-out": "archive-session",
+    }
+    return aliases.get(command, command)
+
+
+def known_mailbot_command_words() -> set[str]:
+    return {
+        "help",
+        "manpage",
+        "config",
+        "sessions",
+        "search",
+        "search-session",
+        "rename-session",
+        "delete-session",
+        "archive-session",
+        "model-cache",
+        "model-search",
+        "update-models",
+        "models",
+        "routers",
+        "favorites",
+        "favorite-model",
+        "unfavorite-model",
+        "test-model",
+        "show-memory",
+        "clear-memory",
+        "ttyconfig",
+        "ttydoctor",
+        "credits",
+        "tty-set",
+        "tty-unset",
+    }
+
+
+def looks_like_mailbot_command_line(line: str, cfg: Config) -> bool:
+    """Return true when a BODY_COMMAND_SUBJECT first line is a known command.
+
+    This keeps Subject: MAILBOT useful for both command mail and ordinary AI
+    prompts.  Known command words run as commands; other text is treated as a
+    new chat prompt.
+    """
+    line = (line or "").strip()
+    if not line:
+        return False
+    if parse_braced_delete_command(line) is not None:
+        return True
+    try:
+        parts = shlex.split(line)
+    except ValueError:
+        parts = line.split()
+    if not parts:
+        return False
+    first = parts[0]
+    if is_config_token(first, cfg):
+        return True
+    if first == (cfg.models_subject_token or "MODELS").strip():
+        return True
+    command = canonical_mailbot_command_word(first)
+    return command in known_mailbot_command_words()
+
+
+def body_subject_request(subject: str, cfg: Config, body: str) -> Optional[SubjectRequest]:
+    if not cfg.allow_body_command_subjects:
+        return None
+    subj = (subject or "").strip()
+    stripped, _saw_reply = strip_reply_prefixes(subj)
+    tokens = {x.strip().casefold() for x in cfg.body_command_subjects if x.strip()}
+    if stripped.casefold() not in tokens:
+        return None
+    first_line = first_command_line_from_body(body)
+    if not first_line:
+        return SubjectRequest("command", "help", raw=stripped)
+    try:
+        parts = shlex.split(first_line)
+    except ValueError:
+        parts = first_line.split()
+    if parts:
+        head = normalize_keyword(parts[0])
+        if head in {"session", "chat"} and len(parts) >= 2:
+            return SubjectRequest("session", parts[1], raw=first_line, body_override=body_after_first_command_line(body))
+        if head in {"new", "chat-new"}:
+            return SubjectRequest("session", "new", raw=first_line, body_override=body_after_first_command_line(body))
+        if is_config_token(parts[0], cfg) and len(parts) == 1:
+            return SubjectRequest("config", cfg.config_subject_token, raw=first_line)
+        models_token = (cfg.models_subject_token or "MODELS").strip()
+        if models_token and parts[0] == models_token:
+            rest = first_line[len(parts[0]):].strip()
+            if rest:
+                return SubjectRequest("command", "model-search " + shlex.quote(rest), raw=first_line)
+            return SubjectRequest("command", "model-cache", raw=first_line)
+    if looks_like_mailbot_command_line(first_line, cfg):
+        return SubjectRequest("command", maybe_append_body_arguments(first_line, body), raw=first_line)
+    return SubjectRequest("session", "new", raw=first_line, body_override=body)
 
 
 def token_equals(value: str, token: str) -> bool:
@@ -629,7 +946,7 @@ def split_first_word(text: str) -> Tuple[str, str]:
 
 
 def parse_session_from_subject(subject: str, prefix: str) -> Optional[str]:
-    """Return the braced session token, if any."""
+    """Return the braced session token, if any, for older callers/tests."""
     match = subject_braced_regex(prefix).search(subject or "")
     if not match:
         return None
@@ -673,6 +990,8 @@ def strip_command_envelope(token: str, cfg: Config) -> str:
 
 def legacy_mailbot_command_from_token(token: str, body: str, cfg: Config) -> Optional[str]:
     """Translate legacy MAILBOT braced tokens into a command line."""
+    if not cfg.allow_legacy_braced_control:
+        return None
     token = (token or "").strip()
     legacy = (cfg.mailbot_subject_token or "MAILBOT").strip()
     if not token or not legacy:
@@ -688,7 +1007,16 @@ def legacy_mailbot_command_from_token(token: str, body: str, cfg: Config) -> Opt
 def parse_subject_request(subject: str, cfg: Config, body: str = "") -> Optional[SubjectRequest]:
     subject = subject or ""
 
-    braced = subject_braced_regex(cfg.subject_prefix).search(subject)
+    body_request = body_subject_request(subject, cfg, body)
+    if body_request is not None:
+        return body_request
+
+    braced = subject_braced_regex(
+        cfg.subject_prefix,
+        cfg.subject_separator,
+        cfg.session_open_delim,
+        cfg.session_close_delim,
+    ).search(subject)
     if braced:
         token = braced.group(1).strip()
         if not token:
@@ -698,36 +1026,44 @@ def parse_subject_request(subject: str, cfg: Config, body: str = "") -> Optional
         legacy_command = legacy_mailbot_command_from_token(token, body, cfg)
         if legacy_command is not None:
             return SubjectRequest("command", legacy_command, raw=token, legacy=True)
-        # tc:{new} deliberately remains the literal session request.  run_ttychatter()
+        # tc:{new} deliberately remains the literal session request. run_ttychatter()
         # passes no session argument for it, letting ttychatter.python create its own
         # default session-YYYY-MM-DD-HH-MM-SS name.
         return SubjectRequest("session", token, raw=token)
 
-    bare = subject_bare_regex(cfg.subject_prefix).search(subject)
-    if not bare:
-        return None
-    command_text = bare.group(1).strip()
-    if not command_text:
-        return None
+    if cfg.allow_commands_in_subject and cfg.allow_bare_control_subjects:
+        bare = subject_bare_regex(cfg.subject_prefix, cfg.subject_separator, cfg.session_open_delim).search(subject)
+    else:
+        bare = None
+    if bare:
+        command_text = bare.group(1).strip()
+        if command_text:
+            first, rest = split_first_word(command_text)
+            if is_config_token(first, cfg) and not rest:
+                return SubjectRequest("config", cfg.config_subject_token, raw=command_text)
 
-    first, rest = split_first_word(command_text)
-    if is_config_token(first, cfg) and not rest:
-        return SubjectRequest("config", cfg.config_subject_token, raw=command_text)
+            stripped = strip_command_envelope(command_text, cfg)
+            if stripped != command_text:
+                return SubjectRequest("command", maybe_append_body_arguments(stripped, body) if stripped else (first_command_line_from_body(body) or "help"), raw=command_text)
 
-    stripped = strip_command_envelope(command_text, cfg)
-    if stripped != command_text:
-        return SubjectRequest("command", maybe_append_body_arguments(stripped, body) if stripped else (first_command_line_from_body(body) or "help"), raw=command_text)
+            models_token = (cfg.models_subject_token or "MODELS").strip()
+            # MODELS is an exact uppercase control token so tc:MODELS remains a
+            # cache-only shorthand while tc:models can still be used as the ordinary
+            # allowlisted ttychatter model-list command.
+            if models_token and first == models_token:
+                if not rest:
+                    return SubjectRequest("command", "model-cache", raw=command_text)
+                return SubjectRequest("command", "model-search " + shlex.quote(rest), raw=command_text)
 
-    models_token = (cfg.models_subject_token or "MODELS").strip()
-    # MODELS is an exact uppercase control token so tc:MODELS remains a
-    # cache-only shorthand while tc:models can still be used as the ordinary
-    # allowlisted ttychatter model-list command.
-    if models_token and first == models_token:
-        if not rest:
-            return SubjectRequest("command", "model-cache", raw=command_text)
-        return SubjectRequest("command", "model-search " + shlex.quote(rest), raw=command_text)
+            return SubjectRequest("command", maybe_append_body_arguments(command_text, body), raw=command_text)
 
-    return SubjectRequest("command", maybe_append_body_arguments(command_text, body), raw=command_text)
+    re_mode = normalize_keyword(cfg.re_session_subjects)
+    if re_mode == "always" or (re_mode == "public" and cfg.open_to_public):
+        candidate = re_session_candidate(subject, cfg)
+        if candidate:
+            return SubjectRequest("session", candidate, raw=candidate, public_resume=True)
+
+    return None
 
 
 def is_config_request(session: str, cfg: Config) -> bool:
@@ -876,7 +1212,7 @@ def build_config_reply(cfg: Config, original: Message, body: str, attachment_tex
     """
     reply_to = parseaddr(original.get('Reply-To') or original.get('From') or '')[1]
     dest = cfg.mail_to or reply_to
-    subject = original.get('Subject', f'{cfg.subject_prefix}:CONFIG')
+    subject = original.get('Subject', f'{subject_marker(cfg)}{cfg.config_subject_token}')
     msg = EmailMessage()
     msg['From'] = cfg.mail_from or cfg.smtp_user or cfg.imap_user
     msg['To'] = dest
@@ -963,21 +1299,8 @@ def message_sender(msg: Message) -> str:
     return parseaddr(msg.get("From", ""))[1].lower()
 
 
-def allowed_sender(sender: str, cfg: Config) -> bool:
-    """Return true when an incoming sender is authorized to drive the bot.
-
-    The allowlist is the primary protection against random Internet mail
-    spending API credits.  Earlier mailbot builds also rejected any message whose
-    sender matched MAIL_FROM, intending to prevent reply loops.  That was too
-    blunt: small personal mail systems often use the same mailbox for both
-    sending and receiving during setup, and an explicit ALLOWED_FROM entry should
-    be respected.
-
-    Loop prevention belongs elsewhere: exact tc:COMMAND/tc:{session} subjects, processed
-    Message-IDs, dry-run safety, and optional deployment advice to use a distinct
-    MAIL_FROM such as ttychatter@example.org.  Therefore this function now does
-    only one job: compare the parsed sender against the configured allowlist.
-    """
+def private_allowed_sender(sender: str, cfg: Config) -> bool:
+    """Return true when sender is in ALLOWED_FROM, ignoring public-demo mode."""
     parsed_sender = parseaddr(sender or "")[1].strip().lower()
     if not parsed_sender:
         return False
@@ -985,6 +1308,21 @@ def allowed_sender(sender: str, cfg: Config) -> bool:
     if "*" in allowed:
         return True
     return parsed_sender in allowed
+
+
+def allowed_sender(sender: str, cfg: Config) -> bool:
+    """Return true when an incoming sender is allowed to produce work.
+
+    In ordinary mode this is exactly ALLOWED_FROM. In public demo mode any
+    sender may chat, but only ALLOWED_FROM senders remain privileged enough for
+    mutating mailbot controls such as config, update-models, delete-session, and
+    tty-set.
+    """
+    return private_allowed_sender(sender, cfg) or bool(cfg.open_to_public)
+
+
+def public_sender_is_privileged(sender: str, cfg: Config) -> bool:
+    return private_allowed_sender(sender, cfg)
 
 
 def load_processed(path: Path) -> set[str]:
@@ -1240,6 +1578,422 @@ def parse_braced_delete_command(command_line: str) -> Optional[List[str]]:
     return [match.group(1), match.group(2).strip()]
 
 
+def public_session_prefix(cfg: Config) -> str:
+    return sanitize_session_name(cfg.public_session_prefix or "public")
+
+
+def public_session_name_from_sender(cfg: Config, sender: str) -> str:
+    parsed = parseaddr(sender or "")[1].strip().lower() or "unknown"
+    digest = hashlib.sha256(parsed.encode("utf-8", errors="replace")).hexdigest()[:16]
+    return f"{public_session_prefix(cfg)}-{digest}"
+
+
+def public_session_name_for_message(cfg: Config, msg: Message, uid: bytes) -> str:
+    mode = normalize_keyword(cfg.public_session_mode)
+    prefix = public_session_prefix(cfg)
+    if mode == "shared":
+        return sanitize_session_name(cfg.public_shared_session or f"{prefix}-shared")
+    if mode == "per-message":
+        msgid = msg.get("Message-ID", f"imap-uid-{uid.decode(errors='replace')}")
+        digest = hashlib.sha256(msgid.encode("utf-8", errors="replace")).hexdigest()[:16]
+        return f"{prefix}-{time.strftime('%Y%m%d-%H%M%S')}-{digest}"
+    return public_session_name_from_sender(cfg, message_sender(msg))
+
+
+def public_resume_session_allowed(cfg: Config, candidate: str) -> Optional[str]:
+    name = sanitize_session_name(candidate)
+    if not name or name != (candidate or "").strip().removesuffix(".log"):
+        return None
+    prefix = public_session_prefix(cfg) + "-"
+    if name == sanitize_session_name(cfg.public_shared_session) and normalize_keyword(cfg.public_session_mode) == "shared":
+        return name
+    if name.startswith(prefix):
+        return name
+    return None
+
+
+def public_session_from_request(cfg: Config, request: SubjectRequest, msg: Message, uid: bytes) -> str:
+    """Map an unprivileged public request to a safe public session."""
+    if request.public_resume:
+        resumed = public_resume_session_allowed(cfg, request.value)
+        if resumed and public_session_owner_allows(cfg, resumed, message_sender(msg)):
+            return resumed
+    if cfg.public_allow_named_sessions and request.value:
+        requested = sanitize_session_name(request.value)
+        if requested.casefold() == "new":
+            return public_session_name_for_message(cfg, msg, uid)
+        return f"{public_session_prefix(cfg)}-{requested}"
+    return public_session_name_for_message(cfg, msg, uid)
+
+
+def public_owner_address(sender: str) -> str:
+    return parseaddr(sender or "")[1].strip().lower()
+
+
+def public_sender_key(sender: str) -> str:
+    owner = public_owner_address(sender) or "unknown"
+    return hashlib.sha256(owner.encode("utf-8", errors="replace")).hexdigest()[:24]
+
+
+def empty_public_session_index() -> dict:
+    return {"version": 1, "sessions": {}, "senders": {}}
+
+
+def load_public_session_index(cfg: Config) -> dict:
+    path = cfg.public_session_index_file
+    if not path.exists():
+        return empty_public_session_index()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return empty_public_session_index()
+    if not isinstance(data, dict):
+        return empty_public_session_index()
+    sessions = data.get("sessions")
+    senders = data.get("senders")
+    if not isinstance(sessions, dict):
+        sessions = {}
+    if not isinstance(senders, dict):
+        senders = {}
+    return {"version": 1, "sessions": sessions, "senders": senders}
+
+
+def save_public_session_index(cfg: Config, data: dict) -> None:
+    path = cfg.public_session_index_file
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + f".tmp-{os.getpid()}")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
+    tmp.replace(path)
+
+
+def is_public_session_name(cfg: Config, name: str) -> bool:
+    name = sanitize_session_name(name)
+    prefix = public_session_prefix(cfg) + "-"
+    if name.startswith(prefix):
+        return True
+    return name == sanitize_session_name(cfg.public_shared_session) and normalize_keyword(cfg.public_session_mode) == "shared"
+
+
+def record_public_session(cfg: Config, session: str, sender: str) -> None:
+    name = sanitize_session_name(session)
+    owner = public_owner_address(sender)
+    if not name or not owner or not is_public_session_name(cfg, name):
+        return
+    now = int(time.time())
+    key = public_sender_key(owner)
+    data = load_public_session_index(cfg)
+    senders = data.setdefault("senders", {})
+    sessions = data.setdefault("sessions", {})
+    sender_entry = senders.get(key)
+    if not isinstance(sender_entry, dict):
+        sender_entry = {}
+    sender_entry.setdefault("first_seen", now)
+    sender_entry["last_seen"] = now
+    sender_entry["sender"] = owner
+    sender_entry.setdefault("archive_on_delete", bool(cfg.public_session_archive_on_delete))
+    senders[key] = sender_entry
+
+    session_entry = sessions.get(name)
+    if not isinstance(session_entry, dict):
+        session_entry = {}
+    session_entry.setdefault("created", now)
+    session_entry["last_seen"] = now
+    session_entry["owner"] = owner
+    session_entry["sender_key"] = key
+    session_entry["archive_on_delete"] = bool(sender_entry.get("archive_on_delete", cfg.public_session_archive_on_delete))
+    sessions[name] = session_entry
+    save_public_session_index(cfg, data)
+
+
+def public_session_owner_allows(cfg: Config, session: str, sender: str) -> bool:
+    if normalize_keyword(cfg.public_session_mode) == "shared":
+        return True
+    owner = public_owner_address(sender)
+    if not owner:
+        return False
+    data = load_public_session_index(cfg)
+    entry = data.get("sessions", {}).get(sanitize_session_name(session), {})
+    if not isinstance(entry, dict):
+        return True
+    known_owner = public_owner_address(str(entry.get("owner", "")))
+    if not known_owner:
+        return True
+    return known_owner == owner
+
+
+def public_archive_enabled_for_session(cfg: Config, session: str, data: Optional[dict] = None) -> bool:
+    data = data or load_public_session_index(cfg)
+    entry = data.get("sessions", {}).get(sanitize_session_name(session), {})
+    if not isinstance(entry, dict):
+        return bool(cfg.public_session_archive_on_delete)
+    key = str(entry.get("sender_key", ""))
+    sender_entry = data.get("senders", {}).get(key, {}) if key else {}
+    if isinstance(sender_entry, dict) and "archive_on_delete" in sender_entry:
+        return bool(sender_entry.get("archive_on_delete"))
+    if "archive_on_delete" in entry:
+        return bool(entry.get("archive_on_delete"))
+    return bool(cfg.public_session_archive_on_delete)
+
+
+def public_archive_owner_for_session(cfg: Config, session: str, data: Optional[dict] = None) -> str:
+    data = data or load_public_session_index(cfg)
+    entry = data.get("sessions", {}).get(sanitize_session_name(session), {})
+    if not isinstance(entry, dict):
+        return ""
+    return public_owner_address(str(entry.get("owner", "")))
+
+
+def public_archive_preference_status(cfg: Config, sender: str) -> Tuple[bool, str, List[ReplyAttachment]]:
+    owner = public_owner_address(sender)
+    if not owner:
+        state = "enabled" if cfg.public_session_archive_on_delete else "disabled"
+        return True, f"public archive-on-expire default: {state}\n", []
+    data = load_public_session_index(cfg)
+    key = public_sender_key(owner)
+    sender_entry = data.get("senders", {}).get(key, {})
+    if isinstance(sender_entry, dict) and "archive_on_delete" in sender_entry:
+        state_bool = bool(sender_entry.get("archive_on_delete"))
+        source = "sender preference"
+    else:
+        state_bool = bool(cfg.public_session_archive_on_delete)
+        source = "default"
+    state = "enabled" if state_bool else "disabled"
+    return True, f"public archive-on-expire: {state} ({source})\n", []
+
+
+def set_public_archive_preference(cfg: Config, sender: str, enabled: bool, dry_run: bool = False) -> Tuple[bool, str, List[ReplyAttachment]]:
+    if not cfg.public_session_archive_user_toggle:
+        return False, "public archive preference changes are disabled by PUBLIC_SESSION_ARCHIVE_USER_TOGGLE=0\n", []
+    owner = public_owner_address(sender)
+    if not owner:
+        return False, "archive-session requires an email sender\n", []
+    key = public_sender_key(owner)
+    state = "enabled" if enabled else "disabled"
+    if dry_run:
+        return True, f"[dry-run] would set public archive-on-expire for {owner}: {state}\n", []
+    data = load_public_session_index(cfg)
+    senders = data.setdefault("senders", {})
+    sessions = data.setdefault("sessions", {})
+    now = int(time.time())
+    sender_entry = senders.get(key)
+    if not isinstance(sender_entry, dict):
+        sender_entry = {}
+    sender_entry.setdefault("first_seen", now)
+    sender_entry["last_seen"] = now
+    sender_entry["sender"] = owner
+    sender_entry["archive_on_delete"] = bool(enabled)
+    senders[key] = sender_entry
+    changed_sessions = 0
+    for entry in sessions.values():
+        if isinstance(entry, dict) and entry.get("sender_key") == key:
+            entry["archive_on_delete"] = bool(enabled)
+            changed_sessions += 1
+    save_public_session_index(cfg, data)
+    return True, f"public archive-on-expire for {owner}: {state}\nupdated sessions: {changed_sessions}\n", []
+
+
+def trim_public_session_log(cfg: Config, path: Path, dry_run: bool = False) -> str:
+    max_turns = int(cfg.public_session_max_turns)
+    if max_turns <= 0 or not path.is_file():
+        return ""
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as exc:
+        return f"failed to inspect {path.name} for trimming: {exc}"
+    chat_line_indices: List[int] = []
+    for idx, line in enumerate(lines):
+        match = re.match(r"^\[[^\]]+\]\s+([^:]+):", line)
+        if not match:
+            continue
+        speaker = match.group(1).strip().lower()
+        if speaker != "system":
+            chat_line_indices.append(idx)
+    keep_entries = max_turns * 2
+    if len(chat_line_indices) <= keep_entries:
+        return ""
+    first_keep_idx = chat_line_indices[-keep_entries]
+    removed = first_keep_idx
+    header = f"[ttychatter.mailbot] public session trimmed to last {max_turns} input/output cycles at {time.strftime('%Y-%m-%d %H:%M:%S %z')}"
+    new_text = header + "\n" + "\n".join(lines[first_keep_idx:]).rstrip() + "\n"
+    if dry_run:
+        return f"[dry-run] would trim {path.name}: remove {removed} leading lines"
+    try:
+        path.write_text(new_text, encoding="utf-8")
+    except OSError as exc:
+        return f"failed to trim {path.name}: {exc}"
+    return f"trimmed {path.name}: removed {removed} leading lines"
+
+
+def build_public_session_archive_message(cfg: Config, owner: str, session: str, path: Path, reason: str) -> EmailMessage:
+    data = path.read_bytes()
+    msg = EmailMessage()
+    msg["From"] = cfg.mail_from or cfg.smtp_user or cfg.imap_user
+    msg["To"] = owner
+    msg["Subject"] = f"{PROGRAM} public session archive: {session}"
+    msg["Message-ID"] = make_msgid(domain=(msg["From"].split("@")[-1] if "@" in msg["From"] else None))
+    body = [
+        "This public ttychatter.mailbot session has expired and is being removed from the server.",
+        "",
+        f"session: {session}",
+        f"reason: {reason}",
+        f"log: {path.name}",
+        "",
+        "The session log is attached as plain text.",
+    ]
+    msg.set_content("\n".join(body).rstrip() + "\n")
+    msg.add_attachment(data, maintype="text", subtype="plain", filename=safe_filename(path.name))
+    return msg
+
+
+def send_public_session_archive(cfg: Config, owner: str, session: str, path: Path, reason: str, dry_run: bool = False) -> Tuple[bool, str]:
+    if not owner:
+        return False, f"archive failed {path.name}: no owner address recorded"
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        return False, f"archive failed {path.name}: stat failed: {exc}"
+    limit = min(max(1, cfg.public_session_archive_max_bytes), max(1, cfg.max_outgoing_attachment_bytes))
+    if size > limit:
+        return False, f"archive failed {path.name}: {size} bytes > archive limit {limit}"
+    if dry_run:
+        return True, f"[dry-run] would email archive of {path.name} to {owner}"
+    try:
+        send_reply(cfg, build_public_session_archive_message(cfg, owner, session, path, reason))
+    except Exception as exc:
+        return False, f"archive failed {path.name}: {exc}"
+    return True, f"archived {path.name} to {owner}"
+
+
+def public_command_allowed(cfg: Config, command_line: str) -> bool:
+    braced_delete = parse_braced_delete_command(command_line or "")
+    if braced_delete is not None:
+        command = braced_delete[0]
+    else:
+        try:
+            tokens = shlex.split(command_line or "help")
+        except ValueError:
+            tokens = (command_line or "help").split()
+        command = tokens[0] if tokens else "help"
+    command = normalize_keyword(command)
+    public_aliases = {
+        "?": "help",
+        "manual": "manpage",
+        "get-manpage": "manpage",
+        "fetch-manpage": "manpage",
+        "cache-models": "model-cache",
+        "cached-models": "model-cache",
+        "models-cache": "model-cache",
+        "model-json": "model-cache",
+        "search-models": "model-search",
+        "models-search": "model-search",
+        "model-list-search": "model-search",
+        "find-model": "model-search",
+        "find-models": "model-search",
+        "grep-models": "model-search",
+        "archive-public-session": "archive-session",
+        "archive-on-expire": "archive-session",
+        "public-archive": "archive-session",
+        "archive-opt-in": "archive-session",
+        "archive-opt-out": "archive-session",
+    }
+    command = public_aliases.get(command, command)
+    allowed = {normalize_keyword(x) for x in cfg.public_allowed_commands if x}
+    return command in allowed
+
+
+def public_cleanup_session_candidates(cfg: Config) -> List[Path]:
+    prefix = public_session_prefix(cfg) + "-"
+    if not cfg.session_dir.exists():
+        return []
+    paths = [p for p in cfg.session_dir.glob(f"{prefix}*.log") if p.is_file()]
+    if normalize_keyword(cfg.public_session_mode) == "shared":
+        shared = session_log_path(cfg, cfg.public_shared_session)
+        if shared.is_file() and shared not in paths:
+            paths.append(shared)
+    return paths
+
+
+def cleanup_public_sessions(cfg: Config, dry_run: bool = False) -> str:
+    if not cfg.open_to_public or not cfg.public_session_cleanup:
+        return ""
+    paths = public_cleanup_session_candidates(cfg)
+    if not paths:
+        return ""
+    now = time.time()
+    delete: dict[Path, str] = {}
+    index = load_public_session_index(cfg)
+    ttl_seconds = cfg.public_session_ttl_hours * 3600 if cfg.public_session_ttl_hours > 0 else 0
+    idle_seconds = cfg.public_session_idle_hours * 3600 if cfg.public_session_idle_hours > 0 else 0
+    sessions_index = index.get("sessions", {}) if isinstance(index.get("sessions", {}), dict) else {}
+    for path in paths:
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        entry = sessions_index.get(path.stem, {})
+        created = entry.get("created") if isinstance(entry, dict) else None
+        try:
+            created_time = float(created)
+        except (TypeError, ValueError):
+            created_time = st.st_mtime
+        ttl_age = now - created_time
+        idle_age = now - st.st_mtime
+        if ttl_seconds and ttl_age > ttl_seconds:
+            delete[path] = f"ttl>{cfg.public_session_ttl_hours}h"
+        if idle_seconds and idle_age > idle_seconds:
+            delete[path] = f"idle>{cfg.public_session_idle_hours}h"
+    max_count = cfg.public_session_max_count
+    if max_count > 0:
+        survivors = [p for p in paths if p not in delete]
+        survivors.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0.0, reverse=True)
+        for path in survivors[max_count:]:
+            delete[path] = f"count>{max_count}"
+
+    lines: List[str] = []
+    # Trim surviving public logs even when no deletion is due. This enforces the
+    # bounded-demo policy without destroying the whole session early.
+    for path in sorted([p for p in paths if p not in delete], key=lambda p: p.name):
+        note = trim_public_session_log(cfg, path, dry_run=dry_run)
+        if note:
+            lines.append(note)
+
+    if delete:
+        lines.insert(0, "public session cleanup:")
+    for path, reason in sorted(delete.items(), key=lambda item: item[0].name):
+        session = path.stem
+        archive_enabled = public_archive_enabled_for_session(cfg, session, index)
+        owner = public_archive_owner_for_session(cfg, session, index)
+        may_delete = True
+        if archive_enabled:
+            archive_ok, archive_note = send_public_session_archive(cfg, owner, session, path, reason, dry_run=dry_run)
+            lines.append(archive_note)
+            if not archive_ok and cfg.public_session_archive_failure_policy == "keep":
+                may_delete = False
+                lines.append(f"kept {path.name}: archive failed and PUBLIC_SESSION_ARCHIVE_FAILURE_POLICY=keep")
+        if dry_run:
+            lines.append(f"[dry-run] would delete {path.name}: {reason}" if may_delete else f"[dry-run] would keep {path.name}: {reason}")
+            continue
+        if not may_delete:
+            continue
+        try:
+            path.unlink()
+            lines.append(f"deleted {path.name}: {reason}")
+            sessions = index.get("sessions", {})
+            if isinstance(sessions, dict) and session in sessions:
+                sessions.pop(session, None)
+                save_public_session_index(cfg, index)
+        except OSError as exc:
+            lines.append(f"failed {path.name}: {reason}: {exc}")
+    if not lines:
+        return ""
+    if lines[0] != "public session cleanup:":
+        lines.insert(0, "public session cleanup:")
+    return "\n".join(lines).rstrip() + "\n"
+
 def run_ttychatter(cfg: Config, session: str, body: str, attachments: List[Path]) -> Tuple[int, str, str]:
     cfg.session_dir.mkdir(parents=True, exist_ok=True)
     cfg.attachment_dir.mkdir(parents=True, exist_ok=True)
@@ -1359,13 +2113,11 @@ def read_file_attachment(path: Path, cfg: Config, filename: Optional[str] = None
 
 def model_cache_reply(cfg: Config) -> Tuple[bool, str, List[ReplyAttachment]]:
     cache_path = cfg.model_cache_file
-    attachment, note = read_file_attachment(cache_path, cfg, "models-cache.json")
-    body = "model-cache: existing cache only; no OpenRouter fetch was attempted\n"
-    body += f"model_cache_file: {cache_path}\n{note}\n"
-    if attachment is None:
+    intro = "model-cache: existing cache only; no OpenRouter fetch was attempted"
+    ok, body, attachments = deliver_file_output(cfg, "model-cache", cache_path, "models-cache.json", intro)
+    if not ok:
         body += "Run update-models when you intentionally want to refresh the cache.\n"
-        return False, body, []
-    return True, body, [attachment]
+    return ok, body, attachments
 
 
 def strings_from_json(value: Any) -> Iterable[str]:
@@ -1482,11 +2234,90 @@ def search_model_cache(cfg: Config, query: str) -> Tuple[bool, str]:
     return bool(matches), "\n".join(lines).rstrip() + "\n"
 
 
+def command_output_mode(cfg: Config, command: str) -> str:
+    command = normalize_keyword(command)
+    specific = {
+        "model-cache": cfg.model_cache_output,
+        "model-search": cfg.model_search_output,
+        "models": cfg.model_list_output,
+        "routers": cfg.model_list_output,
+        "sessions": cfg.sessions_output,
+        "config": cfg.config_output,
+    }.get(command, cfg.command_output_mode)
+    return normalize_output_mode(specific, normalize_output_mode(cfg.command_output_mode, "auto"))
+
+
+def text_reply_attachment(filename: str, text: str) -> ReplyAttachment:
+    return ReplyAttachment(filename, (text or "").encode("utf-8", errors="replace"), "text", "plain")
+
+
+def deliver_text_output(cfg: Config, command: str, text: str, filename: str, intro: str = "") -> Tuple[str, List[ReplyAttachment]]:
+    mode = command_output_mode(cfg, command)
+    raw = (text or "").encode("utf-8", errors="replace")
+    inline_limit = max(1000, cfg.output_inline_max_bytes)
+    attach_limit = max(1, cfg.max_outgoing_attachment_bytes)
+    if mode == "auto":
+        mode = "body" if len(raw) <= inline_limit else "attachment"
+    if mode == "attachment":
+        if len(raw) > attach_limit:
+            body = (intro.rstrip() + "\n" if intro else "") + f"output too large to attach: {len(raw)} bytes > {attach_limit}\n"
+            body += truncate_text_bytes(text, cfg.max_command_output_bytes)
+            return body.rstrip() + "\n", []
+        body = intro.rstrip() + "\n" if intro else ""
+        body += f"Attached: {filename} ({len(raw)} bytes)\n"
+        return body, [text_reply_attachment(filename, text)]
+    body = intro.rstrip() + "\n" if intro else ""
+    body += truncate_text_bytes(text, cfg.max_command_output_bytes).rstrip() + "\n"
+    return body, []
+
+
+def deliver_file_output(cfg: Config, command: str, path: Path, filename: str, intro: str = "") -> Tuple[bool, str, List[ReplyAttachment]]:
+    try:
+        if not path.exists() or not path.is_file():
+            body = (intro.rstrip() + "\n" if intro else "") + f"file not found: {path}\n"
+            return False, body, []
+        size = path.stat().st_size
+        data = path.read_bytes()
+    except OSError as exc:
+        body = (intro.rstrip() + "\n" if intro else "") + f"file read failed: {path}: {exc}\n"
+        return False, body, []
+
+    mode = command_output_mode(cfg, command)
+    inline_limit = max(1000, cfg.output_inline_max_bytes)
+    # Auto is body for small readable text. Large JSON/cache/config payloads stay
+    # attachments by default, matching normal mail and Unix expectations.
+    if mode == "auto":
+        if size <= inline_limit and path.suffix.lower() not in {".json"}:
+            mode = "body"
+        elif size <= max(4096, inline_limit // 4) and path.suffix.lower() == ".json":
+            mode = "body"
+        else:
+            mode = "attachment"
+    if mode == "body":
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            text = data.decode("utf-8", errors="replace")
+        body = intro.rstrip() + "\n" if intro else ""
+        body += f"file: {path}\nbytes: {size}\n\n"
+        body += truncate_text_bytes(text, cfg.max_command_output_bytes).rstrip() + "\n"
+        return True, body, []
+
+    attachment, note = read_file_attachment(path, cfg, filename)
+    body = intro.rstrip() + "\n" if intro else ""
+    body += f"file: {path}\n{note}\n"
+    return attachment is not None, body, [attachment] if attachment else []
+
+
 def build_reply(cfg: Config, original: Message, session: str, body: str, stderr_text: str, ok: bool) -> EmailMessage:
     sender = message_sender(original)
     reply_to = parseaddr(original.get("Reply-To") or original.get("From") or sender)[1]
     dest = cfg.mail_to or reply_to
-    subject = original.get("Subject", f"tc:{{{session}}}")
+    subject = original.get("Subject", f"{subject_marker(cfg)}{cfg.session_open_delim}{session}{cfg.session_close_delim}")
+    if cfg.open_to_public and not private_allowed_sender(sender, cfg):
+        # Public-demo replies advertise the actual public session name so a
+        # normal mail reply with "Re: session_name" can resume the session.
+        subject = session
 
     msg = EmailMessage()
     msg["From"] = cfg.mail_from or cfg.smtp_user or cfg.imap_user
@@ -1599,256 +2430,258 @@ def mailbot_command_line(session: str, body: str, cfg: Config) -> str:
 
 
 def mailbot_command_help(cfg: Config) -> str:
-    return f'''ttychatter.mailbot email commands
+    marker = subject_marker(cfg)
+    open_d = cfg.session_open_delim
+    close_d = cfg.session_close_delim
+    body_subjects = ", ".join(cfg.body_command_subjects)
+    public_note = "enabled" if cfg.open_to_public else "disabled"
+    return f"""ttychatter.mailbot email commands
 
-Address mail to the bot from an ALLOWED_FROM sender. Preferred subject forms:
+Address private-mode mail to the bot from an ALLOWED_FROM sender. Preferred subject forms:
 
-  {cfg.subject_prefix}:CONFIG
-  {cfg.subject_prefix}:MODELS
-  {cfg.subject_prefix}:CMD
-  {cfg.subject_prefix}:command args
-  {cfg.subject_prefix}:{{session-name}}
-  {cfg.subject_prefix}:{{new}}
+  {marker}CONFIG
+  {marker}MODELS
+  {marker}CMD
+  {marker}command args
+  {marker}{open_d}session-name{close_d}
+  {marker}{open_d}new{close_d}
+  {body_subjects}        first nonempty body line is the command or session selector
 
-Chat:
-  Braced tokens name ttychatter sessions. {cfg.subject_prefix}:{{new}} passes no session argument so ttychatter.python creates its normal session-YYYY-MM-DD-HH-MM-SS name. Attachments are passed through when PROCESS_ATTACHMENTS=1.
+Public mode:
+  open_to_public: {public_note}
+  In --open-to-public mode, non-control subjects are accepted as prompts.
+  Non-ALLOWED_FROM public senders are isolated according to PUBLIC_SESSION_MODE.
+  Replies advertise the public session name; replying with "Re: session-name" resumes it.
+  Public senders may use only: {', '.join(cfg.public_allowed_commands)}
+  Expiring public logs are archived before deletion when PUBLIC_SESSION_ARCHIVE_ON_DELETE=1.
+  Public users may send {marker}archive-session on/off when PUBLIC_SESSION_ARCHIVE_USER_TOGGLE=1.
+
+Body-command subjects:
+  Subject: MAILBOT
+  Body: sessions
+
+  Subject: MAILBOT
+  Body: session worklog
+        Explain this attachment.
 
 Config/models/control:
-  {cfg.subject_prefix}:CONFIG                  Export/apply mailbot config attachment
-  {cfg.subject_prefix}:MODELS                  Attach existing models-cache.json; no refresh
-  {cfg.subject_prefix}:MODELS TEXT             Search existing model cache for TEXT; no refresh
-  {cfg.subject_prefix}:CMD                     Run the first nonempty body line as a command
-  {cfg.subject_prefix}:help                    Show this command list
-  {cfg.subject_prefix}:manpage | manual        Return the mailbot manpage as an attachment
+  {marker}CONFIG                  Export/apply mailbot config attachment
+  {marker}MODELS                  Return existing models-cache.json; no refresh
+  {marker}MODELS TEXT             Search existing model cache for TEXT; no refresh
+  {marker}CMD                     Run the first nonempty body line as a command
+  {marker}help                    Show this command list
+  {marker}manpage | manual        Return the mailbot manpage as an attachment
 
 Sessions:
-  {cfg.subject_prefix}:sessions                List session names with head/tail log previews
-  {cfg.subject_prefix}:search TEXT             Search all session logs
-  {cfg.subject_prefix}:search-session SESSION TEXT
-                                    Search one session log
-  {cfg.subject_prefix}:rename-session OLD NEW  Rename a session log
-  {cfg.subject_prefix}:delete{{SESSION}}         Delete a session log
-  {cfg.subject_prefix}:rm{{SESSION}}             Alias for delete{{SESSION}}
+  {marker}sessions                List session names with head/tail log previews
+  {marker}search TEXT             Search all session logs
+  {marker}search-session SESSION TEXT
+                                  Search one session log
+  {marker}rename-session OLD NEW  Rename a session log
+  {marker}delete{open_d}SESSION{close_d}         Delete a session log
+  {marker}rm{open_d}SESSION{close_d}             Alias for delete{open_d}SESSION{close_d}
+  {marker}archive-session on|off|status
+                                  Public-mode archive-on-expire preference
 
 Model cache and model list:
-  {cfg.subject_prefix}:MODELS                  Attach existing models-cache.json; no OpenRouter fetch
-  {cfg.subject_prefix}:model-cache             Same cache-only attachment as tc:MODELS
-  {cfg.subject_prefix}:update-models           Refresh cache, then attach models-cache.json
-  {cfg.subject_prefix}:model-search TEXT       Search existing model cache only
-  {cfg.subject_prefix}:model-list [flags]      Run ttychatter.python --models with safe filter flags
-  {cfg.subject_prefix}:models [flags]          Alias for model-list
-  {cfg.subject_prefix}:list-models [flags]     Alias for model-list
-  {cfg.subject_prefix}:models-list [flags]     Alias for model-list
-  {cfg.subject_prefix}:show-models [flags]     Alias for model-list
-  {cfg.subject_prefix}:routers [flags]         Run ttychatter.python --routers with safe filter flags
+  {marker}MODELS                  Existing cache only; no OpenRouter fetch
+  {marker}model-cache             Same cache-only result as {marker}MODELS
+  {marker}update-models           Refresh cache, then return models-cache.json
+  {marker}model-search TEXT       Search existing model cache only
+  {marker}model-list [flags]      Run ttychatter.python --models with safe filter flags
+  {marker}models [flags]          Alias for model-list
+  {marker}routers [flags]         Run ttychatter.python --routers with safe filter flags
+
+Output delivery:
+  COMMAND_OUTPUT_MODE={cfg.command_output_mode}
+  MODEL_CACHE_OUTPUT={cfg.model_cache_output}
+  MODEL_SEARCH_OUTPUT={cfg.model_search_output}
+  MODEL_LIST_OUTPUT={cfg.model_list_output}
+  SESSIONS_OUTPUT={cfg.sessions_output}
+  CONFIG_OUTPUT={cfg.config_output}
 
 Model favorites/tests:
-  {cfg.subject_prefix}:favorites               Run ttychatter.python --favorites
-  {cfg.subject_prefix}:favorite-model MODEL    Run ttychatter.python --favorite-model MODEL
-  {cfg.subject_prefix}:unfavorite-model MODEL  Run ttychatter.python --unfavorite-model MODEL
-  {cfg.subject_prefix}:test-model MODEL        Run ttychatter.python --test-model MODEL
+  {marker}favorites               Run ttychatter.python --favorites
+  {marker}favorite-model MODEL    Run ttychatter.python --favorite-model MODEL
+  {marker}unfavorite-model MODEL  Run ttychatter.python --unfavorite-model MODEL
+  {marker}test-model MODEL        Run ttychatter.python --test-model MODEL
 
 Ttychatter utilities:
-  {cfg.subject_prefix}:ttyconfig               Run ttychatter.python --config
-  {cfg.subject_prefix}:ttydoctor               Run ttychatter.python --doctor
-  {cfg.subject_prefix}:credits                 Run ttychatter.python --credits
-  {cfg.subject_prefix}:show-memory SESSION     Run ttychatter.python --show-memory SESSION
-  {cfg.subject_prefix}:clear-memory SESSION    Run ttychatter.python --clear-memory SESSION
-  {cfg.subject_prefix}:tty-set KEY VALUE       Run ttychatter.python --set KEY VALUE
-  {cfg.subject_prefix}:tty-unset KEY           Run ttychatter.python --unset KEY
+  {marker}ttyconfig               Run ttychatter.python --config
+  {marker}ttydoctor               Run ttychatter.python --doctor
+  {marker}credits                 Run ttychatter.python --credits
+  {marker}show-memory SESSION     Run ttychatter.python --show-memory SESSION
+  {marker}clear-memory SESSION    Run ttychatter.python --clear-memory SESSION
+  {marker}tty-set KEY VALUE       Run ttychatter.python --set KEY VALUE
+  {marker}tty-unset KEY           Run ttychatter.python --unset KEY
 
 Compatibility:
-  Legacy subjects {cfg.subject_prefix}:{{CONFIG}} and {cfg.subject_prefix}:{{MAILBOT:command args}} are still accepted, but new mail should use the bare control form above.
+  Legacy braced controls remain accepted when ALLOW_LEGACY_BRACED_CONTROL=1.
 
 Safe model-list flags:
   --all --sort VALUE --modellist-sort-tokens --min-input-tokens N --min-output-tokens N
   --hide-preview --show-preview --require-tokens --allow-missing-tokens --model-type VALUE
-'''
+"""
 
 
 def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
     subject_prefix = cfg.subject_prefix if cfg else "tc"
+    subject_separator = cfg.subject_separator if cfg else ":"
+    open_d = cfg.session_open_delim if cfg else "{"
+    close_d = cfg.session_close_delim if cfg else "}"
+    marker = subject_marker(cfg) if cfg else subject_marker_from_parts(subject_prefix, subject_separator)
     config_token = cfg.config_subject_token if cfg else "CONFIG"
     models_token = cfg.models_subject_token if cfg else "MODELS"
     command_token = cfg.command_subject_token if cfg else "CMD"
-    mailbot_token = cfg.mailbot_subject_token if cfg else "MAILBOT"
-    return textwrap.dedent(f"""    .TH TTYCHATTER.MAILBOT 1 "May 2026" "ttychatter.mailbot {VERSION}" "User Commands"
+    body_subjects = ",".join(cfg.body_command_subjects) if cfg else "MAILBOT,CMD"
+    return textwrap.dedent(f"""\
+    .TH TTYCHATTER.MAILBOT 1 "May 2026" "ttychatter.mailbot {VERSION}" "User Commands"
     .SH NAME
     ttychatter.mailbot \\- email transport adapter and remote control surface for ttychatter
     .SH SYNOPSIS
     .B ttychatter.mailbot
-    [--config-file PATH] [--once|--daemon|--dry-run] [--doctor] [--list-candidates]
+    [--config-file PATH] [--once|--daemon] [--dry-run] [--open-to-public]
     .PP
     .B ttychatter.mailbot
-    [--config|--raw-config] [--sessions|--list-sessions] [--manpage] [--model-cache] [--model-search TEXT] [--update-models] [--delete-session SESSION]
+    [--doctor] [--list-candidates] [--cleanup-public-sessions]
     .PP
     .B ttychatter.mailbot
-    [--set KEY VALUE] [--unset KEY] [--set-imap-password [--gpg]] [--set-smtp-password [--gpg]]
+    [--config|--raw-config] [--sessions|--list-sessions] [--manpage]
+    [--model-cache] [--model-search TEXT] [--update-models]
+    [--delete-session SESSION]
+    .PP
+    .B ttychatter.mailbot
+    [--set KEY VALUE] [--unset KEY] [--set-imap-password [--gpg]]
+    [--set-smtp-password [--gpg]]
     .SH DESCRIPTION
-    ttychatter.mailbot reads unread IMAP mail, accepts only messages from ALLOWED_FROM,
-    extracts a subject token, and either sends the message body to ttychatter.python
-    or handles a local mailbot control command. Replies are sent by sendmail or SMTP.
+    ttychatter.mailbot reads unread IMAP mail, maps each accepted message to a
+    chat session or an allowlisted control command, calls ttychatter.python when
+    chat or ttychatter utility work is needed, and replies by sendmail or SMTP.
     .PP
-    The 0.4 command grammar reserves braces for ttychatter chat sessions and uses
-    bare subjects for mailbot controls. Version 0.4.1 makes model-cache operations
-    cache-only unless the operator explicitly runs update-models.
-    .SH CHAT SUBJECTS
+    Private mode requires ALLOWED_FROM. Public demo mode, enabled by
+    .B --open-to-public
+    or OPEN_TO_PUBLIC=1, accepts mail from any sender but restricts non-ALLOWED_FROM
+    senders to public chat and the PUBLIC_ALLOWED_COMMANDS set.
+    .SH PRIVATE SUBJECT GRAMMAR
     .TP
-    .B {subject_prefix}:{{session-name}}
+    .B {marker}{open_d}session-name{close_d}
     Send the message body to the named ttychatter session.
     .TP
-    .B {subject_prefix}:{{new}}
+    .B {marker}{open_d}new{close_d}
     Start a new unnamed chat. The mailbot passes no session argument, so
-    ttychatter.python creates its normal session-YYYY-MM-DD-HH-MM-SS log name.
-    .SH CONTROL SUBJECTS
+    ttychatter.python creates its normal timestamped session name.
     .TP
-    .B {subject_prefix}:{config_token}
+    .B {marker}{config_token}
     Export or apply the mailbot config attachment.
     .TP
-    .B {subject_prefix}:{models_token}
-    Attach the existing MODEL_CACHE_FILE as models-cache.json. This is cache-only;
-    it does not call ttychatter.python --update-models and does not ping OpenRouter.
+    .B {marker}{models_token}
+    Return the existing MODEL_CACHE_FILE as models-cache.json. This is cache-only;
+    it does not call ttychatter.python --update-models.
     .TP
-    .B {subject_prefix}:{models_token} TEXT
+    .B {marker}{models_token} TEXT
     Search the existing model cache for TEXT. This is also cache-only.
     .TP
-    .B {subject_prefix}:{command_token}
+    .B {marker}{command_token}
     Run the first nonempty message-body line as a mailbot command.
     .TP
-    .B {subject_prefix}:command args
+    .B {marker}command args
     Run a mailbot command directly from the subject.
     .TP
-    .B {subject_prefix}:delete{{session-name}}
-    Delete the named session log from SESSION_DIR. The supplied name must already be the exact sanitized session name.
-    .TP
-    .B {subject_prefix}:rm{{session-name}}
-    Alias for delete{{session-name}}.
+    .B MAILBOT
+    When included in BODY_COMMAND_SUBJECTS, use the first nonempty body line as
+    the command or session selector. "session NAME" and "chat NAME" route the
+    remaining body to that chat session.
+    .SH PUBLIC DEMO MODE
+    In public mode, a message without a recognized control subject is treated as
+    an AI prompt. PUBLIC_SESSION_MODE controls isolation: per-sender, per-message,
+    or shared. The default is per-sender. Replies to public users use
+    "Re: public-session-name" so the user can resume by replying with that subject.
     .PP
-    Legacy subjects {subject_prefix}:{{{config_token}}}, {subject_prefix}:{{{mailbot_token}}},
-    and {subject_prefix}:{{{mailbot_token}:command args}} remain accepted for compatibility,
-    but new mail should use the bare control subjects.
-    .SH SUPPORTED COMMANDS
+    Public sessions use PUBLIC_SESSION_PREFIX and are cleaned up automatically
+    when PUBLIC_SESSION_CLEANUP=1. PUBLIC_SESSION_IDLE_HOURS,
+    PUBLIC_SESSION_TTL_HOURS, and PUBLIC_SESSION_MAX_COUNT control deletion.
+    PUBLIC_SESSION_MAX_TURNS trims surviving public logs to the most recent
+    input/output cycles. Cleanup matches PUBLIC_SESSION_PREFIX-*.log logs and
+    the configured shared public log when PUBLIC_SESSION_MODE=shared.
+    .PP
+    When PUBLIC_SESSION_ARCHIVE_ON_DELETE=1, an expiring public log is emailed
+    to the recorded sender before local deletion. PUBLIC_SESSION_ARCHIVE_USER_TOGGLE=1
+    lets public users change their own preference with archive-session on/off.
+    PUBLIC_SESSION_ARCHIVE_FAILURE_POLICY=keep refuses deletion when archive
+    sending fails; delete removes the local log anyway.
+    .SH COMMANDS
     .TP
     .B help
     Return the email command summary.
     .TP
     .B manpage
-    Return the configured external manpage as an email attachment when found,
-    otherwise return the embedded fallback. Aliases: manual, get-manpage, fetch-manpage.
+    Return this roff manpage. Aliases: manual, get-manpage, fetch-manpage.
     .TP
     .B sessions
-    List saved session names with short head and tail previews from each session log.
+    List saved session names with short head and tail previews.
     .TP
     .B search TEXT
-    Search all session logs for TEXT. If the subject is only {subject_prefix}:search,
-    the first nonempty body line supplies TEXT.
+    Search all session logs for TEXT.
     .TP
     .B search-session SESSION TEXT
-    Search a single session log for TEXT.
+    Search one session log.
     .TP
     .B rename-session OLD NEW
-    Rename a session log after sanitizing both names.
+    Rename a session log.
     .TP
     .B delete-session SESSION
-    Delete a session log. Aliases: delete, rm, remove-session, rm-session. The
-    target must resolve inside SESSION_DIR and the supplied name must already be
-    the exact sanitized session name. Subject shortcuts {subject_prefix}:delete{{SESSION}}
-    and {subject_prefix}:rm{{SESSION}} are accepted.
+    Delete a session log. Aliases: delete, rm, remove-session, rm-session.
+    The target must resolve inside SESSION_DIR and the supplied name must already
+    be the exact sanitized session name. Use --dry-run locally to show the path
+    that would be deleted without deleting it.
+    .TP
+    .B archive-session [on|off|status]
+    Show or change the sender's public-mode archive-on-expire preference. Aliases:
+    archive-opt-in and archive-opt-out.
     .TP
     .B model-cache
-    Attach the existing MODEL_CACHE_FILE as models-cache.json. This command never
-    refreshes the cache. Alias: models-cache.
+    Return the existing MODEL_CACHE_FILE only. Never refreshes the cache.
     .TP
     .B model-search TEXT
-    Search the existing model cache for TEXT. This command never refreshes the cache.
-    Aliases: search-models, models-search, model-list-search.
+    Search the existing model cache only. Never refreshes the cache.
     .TP
     .B update-models
-    Run ttychatter.python --update-models, then attach the resulting models-cache.json
-    when the cache file is present and smaller than MAX_OUTGOING_ATTACHMENT_BYTES.
-    This is the explicit live refresh command.
+    Explicitly run ttychatter.python --update-models, then return models-cache.json.
     .TP
     .B model-list [FLAGS]
-    Run ttychatter.python --models. Aliases: models, list-models, models-list, show-models.
-    The safe model-list flags are --all, --sort VALUE, --modellist-sort-tokens,
-    --min-input-tokens N, --min-output-tokens N, --hide-preview, --show-preview,
-    --require-tokens, --allow-missing-tokens, and --model-type VALUE.
+    Run ttychatter.python --models. Aliases include models and list-models.
     .TP
     .B routers [FLAGS]
-    Run ttychatter.python --routers with the same safe model-list flags.
-    .TP
-    .B favorites
-    Return ttychatter's model favorites.
-    .TP
-    .B favorite-model MODEL
-    Add MODEL to ttychatter's favorites file.
-    .TP
-    .B unfavorite-model MODEL
-    Remove MODEL from ttychatter's favorites file.
-    .TP
-    .B test-model MODEL
-    Run ttychatter.python --test-model MODEL.
-    .TP
-    .B ttyconfig
-    Return ttychatter.python --config output.
-    .TP
-    .B ttydoctor
-    Return ttychatter.python --doctor diagnostics.
-    .TP
-    .B show-memory SESSION
-    Return ttychatter's memory snapshot for SESSION.
-    .TP
-    .B clear-memory SESSION
-    Clear ttychatter's memory snapshot for SESSION.
-    .TP
-    .B tty-set KEY VALUE
-    Run ttychatter.python --set KEY VALUE. Do not send secrets by email.
-    .TP
-    .B tty-unset KEY
-    Run ttychatter.python --unset KEY.
-    .TP
-    .B credits
-    Return ttychatter.python --credits output.
-    .SH LOCAL CONFIG OUTPUT
-    The local --config command prints the parsed effective config, not a byte-for-byte
-    copy of the config file. Use --raw-config to print the actual config file with
-    plaintext password lines redacted. The default config path is
-    TTYCHATTER_MAILBOT_CONFIG, then XDG_CONFIG_HOME/ttychatter/mailbot/config,
-    then ~/.config/ttychatter/mailbot/config; --config-file PATH has final precedence.
-    .SH CONFIG COMMAND
-    The subject {subject_prefix}:{config_token} exports the mailbot config as an
-    attachment. Reply with an edited config attachment using the same subject to
-    replace the config; a timestamped backup is kept. Plaintext IMAP_PASSWORD and
-    SMTP_PASSWORD values are redacted on export.
+    Run ttychatter.python --routers.
+    .SH OUTPUT MODES
+    COMMAND_OUTPUT_MODE, MODEL_CACHE_OUTPUT, MODEL_SEARCH_OUTPUT,
+    MODEL_LIST_OUTPUT, SESSIONS_OUTPUT, and CONFIG_OUTPUT accept auto, body, or
+    attachment. The default is auto globally, with short search/session results
+    in the body and large cache/config results as attachments.
     .SH CONFIGURATION KEYS
-    Core keys include IMAP_HOST, IMAP_PORT, IMAP_SSL, IMAP_USER, IMAP_PASSWORD,
-    IMAP_PASSWORD_GPG_FILE, SEND_METHOD, SENDMAIL_PATH, SMTP_HOST, SMTP_PORT,
-    SMTP_SSL, SMTP_STARTTLS, SMTP_USER, SMTP_PASSWORD, SMTP_PASSWORD_GPG_FILE,
-    MAIL_FROM, MAIL_TO, ALLOWED_FROM, SUBJECT_PREFIX, CONFIG_SUBJECT_TOKEN,
-    MODELS_SUBJECT_TOKEN, COMMAND_SUBJECT_TOKEN, MAILBOT_SUBJECT_TOKEN,
-    POLL_INTERVAL, MAX_MESSAGES_PER_RUN, MAX_BODY_BYTES, MAX_ATTACHMENT_BYTES,
-    PROCESS_ATTACHMENTS, MARK_SEEN, TTYCHATTER_COMMAND, TTYCHATTER_EXTRA_ARGS,
-    TTYCHATTER_CONTROL_TIMEOUT, MAILBOT_MANPAGE_FILE, SESSION_DIR, ATTACHMENT_DIR,
-    MODEL_CACHE_FILE, WORK_DIR, PROCESSED_DB, SESSION_LIST_HEAD_LINES,
-    SESSION_LIST_TAIL_LINES, SESSION_LIST_MAX_SESSIONS, SESSION_PREVIEW_LINE_CHARS,
-    SESSION_SEARCH_MAX_MATCHES, MODEL_SEARCH_MAX_MATCHES, MAX_COMMAND_OUTPUT_BYTES,
-    MAX_OUTGOING_ATTACHMENT_BYTES, REPLY_SUBJECT_PREFIX, and INCLUDE_TTYCHATTER_STDERR.
+    Important keys include IMAP_HOST, IMAP_PORT, IMAP_SSL, IMAP_USER,
+    IMAP_PASSWORD, IMAP_PASSWORD_GPG_FILE, SEND_METHOD, SENDMAIL_PATH,
+    MAIL_FROM, MAIL_TO, ALLOWED_FROM, SUBJECT_PREFIX, SUBJECT_SEPARATOR,
+    SESSION_OPEN_DELIM, SESSION_CLOSE_DELIM, BODY_COMMAND_SUBJECTS,
+    ALLOW_COMMANDS_IN_SUBJECT, ALLOW_BODY_COMMAND_SUBJECTS,
+    ALLOW_BARE_CONTROL_SUBJECTS, ALLOW_LEGACY_BRACED_CONTROL,
+    RE_SESSION_SUBJECTS, OPEN_TO_PUBLIC, PUBLIC_SESSION_MODE,
+    PUBLIC_SESSION_PREFIX, PUBLIC_SHARED_SESSION, PUBLIC_ALLOW_NAMED_SESSIONS,
+    PUBLIC_ALLOWED_COMMANDS, PUBLIC_SESSION_CLEANUP, PUBLIC_SESSION_TTL_HOURS,
+    PUBLIC_SESSION_IDLE_HOURS, PUBLIC_SESSION_MAX_COUNT,
+    PUBLIC_SESSION_MAX_TURNS, PUBLIC_SESSION_INDEX_FILE,
+    PUBLIC_SESSION_ARCHIVE_ON_DELETE, PUBLIC_SESSION_ARCHIVE_USER_TOGGLE,
+    PUBLIC_SESSION_ARCHIVE_FAILURE_POLICY, PUBLIC_SESSION_ARCHIVE_MAX_BYTES,
+    MODEL_CACHE_FILE,
+    SESSION_DIR, ATTACHMENT_DIR, WORK_DIR, PROCESSED_DB, COMMAND_OUTPUT_MODE,
+    MODEL_CACHE_OUTPUT, MODEL_SEARCH_OUTPUT, MODEL_LIST_OUTPUT, SESSIONS_OUTPUT,
+    CONFIG_OUTPUT, OUTPUT_INLINE_MAX_BYTES, MAX_COMMAND_OUTPUT_BYTES, and
+    MAX_OUTGOING_ATTACHMENT_BYTES.
     .SH SECURITY
-    ALLOWED_FROM is required. Commands are allowlisted and are not shell-expanded.
-    Email is not a good channel for secrets; use the local --set-imap-password and
-    --set-smtp-password commands for passwords.
-    .SH GPG PASSWORD FILES
-    With --gpg, the mailbot stores IMAP and SMTP passwords in external gpg files and
-    decrypts them with gpg --quiet --decrypt at runtime. For interactive tests, set
-    export GPG_TTY=$(tty) and test the password file directly with gpg --decrypt as
-    the mailbot user. Do not diagnose this by switching to root unless the service
-    is actually configured to run as root.
-    .SH MANPAGE LOOKUP
-    The email manpage command and the local --manpage command use the first readable
-    manpage found. The lookup order is TTYCHATTER_MAILBOT_MANPAGE_FILE, then
-    MAILBOT_MANPAGE_FILE, then config, executable, XDG/user man1, system man1, and
-    current working directory candidates. Matching .1.gz files are accepted. If no
-    external file is found, the embedded fallback is used.
+    Public mode is for demos. It should use a separate mailbox, conservative
+    attachment/body limits, per-sender sessions, and a small PUBLIC_ALLOWED_COMMANDS
+    set. Do not expose config mutation, model refresh, session deletion, or tty-set
+    to non-ALLOWED_FROM senders.
     .SH FILES
     Default config: ~/.config/ttychatter/mailbot/config
     .PP
@@ -1861,6 +2694,7 @@ def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
     0 indicates success. Nonzero status indicates configuration, IMAP, SMTP,
     sendmail, or ttychatter subprocess failure.
     """).strip() + "\n"
+
 
 def mailbot_manpage_candidates(cfg: Optional[Config] = None) -> List[Path]:
     """Return external manpage candidates, most specific first.
@@ -1966,7 +2800,7 @@ def validate_model_list_args(args: List[str]) -> Tuple[bool, List[str], str]:
     return True, safe, ""
 
 
-def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = False) -> Tuple[bool, str, List[ReplyAttachment]]:
+def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = False, sender: str = "") -> Tuple[bool, str, List[ReplyAttachment]]:
     braced_delete = parse_braced_delete_command(command_line or "")
     if braced_delete is not None:
         tokens = braced_delete
@@ -2014,8 +2848,18 @@ def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = Fal
         "unbookmark-model": "unfavorite-model",
         "doctor": "ttydoctor",
         "ttyconfig-summary": "ttyconfig",
+        "archive-public-session": "archive-session",
+        "archive-on-expire": "archive-session",
+        "public-archive": "archive-session",
+        "archive-opt-in": "archive-session",
+        "archive-opt-out": "archive-session",
     }
+    archive_opt_alias = command
     command = aliases.get(command, command)
+    if archive_opt_alias in {"archive-opt-in"} and not args:
+        args = ["on"]
+    elif archive_opt_alias in {"archive-opt-out"} and not args:
+        args = ["off"]
 
     if command == "help":
         return True, mailbot_command_help(cfg), []
@@ -2028,10 +2872,18 @@ def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = Fal
         return True, body, [ReplyAttachment("ttychatter.mailbot.1", data, "text", "plain")]
 
     if command == "config":
-        return True, "Attached: ttychatter-mailbot-config.txt\n", [ReplyAttachment("ttychatter-mailbot-config.txt", public_config_text(cfg).encode("utf-8"), "text", "plain")]
+        body, attachments = deliver_text_output(
+            cfg,
+            "config",
+            public_config_text(cfg),
+            "ttychatter-mailbot-config.txt",
+            "ttychatter.mailbot config export",
+        )
+        return True, body, attachments
 
     if command == "sessions":
-        return True, format_session_list_with_previews(cfg), []
+        body, attachments = deliver_text_output(cfg, "sessions", format_session_list_with_previews(cfg), "ttychatter-sessions.txt")
+        return True, body, attachments
 
     if command == "search":
         query = " ".join(args).strip()
@@ -2068,6 +2920,17 @@ def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = Fal
         except Exception as exc:
             return False, f"delete-session failed: {exc}\n", []
 
+    if command == "archive-session":
+        if not args:
+            return public_archive_preference_status(cfg, sender)
+        if len(args) != 1 or normalize_keyword(args[0]) not in {"on", "off", "yes", "no", "true", "false", "1", "0", "status"}:
+            return False, "usage: archive-session [on|off|status]\n", []
+        action = normalize_keyword(args[0])
+        if action == "status":
+            return public_archive_preference_status(cfg, sender)
+        enabled = action in {"on", "yes", "true", "1"}
+        return set_public_archive_preference(cfg, sender, enabled, dry_run=dry_run)
+
     if command == "model-cache":
         if args:
             return False, "usage: model-cache\n", []
@@ -2079,8 +2942,9 @@ def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = Fal
         query = " ".join(args).strip()
         if not query:
             return False, "usage: model-search TEXT\n", []
-        ok, body = search_model_cache(cfg, query)
-        return ok, body, []
+        ok, search_body = search_model_cache(cfg, query)
+        body, attachments = deliver_text_output(cfg, "model-search", search_body, "model-search.txt")
+        return ok, body, attachments
 
     if command == "update-models":
         if args:
@@ -2090,9 +2954,9 @@ def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = Fal
         rc, stdout, stderr_text = run_ttychatter_cli(cfg, ["--update-models"])
         output = format_cli_result("ttychatter.python --update-models", rc, stdout, stderr_text, cfg.max_command_output_bytes)
         cache_path = parse_updated_model_cache_path("\n".join([stdout, stderr_text])) or cfg.model_cache_file
-        attachment, note = read_file_attachment(cache_path, cfg, "models-cache.json")
-        output += f"\nmodel_cache_file: {cache_path}\n{note}\n"
-        return rc == 0 and attachment is not None, output, [attachment] if attachment else []
+        ok_file, file_body, attachments = deliver_file_output(cfg, "model-cache", cache_path, "models-cache.json", "updated model cache")
+        output += "\n" + file_body
+        return rc == 0 and ok_file, output, attachments
 
     if command in {"models", "routers"}:
         ok, safe_args, reason = validate_model_list_args(args)
@@ -2102,11 +2966,15 @@ def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = Fal
         if dry_run:
             return True, "[dry-run] would run: " + " ".join([cfg.ttychatter_command] + cli) + "\n", []
         rc, stdout, stderr_text = run_ttychatter_cli(cfg, cli)
-        body = format_cli_result("ttychatter.python " + " ".join(cli), rc, stdout, stderr_text, cfg.max_command_output_bytes)
-        attachments: List[ReplyAttachment] = []
-        if stdout and len(stdout.encode("utf-8", errors="replace")) > cfg.max_command_output_bytes // 2:
-            attachments.append(ReplyAttachment(f"ttychatter-{command}.txt", stdout.encode("utf-8"), "text", "plain"))
-        return rc == 0, body, attachments
+        label = "ttychatter.python " + " ".join(cli)
+        if stdout:
+            intro = label + "\n" + f"exit_status: {rc}"
+            if stderr_text:
+                intro += "\n\n--- stderr ---\n" + truncate_text_bytes(stderr_text, cfg.max_command_output_bytes)
+            delivered, attachments = deliver_text_output(cfg, command, stdout, f"ttychatter-{command}.txt", intro)
+            return rc == 0, delivered, attachments
+        body = format_cli_result(label, rc, stdout, stderr_text, cfg.max_command_output_bytes)
+        return rc == 0, body, []
 
     fixed_tty_commands = {
         "favorites": ["--favorites"],
@@ -2177,17 +3045,40 @@ def candidate_skip_reason(cfg: Config, msg: Message, uid: bytes, processed: set[
     request = parse_subject_request(subject, cfg, body)
     sender = message_sender(msg)
     msgid = msg.get("Message-ID", f"imap-uid-{uid.decode(errors='replace')}")
-    if request is None:
-        return f"skip: subject does not contain {cfg.subject_prefix}:COMMAND or {cfg.subject_prefix}:{{session}}"
-    if not allowed_sender(sender, cfg):
-        return f"skip: sender not allowed ({sender or 'empty sender'}); allowed={','.join(cfg.allowed_from) or 'empty'}"
     if msgid in processed:
         return "skip: Message-ID already processed"
+    if request is None:
+        if cfg.open_to_public:
+            return "match: public prompt (no control subject)"
+        return f"skip: subject does not contain {subject_marker(cfg)}COMMAND or {subject_marker(cfg)}{cfg.session_open_delim}session{cfg.session_close_delim}"
+    if not allowed_sender(sender, cfg):
+        return f"skip: sender not allowed ({sender or 'empty sender'}); allowed={','.join(cfg.allowed_from) or 'empty'}"
+    if cfg.open_to_public and not private_allowed_sender(sender, cfg) and request.kind == "command" and not public_command_allowed(cfg, request.value):
+        return "match: public command refused"
+    if cfg.open_to_public and not private_allowed_sender(sender, cfg) and request.kind == "config":
+        return "match: public config command refused"
     if request.kind == "config":
         return "match: mailbot config command"
     if request.kind == "command":
         return "match: mailbot control command"
     return "match: ttychatter session"
+
+
+def process_denied_control_message(cfg: Config, conn: imaplib.IMAP4, uid: bytes, msg: Message, command: str, reason: str, dry_run: bool = False) -> bool:
+    msgid = msg.get("Message-ID", f"imap-uid-{uid.decode(errors='replace')}")
+    processed = load_processed(cfg.processed_db)
+    if msgid in processed:
+        return False
+    body = "command refused\n" + reason.rstrip() + "\n"
+    reply = build_control_reply(cfg, msg, command, body, False, [])
+    if dry_run:
+        print(reply.as_string())
+    else:
+        send_reply(cfg, reply)
+        remember_processed(cfg.processed_db, msgid)
+        if cfg.mark_seen:
+            conn.uid("STORE", uid, "+FLAGS", "(\\Seen)")
+    return True
 
 
 def process_config_message(cfg: Config, conn: imaplib.IMAP4, uid: bytes, msg: Message, dry_run: bool = False) -> bool:
@@ -2201,7 +3092,7 @@ def process_config_message(cfg: Config, conn: imaplib.IMAP4, uid: bytes, msg: Me
         body = (
             "ttychatter.mailbot config export\n"
             "\n"
-            "Edit the attached config file and mail it back with the same subject tc:CONFIG.\n"
+            f"Edit the attached config file and mail it back with the same subject {subject_marker(cfg)}{cfg.config_subject_token}.\n"
             "Plaintext password values are redacted; encrypted password file paths are preserved.\n"
         )
         reply = build_config_reply(cfg, msg, body, attachment_text=public_config_text(cfg))
@@ -2232,7 +3123,7 @@ def process_mailbot_command_message(cfg: Config, conn: imaplib.IMAP4, uid: bytes
 
     body = extract_body(msg, cfg.max_body_bytes)
     command_line = maybe_append_body_arguments(command_line, body) if command_line else (first_command_line_from_body(body) or "help")
-    ok, output, attachments = dispatch_mailbot_command(cfg, command_line, dry_run=dry_run)
+    ok, output, attachments = dispatch_mailbot_command(cfg, command_line, dry_run=dry_run, sender=message_sender(msg))
     reply = build_control_reply(cfg, msg, command_line, output, ok, attachments)
 
     if dry_run:
@@ -2251,23 +3142,54 @@ def process_message(cfg: Config, conn: imaplib.IMAP4, uid: bytes, dry_run: bool 
         return False
     msgid = msg.get("Message-ID", f"imap-uid-{uid.decode(errors='replace')}")
     subject = msg.get("Subject", "")
+    sender = message_sender(msg)
     body_for_command = extract_body(msg, cfg.max_body_bytes)
     request = parse_subject_request(subject, cfg, body_for_command)
     if request is None:
-        return False
-    if not allowed_sender(message_sender(msg), cfg):
+        if cfg.open_to_public:
+            request = SubjectRequest("session", public_session_name_for_message(cfg, msg, uid), raw=subject)
+        else:
+            return False
+    if not allowed_sender(sender, cfg):
         return False
 
     processed = load_processed(cfg.processed_db)
     if msgid in processed:
         return False
+
+    privileged = private_allowed_sender(sender, cfg)
+    public_unprivileged = bool(cfg.open_to_public and not privileged)
     if request.kind == "config":
+        if cfg.open_to_public and not privileged:
+            return process_denied_control_message(
+                cfg,
+                conn,
+                uid,
+                msg,
+                "config",
+                "public mode refuses config export/update for non-ALLOWED_FROM senders",
+                dry_run=dry_run,
+            )
         return process_config_message(cfg, conn, uid, msg, dry_run=dry_run)
     if request.kind == "command":
+        if cfg.open_to_public and not privileged and not public_command_allowed(cfg, request.value):
+            return process_denied_control_message(
+                cfg,
+                conn,
+                uid,
+                msg,
+                request.value,
+                "public mode allows only: " + ", ".join(cfg.public_allowed_commands),
+                dry_run=dry_run,
+            )
         return process_mailbot_command_message(cfg, conn, uid, msg, request.value, dry_run=dry_run)
 
     session = request.value
-    body = body_for_command
+    if public_unprivileged:
+        session = public_session_from_request(cfg, request, msg, uid)
+        if not dry_run:
+            record_public_session(cfg, session, sender)
+    body = request.body_override if request.body_override is not None else body_for_command
     if not body:
         body = "(empty email body)"
 
@@ -2282,6 +3204,10 @@ def process_message(cfg: Config, conn: imaplib.IMAP4, uid: bytes, dry_run: bool 
         reply = build_reply(cfg, msg, reply_session, output if ok else stderr_text or output, stderr_text, ok)
         if not dry_run:
             send_reply(cfg, reply)
+            if public_unprivileged and ok:
+                trim_note = trim_public_session_log(cfg, session_log_path(cfg, reply_session), dry_run=False)
+                if trim_note:
+                    print(trim_note)
             remember_processed(cfg.processed_db, msgid)
             if cfg.mark_seen:
                 conn.uid("STORE", uid, "+FLAGS", "(\\Seen)")
@@ -2327,6 +3253,10 @@ def run_once(cfg: Config, dry_run: bool = False) -> int:
     cfg.processed_db.parent.mkdir(parents=True, exist_ok=True)
     cfg.session_dir.mkdir(parents=True, exist_ok=True)
     cfg.attachment_dir.mkdir(parents=True, exist_ok=True)
+
+    cleanup_note = cleanup_public_sessions(cfg, dry_run=dry_run)
+    if cleanup_note:
+        print(cleanup_note, end="")
 
     conn = imap_connect(cfg)
     processed_count = 0
@@ -2404,7 +3334,10 @@ def doctor(cfg: Config) -> int:
     checks.append(("imap user", bool(cfg.imap_user), cfg.imap_user or "missing"))
     imap_password_source_ok = bool(cfg.imap_password or cfg.imap_password_gpg_file.exists())
     checks.append(("imap password source", imap_password_source_ok, password_source_description(cfg.imap_password, cfg.imap_password_gpg_file)))
-    checks.append(("allowed from", bool(cfg.allowed_from), ", ".join(cfg.allowed_from) or "missing"))
+    checks.append(("open to public", True, "yes" if cfg.open_to_public else "no"))
+    checks.append(("allowed from", bool(cfg.allowed_from) or cfg.open_to_public, ", ".join(cfg.allowed_from) or ("not required in public mode" if cfg.open_to_public else "missing")))
+    checks.append(("public session mode", True, cfg.public_session_mode if cfg.open_to_public else "inactive"))
+    checks.append(("public allowed commands", True, ",".join(cfg.public_allowed_commands) if cfg.open_to_public else "inactive"))
     checks.append(("mail from", bool(cfg.mail_from or cfg.smtp_user or cfg.imap_user), cfg.mail_from or cfg.smtp_user or cfg.imap_user or "missing"))
     checks.append(("gpg", gpg_available(), "found" if gpg_available() else "not found"))
     checks.append(("ttychatter command", bool(cfg.ttychatter_command), cfg.ttychatter_command))
@@ -2417,6 +3350,7 @@ def doctor(cfg: Config) -> int:
         ("model cache dir", cfg.model_cache_file.parent),
         ("work dir", cfg.work_dir),
         ("processed db dir", cfg.processed_db.parent),
+        ("public session index dir", cfg.public_session_index_file.parent),
     ]:
         try:
             path.mkdir(parents=True, exist_ok=True)
@@ -2428,7 +3362,10 @@ def doctor(cfg: Config) -> int:
     rc = 0
     for name, ok, detail in checks:
         print(f"{'OK' if ok else 'FAIL'}\t{name}\t{detail}")
-        if not ok and name in {"config file", "config readable", "config parsed keys", "imap user", "imap password source", "allowed from", "mail from", "ttychatter command"}:
+        hard_failures = {"config file", "config readable", "config parsed keys", "imap user", "imap password source", "mail from", "ttychatter command"}
+        if not cfg.open_to_public:
+            hard_failures.add("allowed from")
+        if not ok and name in hard_failures:
             rc = 1
     for note in cfg.config_load_notes:
         print(f"WARN\tconfig parse\t{note}")
@@ -2473,11 +3410,36 @@ def print_config(cfg: Config) -> None:
     print(f"MAIL_FROM={cfg.mail_from}")
     print(f"MAIL_TO={cfg.mail_to}")
     print(f"ALLOWED_FROM={','.join(cfg.allowed_from)}")
+    print(f"OPEN_TO_PUBLIC={int(cfg.open_to_public)}")
+    print(f"PUBLIC_SESSION_MODE={cfg.public_session_mode}")
+    print(f"PUBLIC_SESSION_PREFIX={cfg.public_session_prefix}")
+    print(f"PUBLIC_SHARED_SESSION={cfg.public_shared_session}")
+    print(f"PUBLIC_ALLOW_NAMED_SESSIONS={int(cfg.public_allow_named_sessions)}")
+    print(f"PUBLIC_ALLOWED_COMMANDS={','.join(cfg.public_allowed_commands)}")
+    print(f"PUBLIC_SESSION_CLEANUP={int(cfg.public_session_cleanup)}")
+    print(f"PUBLIC_SESSION_TTL_HOURS={cfg.public_session_ttl_hours}")
+    print(f"PUBLIC_SESSION_IDLE_HOURS={cfg.public_session_idle_hours}")
+    print(f"PUBLIC_SESSION_MAX_COUNT={cfg.public_session_max_count}")
+    print(f"PUBLIC_SESSION_MAX_TURNS={cfg.public_session_max_turns}")
+    print(f"PUBLIC_SESSION_INDEX_FILE={cfg.public_session_index_file}")
+    print(f"PUBLIC_SESSION_ARCHIVE_ON_DELETE={int(cfg.public_session_archive_on_delete)}")
+    print(f"PUBLIC_SESSION_ARCHIVE_USER_TOGGLE={int(cfg.public_session_archive_user_toggle)}")
+    print(f"PUBLIC_SESSION_ARCHIVE_FAILURE_POLICY={cfg.public_session_archive_failure_policy}")
+    print(f"PUBLIC_SESSION_ARCHIVE_MAX_BYTES={cfg.public_session_archive_max_bytes}")
     print(f"SUBJECT_PREFIX={cfg.subject_prefix}")
+    print(f"SUBJECT_SEPARATOR={cfg.subject_separator}")
+    print(f"SESSION_OPEN_DELIM={cfg.session_open_delim}")
+    print(f"SESSION_CLOSE_DELIM={cfg.session_close_delim}")
+    print(f"ALLOW_COMMANDS_IN_SUBJECT={int(cfg.allow_commands_in_subject)}")
+    print(f"ALLOW_BODY_COMMAND_SUBJECTS={int(cfg.allow_body_command_subjects)}")
+    print(f"ALLOW_BARE_CONTROL_SUBJECTS={int(cfg.allow_bare_control_subjects)}")
+    print(f"ALLOW_LEGACY_BRACED_CONTROL={int(cfg.allow_legacy_braced_control)}")
+    print(f"RE_SESSION_SUBJECTS={cfg.re_session_subjects}")
     print(f"CONFIG_SUBJECT_TOKEN={cfg.config_subject_token}")
     print(f"MODELS_SUBJECT_TOKEN={cfg.models_subject_token}")
     print(f"COMMAND_SUBJECT_TOKEN={cfg.command_subject_token}")
     print(f"MAILBOT_SUBJECT_TOKEN={cfg.mailbot_subject_token}")
+    print(f"BODY_COMMAND_SUBJECTS={','.join(cfg.body_command_subjects)}")
     print(f"MAILBOT_MANPAGE_FILE={cfg.mailbot_manpage_file or ''}")
     print(f"CONFIG_UPDATE_REQUIRES_ATTACHMENT={int(cfg.config_update_requires_attachment)}")
     print(f"POLL_INTERVAL={cfg.poll_interval}")
@@ -2500,6 +3462,13 @@ def print_config(cfg: Config) -> None:
     print(f"SESSION_PREVIEW_LINE_CHARS={cfg.session_preview_line_chars}")
     print(f"SESSION_SEARCH_MAX_MATCHES={cfg.session_search_max_matches}")
     print(f"MODEL_SEARCH_MAX_MATCHES={cfg.model_search_max_matches}")
+    print(f"COMMAND_OUTPUT_MODE={cfg.command_output_mode}")
+    print(f"MODEL_CACHE_OUTPUT={cfg.model_cache_output}")
+    print(f"MODEL_SEARCH_OUTPUT={cfg.model_search_output}")
+    print(f"MODEL_LIST_OUTPUT={cfg.model_list_output}")
+    print(f"SESSIONS_OUTPUT={cfg.sessions_output}")
+    print(f"CONFIG_OUTPUT={cfg.config_output}")
+    print(f"OUTPUT_INLINE_MAX_BYTES={cfg.output_inline_max_bytes}")
     print(f"MAX_COMMAND_OUTPUT_BYTES={cfg.max_command_output_bytes}")
     print(f"MAX_OUTGOING_ATTACHMENT_BYTES={cfg.max_outgoing_attachment_bytes}")
     print(f"REPLY_SUBJECT_PREFIX={cfg.reply_subject_prefix}")
@@ -2538,10 +3507,11 @@ def help_text() -> str:
     return f"""{PROGRAM} - email transport adapter and remote control surface for ttychatter
 
 USAGE
-    {PROGRAM} [--config-file PATH] --once
-    {PROGRAM} [--config-file PATH] --daemon
+    {PROGRAM} [--config-file PATH] --once [--dry-run] [--open-to-public]
+    {PROGRAM} [--config-file PATH] --daemon [--open-to-public]
     {PROGRAM} --doctor
     {PROGRAM} --list-candidates
+    {PROGRAM} --cleanup-public-sessions [--dry-run]
     {PROGRAM} --sessions
     {PROGRAM} --manpage
     {PROGRAM} --model-cache
@@ -2559,20 +3529,31 @@ USAGE
 
 MAIL SUBJECTS
     tc:CONFIG                    Export/apply mailbot config attachment
-    tc:MODELS                    Attach existing models-cache.json; no refresh
+    tc:MODELS                    Return existing models-cache.json; no refresh
     tc:MODELS TEXT               Search existing model cache for TEXT
     tc:CMD                       Run first nonempty body line as a command
     tc:command args              Run a mailbot command directly
     tc:delete{{session-name}}      Delete a ttychatter session log
     tc:rm{{session-name}}          Alias for delete{{session-name}}
+    tc:archive-session on|off    Public archive-on-expire preference
     tc:{{session-name}}          Send body to ttychatter session
     tc:{{new}}                   Let ttychatter create its default timestamped session
+    MAILBOT                      Use first nonempty body line as command/session selector
+    Re: session-name             Resume by subject when RE_SESSION_SUBJECTS permits it
 
-DESCRIPTION
-    Reads unread mail from IMAP. Braced subjects tc:{{session}} are ordinary
-    ttychatter chats. Bare subjects tc:CONFIG, tc:MODELS, tc:CMD,
-    tc:delete{{session}}, tc:rm{{session}}, and tc:command args are mailbot
-    control commands. tc:update-models is the explicit model-cache refresh path.
+PUBLIC MODE
+    --open-to-public accepts non-control subjects as prompts from any sender.
+    Non-ALLOWED_FROM senders are isolated by PUBLIC_SESSION_MODE and may use
+    only PUBLIC_ALLOWED_COMMANDS. Public sessions are cleaned up by the
+    PUBLIC_SESSION_* policy; by default inactive public logs expire after
+    72 hours and are trimmed to the last 12 user/assistant cycles.
+    When enabled, expired logs are emailed to the public sender before local
+    deletion; users may toggle that with archive-session on/off.
+
+OUTPUT MODES
+    COMMAND_OUTPUT_MODE and command-specific MODEL_CACHE_OUTPUT,
+    MODEL_SEARCH_OUTPUT, MODEL_LIST_OUTPUT, SESSIONS_OUTPUT, and CONFIG_OUTPUT
+    accept auto, body, or attachment.
 
 CONFIG PATH
     If --config-file is omitted, the path is resolved as:
@@ -2580,8 +3561,9 @@ CONFIG PATH
     then ~/.config/ttychatter/mailbot/config.
 
 SECURITY
-    ALLOWED_FROM is required. Mail from other senders is ignored. Commands are
-    allowlisted and are not shell-expanded. Do not send secrets by email.
+    Private mode requires ALLOWED_FROM. Public mode should use a separate
+    mailbox, conservative limits, per-sender sessions, and a small public
+    command allowlist. Do not send secrets by email.
 """
 
 
@@ -2591,6 +3573,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--daemon", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--open-to-public", action="store_true")
+    parser.add_argument("--cleanup-public-sessions", action="store_true")
     parser.add_argument("--doctor", action="store_true")
     parser.add_argument("--list-candidates", action="store_true")
     parser.add_argument("--sessions", action="store_true")
@@ -2622,6 +3606,14 @@ def main() -> int:
         return 0
 
     cfg = load_config(resolve_config_file(args.config_file))
+    if args.open_to_public:
+        cfg.open_to_public = True
+
+    if args.cleanup_public_sessions:
+        cfg.open_to_public = True
+        cfg.public_session_cleanup = True
+        print(cleanup_public_sessions(cfg, dry_run=args.dry_run), end="")
+        return 0
 
     if args.manpage:
         print(mailbot_manpage(cfg), end="")

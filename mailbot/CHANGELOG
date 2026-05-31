@@ -1,32 +1,98 @@
+ttychatter.mailbot 0.5.0
+=========================
+
+New features
+------------
+- Added public demo mode through --open-to-public and OPEN_TO_PUBLIC=1.
+- In public mode, non-control subjects from any sender are accepted as AI
+  prompts. Public senders do not need tc: for ordinary chat.
+- Added PUBLIC_SESSION_MODE with per-sender, per-message, and shared modes.
+  The default is per-sender to avoid prompt contamination between strangers.
+- Added public resume-by-subject support. Public replies advertise the actual
+  session name, and a later message with Re: session-name can resume that log
+  when RE_SESSION_SUBJECTS permits it.
+- Added public-session cleanup by age, idle time, count, and transcript length:
+  PUBLIC_SESSION_IDLE_HOURS, PUBLIC_SESSION_TTL_HOURS,
+  PUBLIC_SESSION_MAX_COUNT, and PUBLIC_SESSION_MAX_TURNS.
+- Added PUBLIC_SESSION_INDEX_FILE to remember public session owners and sender
+  preferences.
+- Added archive-on-expire for public logs. When
+  PUBLIC_SESSION_ARCHIVE_ON_DELETE=1, cleanup emails an expiring public log to
+  its recorded sender before deleting the local file.
+- Added PUBLIC_SESSION_ARCHIVE_USER_TOGGLE so public users can manage their own
+  archive preference with archive-session on/off/status, archive-opt-in, and
+  archive-opt-out.
+- Added PUBLIC_SESSION_ARCHIVE_FAILURE_POLICY. The default keep refuses local
+  deletion when archive delivery fails. The value delete removes the local log
+  even if the archive could not be sent.
+- Added PUBLIC_SESSION_ARCHIVE_MAX_BYTES to cap archive attachments.
+- Added configurable command-output delivery: COMMAND_OUTPUT_MODE plus
+  MODEL_CACHE_OUTPUT, MODEL_SEARCH_OUTPUT, MODEL_LIST_OUTPUT, SESSIONS_OUTPUT,
+  CONFIG_OUTPUT, and OUTPUT_INLINE_MAX_BYTES.
+- Added configurable mail grammar keys for subject prefix, separator, session
+  delimiters, body-command subjects, and subject/body command acceptance.
+- Subject: MAILBOT now supports both commands and ordinary AI prompts. Known
+  first-line commands run as mailbot commands; other body text is treated as a
+  new chat prompt.
+
+Behavior changes
+----------------
+- Public mode separates privileged senders from public senders. ALLOWED_FROM
+  senders keep private control powers; public senders are restricted to
+  PUBLIC_ALLOWED_COMMANDS.
+- Public session cleanup runs before each --once poll and during daemon polling.
+  It can also be invoked explicitly with --cleanup-public-sessions.
+- Public cleanup is conservative by default: if archive-on-expire is enabled and
+  archive sending fails, the local log is kept.
+- Public session transcript trimming is best-effort and based on ttychatter's
+  line-oriented session log format. Set PUBLIC_SESSION_MAX_TURNS=0 to disable.
+
+Compatibility
+-------------
+- The 0.4 syntax remains accepted: tc:CONFIG, tc:MODELS, tc:MODELS TEXT,
+  tc:CMD, tc:command args, tc:{session}, and tc:{new}.
+- Legacy tc:{CONFIG}, tc:{MAILBOT}, and tc:{MAILBOT:command args} remain
+  compatibility aliases after ALLOWED_FROM passes.
+- Existing private-mode deployments should continue to work without enabling
+  OPEN_TO_PUBLIC.
+
+Security notes
+--------------
+- Public mode should use a separate mailbox and a narrow PUBLIC_ALLOWED_COMMANDS
+  list. Do not expose config mutation, update-models, session deletion,
+  rename-session, tty-set, or tty-unset to strangers unless the deployment is
+  intentionally disposable.
+- PUBLIC_SESSION_INDEX_FILE stores public sender addresses so archive-on-expire
+  can send logs back to their owners. Disable archive-on-expire or user toggles
+  if that is not acceptable for the deployment.
+- The command parser remains allowlisted and non-shell-expanded.
+
 ttychatter.mailbot 0.4.1
 =========================
 
 Bug fixes
 ---------
-- Corrected the model-cache command family. tc:MODELS, model-cache,
-  models-cache, and cached-models now attach the existing MODEL_CACHE_FILE only;
-  they do not run ttychatter.python --update-models and do not contact
-  OpenRouter.
-- Kept update-models, update-model-list, update-model-cache, refresh-models,
-  and refresh-model-cache as the explicit model-cache refresh commands.
+- Split model-cache from update-models. model-cache and models-cache now attach
+  the existing MODEL_CACHE_FILE only; they do not run ttychatter.python
+  --update-models and do not ping OpenRouter.
+- Changed tc:MODELS to be a cache-only shorthand for model-cache. Use
+  tc:update-models when an intentional live model-list refresh is wanted.
 
 New features
 ------------
-- Added model-search TEXT, with aliases search-models, models-search,
-  find-model, find-models, and grep-models. It searches the already-downloaded
-  model cache and never refreshes it.
-- Added tc:MODELS TEXT as a shorthand for cached model-list search.
-- Added delete-session SESSION for deleting a session log under SESSION_DIR.
-- Added compact delete subjects tc:delete{SESSION} and tc:rm{SESSION}.
-- Added MODEL_SEARCH_MAX_MATCHES, default 100.
+- Added cache-only model-list search: model-search TEXT, search-models TEXT,
+  models-search TEXT, model-list-search TEXT, and shorthand tc:MODELS TEXT.
+- Added session deletion commands: delete-session SESSION, delete{SESSION},
+  rm{SESSION}, remove-session SESSION, and rm-session SESSION. Dry-run reports
+  the exact target path without deleting.
+- Added MODEL_SEARCH_MAX_MATCHES to bound model-cache search output.
 
-Notes
------
-- tc:MODELS now means read-only cache retrieval. Use tc:update-models when a
-  network refresh is wanted.
-- delete-session is deliberately conservative: it resolves the target as a
-  sanitized .log file under SESSION_DIR, supports dry-run, and refuses paths
-  outside SESSION_DIR.
+Safety notes
+------------
+- Session deletion validates that the target resolves inside SESSION_DIR, is
+  a regular .log file, and uses the exact sanitized session name.
+- update-models remains the only mailbot command in this group that intentionally
+  refreshes the model list from OpenRouter.
 
 ttychatter.mailbot 0.4.0
 =========================

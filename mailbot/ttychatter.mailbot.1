@@ -1,39 +1,45 @@
-.TH TTYCHATTER.MAILBOT 1 "May 2026" "ttychatter.mailbot 0.4.1" "User Commands"
+.TH TTYCHATTER.MAILBOT 1 "May 2026" "ttychatter.mailbot 0.5.0" "User Commands"
 .SH NAME
 ttychatter.mailbot \- email transport adapter and remote control surface for ttychatter
 .SH SYNOPSIS
 .B ttychatter.mailbot
-[--config-file PATH] [--once|--daemon|--dry-run] [--doctor] [--list-candidates]
+[--config-file PATH] [--once|--daemon] [--dry-run] [--open-to-public]
 .PP
 .B ttychatter.mailbot
-[--config|--raw-config] [--sessions|--list-sessions] [--manpage] [--model-cache] [--model-search TEXT] [--update-models] [--delete-session SESSION]
+[--doctor] [--list-candidates] [--cleanup-public-sessions]
 .PP
 .B ttychatter.mailbot
-[--set KEY VALUE] [--unset KEY] [--set-imap-password [--gpg]] [--set-smtp-password [--gpg]]
+[--config|--raw-config] [--sessions|--list-sessions] [--manpage]
+[--model-cache] [--model-search TEXT] [--update-models]
+[--delete-session SESSION]
+.PP
+.B ttychatter.mailbot
+[--set KEY VALUE] [--unset KEY] [--set-imap-password [--gpg]]
+[--set-smtp-password [--gpg]]
 .SH DESCRIPTION
-ttychatter.mailbot reads unread IMAP mail, accepts only messages from ALLOWED_FROM,
-extracts a subject token, and either sends the message body to ttychatter.python
-or handles a local mailbot control command. Replies are sent by sendmail or SMTP.
+ttychatter.mailbot reads unread IMAP mail, maps each accepted message to a
+chat session or an allowlisted control command, calls ttychatter.python when
+chat or ttychatter utility work is needed, and replies by sendmail or SMTP.
 .PP
-The 0.4 command grammar reserves braces for ttychatter chat sessions and uses
-bare subjects for mailbot controls. Version 0.4.1 makes model-cache operations
-cache-only unless the operator explicitly runs update-models.
-.SH CHAT SUBJECTS
+Private mode requires ALLOWED_FROM. Public demo mode, enabled by
+.B --open-to-public
+or OPEN_TO_PUBLIC=1, accepts mail from any sender but restricts non-ALLOWED_FROM
+senders to public chat and the PUBLIC_ALLOWED_COMMANDS set.
+.SH PRIVATE SUBJECT GRAMMAR
 .TP
 .B tc:{session-name}
 Send the message body to the named ttychatter session.
 .TP
 .B tc:{new}
 Start a new unnamed chat. The mailbot passes no session argument, so
-ttychatter.python creates its normal session-YYYY-MM-DD-HH-MM-SS log name.
-.SH CONTROL SUBJECTS
+ttychatter.python creates its normal timestamped session name.
 .TP
 .B tc:CONFIG
 Export or apply the mailbot config attachment.
 .TP
 .B tc:MODELS
-Attach the existing MODEL_CACHE_FILE as models-cache.json. This is cache-only;
-it does not call ttychatter.python --update-models and does not ping OpenRouter.
+Return the existing MODEL_CACHE_FILE as models-cache.json. This is cache-only;
+it does not call ttychatter.python --update-models.
 .TP
 .B tc:MODELS TEXT
 Search the existing model cache for TEXT. This is also cache-only.
@@ -44,137 +50,101 @@ Run the first nonempty message-body line as a mailbot command.
 .B tc:command args
 Run a mailbot command directly from the subject.
 .TP
-.B tc:delete{session-name}
-Delete the named session log from SESSION_DIR. The supplied name must already be the exact sanitized session name.
-.TP
-.B tc:rm{session-name}
-Alias for delete{session-name}.
+.B MAILBOT
+When included in BODY_COMMAND_SUBJECTS, use the first nonempty body line as
+the command or session selector. "session NAME" and "chat NAME" route the
+remaining body to that chat session.
+.SH PUBLIC DEMO MODE
+In public mode, a message without a recognized control subject is treated as
+an AI prompt. PUBLIC_SESSION_MODE controls isolation: per-sender, per-message,
+or shared. The default is per-sender. Replies to public users use
+"Re: public-session-name" so the user can resume by replying with that subject.
 .PP
-Legacy subjects tc:{CONFIG}, tc:{MAILBOT},
-and tc:{MAILBOT:command args} remain accepted for compatibility,
-but new mail should use the bare control subjects.
-.SH SUPPORTED COMMANDS
+Public sessions use PUBLIC_SESSION_PREFIX and are cleaned up automatically
+when PUBLIC_SESSION_CLEANUP=1. PUBLIC_SESSION_IDLE_HOURS,
+PUBLIC_SESSION_TTL_HOURS, and PUBLIC_SESSION_MAX_COUNT control deletion.
+PUBLIC_SESSION_MAX_TURNS trims surviving public logs to the most recent
+input/output cycles. Cleanup matches PUBLIC_SESSION_PREFIX-*.log logs and
+the configured shared public log when PUBLIC_SESSION_MODE=shared.
+.PP
+When PUBLIC_SESSION_ARCHIVE_ON_DELETE=1, an expiring public log is emailed
+to the recorded sender before local deletion. PUBLIC_SESSION_ARCHIVE_USER_TOGGLE=1
+lets public users change their own preference with archive-session on/off.
+PUBLIC_SESSION_ARCHIVE_FAILURE_POLICY=keep refuses deletion when archive
+sending fails; delete removes the local log anyway.
+.SH COMMANDS
 .TP
 .B help
 Return the email command summary.
 .TP
 .B manpage
-Return the configured external manpage as an email attachment when found,
-otherwise return the embedded fallback. Aliases: manual, get-manpage, fetch-manpage.
+Return this roff manpage. Aliases: manual, get-manpage, fetch-manpage.
 .TP
 .B sessions
-List saved session names with short head and tail previews from each session log.
+List saved session names with short head and tail previews.
 .TP
 .B search TEXT
-Search all session logs for TEXT. If the subject is only tc:search,
-the first nonempty body line supplies TEXT.
+Search all session logs for TEXT.
 .TP
 .B search-session SESSION TEXT
-Search a single session log for TEXT.
+Search one session log.
 .TP
 .B rename-session OLD NEW
-Rename a session log after sanitizing both names.
+Rename a session log.
 .TP
 .B delete-session SESSION
-Delete a session log. Aliases: delete, rm, remove-session, rm-session. The
-target must resolve inside SESSION_DIR and the supplied name must already be
-the exact sanitized session name. Subject shortcuts tc:delete{SESSION}
-and tc:rm{SESSION} are accepted.
+Delete a session log. Aliases: delete, rm, remove-session, rm-session.
+The target must resolve inside SESSION_DIR and the supplied name must already
+be the exact sanitized session name. Use --dry-run locally to show the path
+that would be deleted without deleting it.
+.TP
+.B archive-session [on|off|status]
+Show or change the sender's public-mode archive-on-expire preference. Aliases:
+archive-opt-in and archive-opt-out.
 .TP
 .B model-cache
-Attach the existing MODEL_CACHE_FILE as models-cache.json. This command never
-refreshes the cache. Alias: models-cache.
+Return the existing MODEL_CACHE_FILE only. Never refreshes the cache.
 .TP
 .B model-search TEXT
-Search the existing model cache for TEXT. This command never refreshes the cache.
-Aliases: search-models, models-search, model-list-search.
+Search the existing model cache only. Never refreshes the cache.
 .TP
 .B update-models
-Run ttychatter.python --update-models, then attach the resulting models-cache.json
-when the cache file is present and smaller than MAX_OUTGOING_ATTACHMENT_BYTES.
-This is the explicit live refresh command.
+Explicitly run ttychatter.python --update-models, then return models-cache.json.
 .TP
 .B model-list [FLAGS]
-Run ttychatter.python --models. Aliases: models, list-models, models-list, show-models.
-The safe model-list flags are --all, --sort VALUE, --modellist-sort-tokens,
---min-input-tokens N, --min-output-tokens N, --hide-preview, --show-preview,
---require-tokens, --allow-missing-tokens, and --model-type VALUE.
+Run ttychatter.python --models. Aliases include models and list-models.
 .TP
 .B routers [FLAGS]
-Run ttychatter.python --routers with the same safe model-list flags.
-.TP
-.B favorites
-Return ttychatter's model favorites.
-.TP
-.B favorite-model MODEL
-Add MODEL to ttychatter's favorites file.
-.TP
-.B unfavorite-model MODEL
-Remove MODEL from ttychatter's favorites file.
-.TP
-.B test-model MODEL
-Run ttychatter.python --test-model MODEL.
-.TP
-.B ttyconfig
-Return ttychatter.python --config output.
-.TP
-.B ttydoctor
-Return ttychatter.python --doctor diagnostics.
-.TP
-.B show-memory SESSION
-Return ttychatter's memory snapshot for SESSION.
-.TP
-.B clear-memory SESSION
-Clear ttychatter's memory snapshot for SESSION.
-.TP
-.B tty-set KEY VALUE
-Run ttychatter.python --set KEY VALUE. Do not send secrets by email.
-.TP
-.B tty-unset KEY
-Run ttychatter.python --unset KEY.
-.TP
-.B credits
-Return ttychatter.python --credits output.
-.SH LOCAL CONFIG OUTPUT
-The local --config command prints the parsed effective config, not a byte-for-byte
-copy of the config file. Use --raw-config to print the actual config file with
-plaintext password lines redacted. The default config path is
-TTYCHATTER_MAILBOT_CONFIG, then XDG_CONFIG_HOME/ttychatter/mailbot/config,
-then ~/.config/ttychatter/mailbot/config; --config-file PATH has final precedence.
-.SH CONFIG COMMAND
-The subject tc:CONFIG exports the mailbot config as an
-attachment. Reply with an edited config attachment using the same subject to
-replace the config; a timestamped backup is kept. Plaintext IMAP_PASSWORD and
-SMTP_PASSWORD values are redacted on export.
+Run ttychatter.python --routers.
+.SH OUTPUT MODES
+COMMAND_OUTPUT_MODE, MODEL_CACHE_OUTPUT, MODEL_SEARCH_OUTPUT,
+MODEL_LIST_OUTPUT, SESSIONS_OUTPUT, and CONFIG_OUTPUT accept auto, body, or
+attachment. The default is auto globally, with short search/session results
+in the body and large cache/config results as attachments.
 .SH CONFIGURATION KEYS
-Core keys include IMAP_HOST, IMAP_PORT, IMAP_SSL, IMAP_USER, IMAP_PASSWORD,
-IMAP_PASSWORD_GPG_FILE, SEND_METHOD, SENDMAIL_PATH, SMTP_HOST, SMTP_PORT,
-SMTP_SSL, SMTP_STARTTLS, SMTP_USER, SMTP_PASSWORD, SMTP_PASSWORD_GPG_FILE,
-MAIL_FROM, MAIL_TO, ALLOWED_FROM, SUBJECT_PREFIX, CONFIG_SUBJECT_TOKEN,
-MODELS_SUBJECT_TOKEN, COMMAND_SUBJECT_TOKEN, MAILBOT_SUBJECT_TOKEN,
-POLL_INTERVAL, MAX_MESSAGES_PER_RUN, MAX_BODY_BYTES, MAX_ATTACHMENT_BYTES,
-PROCESS_ATTACHMENTS, MARK_SEEN, TTYCHATTER_COMMAND, TTYCHATTER_EXTRA_ARGS,
-TTYCHATTER_CONTROL_TIMEOUT, MAILBOT_MANPAGE_FILE, SESSION_DIR, ATTACHMENT_DIR,
-MODEL_CACHE_FILE, WORK_DIR, PROCESSED_DB, SESSION_LIST_HEAD_LINES,
-SESSION_LIST_TAIL_LINES, SESSION_LIST_MAX_SESSIONS, SESSION_PREVIEW_LINE_CHARS,
-SESSION_SEARCH_MAX_MATCHES, MODEL_SEARCH_MAX_MATCHES, MAX_COMMAND_OUTPUT_BYTES,
-MAX_OUTGOING_ATTACHMENT_BYTES, REPLY_SUBJECT_PREFIX, and INCLUDE_TTYCHATTER_STDERR.
+Important keys include IMAP_HOST, IMAP_PORT, IMAP_SSL, IMAP_USER,
+IMAP_PASSWORD, IMAP_PASSWORD_GPG_FILE, SEND_METHOD, SENDMAIL_PATH,
+MAIL_FROM, MAIL_TO, ALLOWED_FROM, SUBJECT_PREFIX, SUBJECT_SEPARATOR,
+SESSION_OPEN_DELIM, SESSION_CLOSE_DELIM, BODY_COMMAND_SUBJECTS,
+ALLOW_COMMANDS_IN_SUBJECT, ALLOW_BODY_COMMAND_SUBJECTS,
+ALLOW_BARE_CONTROL_SUBJECTS, ALLOW_LEGACY_BRACED_CONTROL,
+RE_SESSION_SUBJECTS, OPEN_TO_PUBLIC, PUBLIC_SESSION_MODE,
+PUBLIC_SESSION_PREFIX, PUBLIC_SHARED_SESSION, PUBLIC_ALLOW_NAMED_SESSIONS,
+PUBLIC_ALLOWED_COMMANDS, PUBLIC_SESSION_CLEANUP, PUBLIC_SESSION_TTL_HOURS,
+PUBLIC_SESSION_IDLE_HOURS, PUBLIC_SESSION_MAX_COUNT,
+PUBLIC_SESSION_MAX_TURNS, PUBLIC_SESSION_INDEX_FILE,
+PUBLIC_SESSION_ARCHIVE_ON_DELETE, PUBLIC_SESSION_ARCHIVE_USER_TOGGLE,
+PUBLIC_SESSION_ARCHIVE_FAILURE_POLICY, PUBLIC_SESSION_ARCHIVE_MAX_BYTES,
+MODEL_CACHE_FILE,
+SESSION_DIR, ATTACHMENT_DIR, WORK_DIR, PROCESSED_DB, COMMAND_OUTPUT_MODE,
+MODEL_CACHE_OUTPUT, MODEL_SEARCH_OUTPUT, MODEL_LIST_OUTPUT, SESSIONS_OUTPUT,
+CONFIG_OUTPUT, OUTPUT_INLINE_MAX_BYTES, MAX_COMMAND_OUTPUT_BYTES, and
+MAX_OUTGOING_ATTACHMENT_BYTES.
 .SH SECURITY
-ALLOWED_FROM is required. Commands are allowlisted and are not shell-expanded.
-Email is not a good channel for secrets; use the local --set-imap-password and
---set-smtp-password commands for passwords.
-.SH GPG PASSWORD FILES
-With --gpg, the mailbot stores IMAP and SMTP passwords in external gpg files and
-decrypts them with gpg --quiet --decrypt at runtime. For interactive tests, set
-export GPG_TTY=$(tty) and test the password file directly with gpg --decrypt as
-the mailbot user. Do not diagnose this by switching to root unless the service
-is actually configured to run as root.
-.SH MANPAGE LOOKUP
-The email manpage command and the local --manpage command use the first readable
-manpage found. The lookup order is TTYCHATTER_MAILBOT_MANPAGE_FILE, then
-MAILBOT_MANPAGE_FILE, then config, executable, XDG/user man1, system man1, and
-current working directory candidates. Matching .1.gz files are accepted. If no
-external file is found, the embedded fallback is used.
+Public mode is for demos. It should use a separate mailbox, conservative
+attachment/body limits, per-sender sessions, and a small PUBLIC_ALLOWED_COMMANDS
+set. Do not expose config mutation, model refresh, session deletion, or tty-set
+to non-ALLOWED_FROM senders.
 .SH FILES
 Default config: ~/.config/ttychatter/mailbot/config
 .PP
