@@ -1,0 +1,27 @@
+ttychatter.mailbot 0.6.0 verification
+======================================
+
+Local checks run for this package:
+
+    python3 -m py_compile ttychatter.mailbot
+    ./ttychatter.mailbot --help
+    ./ttychatter.mailbot --config
+    ./ttychatter.mailbot --manpage
+
+Feature checks run with temporary HOME/state directories:
+
+    - Registry creates a stable per-sender user id and private ttychatter HOME.
+    - Subject "Re: My Model Test" resolves to the same session name as
+      "My Model Test" for that sender.
+    - tc:user reports sender, user id, private HOME, per-user config, session
+      directory, model-cache path, user API-key file, and API-key source.
+    - tc:set CONTEXT_TURNS 19 invokes ttychatter.python --set under the per-user
+      HOME and writes only non-secret preferences.
+    - tc:set SESSION_DIR /tmp/bad is refused because SESSION_DIR is not in
+      USER_TTYCONFIG_ALLOWED_KEYS.
+    - tc:set OPENROUTER_API_KEY VALUE writes a chmod 600 per-user secret file
+      and does not write OPENROUTER_API_KEY into .config.
+    - Reply bodies and reply subjects redact API-key commands.
+    - Legacy plaintext OPENROUTER_API_KEY migration moves the value to the
+      server default secret file and removes the plaintext line from config.
+    - Spam recipient-flood rejection and sender rate-limit counters work.

@@ -1,3 +1,53 @@
+ttychatter.mailbot 0.6.0
+=========================
+
+New features
+------------
+- Added USER_REGISTRY=1, enabled by default. Each sender is mapped to a private
+  registry user id and a private ttychatter HOME.
+- Added SUBJECT_SESSIONS=1, enabled by default. Ordinary email subjects become
+  per-user session names, and Re: replies resume the same sender/session pair.
+- Added per-user ttychatter config files for non-secret preferences such as
+  MODEL and CONTEXT_TURNS.
+- Added per-user OpenRouter key storage through the api-key command and
+  tty-set OPENROUTER_API_KEY VALUE. Keys are written to chmod 600 secret files
+  under USER_SECRET_DIR and are injected into ttychatter through the subprocess
+  environment.
+- Added DEFAULT_OPENROUTER_API_KEY_FILE for the server fallback key.
+- Added automatic migration of legacy plaintext OPENROUTER_API_KEY/API_KEY
+  lines from LEGACY_OPENROUTER_CONFIG_FILE to DEFAULT_OPENROUTER_API_KEY_FILE,
+  with a timestamped backup.
+- Added user, prefs, api-key, and forget-api-key mail commands.
+- Added spam protection for auto-submitted/list/bulk mail and visible-recipient
+  floods.
+- Added rate limiting by sender and globally, with stricter defaults for public
+  unprivileged senders.
+
+Security changes
+----------------
+- build_control_reply redacts API-key commands and reply subjects so keys are
+  not echoed in mailbot replies.
+- tty-set and tty-unset are restricted to USER_TTYCONFIG_ALLOWED_KEYS. Path
+  options such as SESSION_DIR are refused by email by default.
+- DENY_FROM/ALLOWED_FROM parsing now preserves @domain and *@domain patterns.
+
+ttychatter.mailbot 0.5.1
+=========================
+
+Hotfixes
+--------
+- Added REJECT_SELF_SENDER, enabled by default, to prevent mailbot reply loops.
+- Self-sender rejection runs before ALLOWED_FROM, OPEN_TO_PUBLIC, subject parsing, command parsing, and session parsing.
+- Added DENY_FROM sender denylist for public and private modes.
+- Added BANNED_FROM and BANNED_LIST as compatibility aliases for DENY_FROM.
+- --list-candidates now reports self-sender and denylist skip reasons.
+- --doctor and --config now report REJECT_SELF_SENDER and DENY_FROM.
+
+Notes
+-----
+- Public demos may use ALLOWED_FROM=* only if self-rejection remains enabled.
+- Recommended public safety baseline: ALLOWED_FROM=*, OPEN_TO_PUBLIC=1, REJECT_SELF_SENDER=1, and DENY_FROM=mailbot@domain.
+
 ttychatter.mailbot 0.5.0
 =========================
 

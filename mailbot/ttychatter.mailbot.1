@@ -1,4 +1,4 @@
-.TH TTYCHATTER.MAILBOT 1 "May 2026" "ttychatter.mailbot 0.5.0" "User Commands"
+.TH TTYCHATTER.MAILBOT 1 "May 2026" "ttychatter.mailbot 0.6.0" "User Commands"
 .SH NAME
 ttychatter.mailbot \- email transport adapter and remote control surface for ttychatter
 .SH SYNOPSIS
@@ -25,7 +25,15 @@ Private mode requires ALLOWED_FROM. Public demo mode, enabled by
 .B --open-to-public
 or OPEN_TO_PUBLIC=1, accepts mail from any sender but restricts non-ALLOWED_FROM
 senders to public chat and the PUBLIC_ALLOWED_COMMANDS set.
+.PP
+USER_REGISTRY=1 maps each accepted sender to a private ttychatter HOME.
+SUBJECT_SESSIONS=1 lets ordinary email subjects become per-sender session
+names; Re: replies resume the same sender/session pair.
 .SH PRIVATE SUBJECT GRAMMAR
+.TP
+.B ordinary email subject
+Send the message body to this sender's private subject-named session when
+SUBJECT_SESSIONS=1. Reply prefixes such as Re: and Fwd: are stripped.
 .TP
 .B tc:{session-name}
 Send the message body to the named ttychatter session.
@@ -102,6 +110,28 @@ that would be deleted without deleting it.
 Show or change the sender's public-mode archive-on-expire preference. Aliases:
 archive-opt-in and archive-opt-out.
 .TP
+.B user
+Show this sender's registry id, private HOME, per-user config path, and
+API-key source.
+.TP
+.B prefs
+Show this sender's ttychatter configuration. Alias for ttyconfig.
+.TP
+.B tty-set KEY VALUE
+Set an allowlisted per-user ttychatter preference. The allowed list is
+USER_TTYCONFIG_ALLOWED_KEYS. Alias: set.
+.TP
+.B tty-unset KEY
+Remove an allowlisted per-user ttychatter preference. Alias: unset.
+.TP
+.B api-key KEY
+Store this sender's OpenRouter API key in USER_SECRET_DIR as a chmod 600
+secret file. The key is not written to .config. Alias: set-api-key.
+.TP
+.B forget-api-key
+Remove this sender's stored OpenRouter API key and fall back to the server
+default key file.
+.TP
 .B model-cache
 Return the existing MODEL_CACHE_FILE only. Never refreshes the cache.
 .TP
@@ -124,7 +154,7 @@ in the body and large cache/config results as attachments.
 .SH CONFIGURATION KEYS
 Important keys include IMAP_HOST, IMAP_PORT, IMAP_SSL, IMAP_USER,
 IMAP_PASSWORD, IMAP_PASSWORD_GPG_FILE, SEND_METHOD, SENDMAIL_PATH,
-MAIL_FROM, MAIL_TO, ALLOWED_FROM, SUBJECT_PREFIX, SUBJECT_SEPARATOR,
+MAIL_FROM, MAIL_TO, ALLOWED_FROM, DENY_FROM, BANNED_FROM, BANNED_LIST, REJECT_SELF_SENDER, SUBJECT_PREFIX, SUBJECT_SEPARATOR,
 SESSION_OPEN_DELIM, SESSION_CLOSE_DELIM, BODY_COMMAND_SUBJECTS,
 ALLOW_COMMANDS_IN_SUBJECT, ALLOW_BODY_COMMAND_SUBJECTS,
 ALLOW_BARE_CONTROL_SUBJECTS, ALLOW_LEGACY_BRACED_CONTROL,
@@ -135,6 +165,13 @@ PUBLIC_SESSION_IDLE_HOURS, PUBLIC_SESSION_MAX_COUNT,
 PUBLIC_SESSION_MAX_TURNS, PUBLIC_SESSION_INDEX_FILE,
 PUBLIC_SESSION_ARCHIVE_ON_DELETE, PUBLIC_SESSION_ARCHIVE_USER_TOGGLE,
 PUBLIC_SESSION_ARCHIVE_FAILURE_POLICY, PUBLIC_SESSION_ARCHIVE_MAX_BYTES,
+USER_REGISTRY, SUBJECT_SESSIONS, USER_REGISTRY_FILE, USER_HOME_ROOT,
+USER_SECRET_DIR, DEFAULT_OPENROUTER_API_KEY_FILE,
+MIGRATE_PLAINTEXT_OPENROUTER_API_KEY, ALLOW_USER_API_KEYS,
+USER_TTYCONFIG_ALLOWED_KEYS, SPAM_PROTECTION, SPAM_MAX_RECIPIENTS,
+RATE_LIMIT_ENABLED, RATE_LIMIT_DB, RATE_LIMIT_WINDOW_SECONDS,
+RATE_LIMIT_SENDER_MESSAGES, RATE_LIMIT_GLOBAL_MESSAGES,
+RATE_LIMIT_PUBLIC_SENDER_MESSAGES, RATE_LIMIT_PUBLIC_GLOBAL_MESSAGES,
 MODEL_CACHE_FILE,
 SESSION_DIR, ATTACHMENT_DIR, WORK_DIR, PROCESSED_DB, COMMAND_OUTPUT_MODE,
 MODEL_CACHE_OUTPUT, MODEL_SEARCH_OUTPUT, MODEL_LIST_OUTPUT, SESSIONS_OUTPUT,
@@ -142,17 +179,35 @@ CONFIG_OUTPUT, OUTPUT_INLINE_MAX_BYTES, MAX_COMMAND_OUTPUT_BYTES, and
 MAX_OUTGOING_ATTACHMENT_BYTES.
 .SH SECURITY
 Public mode is for demos. It should use a separate mailbox, conservative
-attachment/body limits, per-sender sessions, and a small PUBLIC_ALLOWED_COMMANDS
-set. Do not expose config mutation, model refresh, session deletion, or tty-set
-to non-ALLOWED_FROM senders.
+attachment/body limits, per-sender registry homes, subject sessions, and a
+small PUBLIC_ALLOWED_COMMANDS set. Do not expose config mutation, model
+refresh, session deletion, api-key, tty-set, or tty-unset to non-ALLOWED_FROM
+senders unless the deployment is intentionally disposable.
+.PP
+OpenRouter keys are loaded from DEFAULT_OPENROUTER_API_KEY_FILE or a
+per-user secret file and injected into the ttychatter subprocess environment.
+The mailbot migrates legacy plaintext API-key lines out of the ttychatter
+config when MIGRATE_PLAINTEXT_OPENROUTER_API_KEY=1.
+.PP
+SPAM_PROTECTION rejects auto-submitted/list/bulk mail and recipient floods.
+RATE_LIMIT_ENABLED enforces sender and global work caps. Enforce SPF, DKIM,
+DMARC, greylisting, and reputation at the MTA.
 .SH FILES
 Default config: ~/.config/ttychatter/mailbot/config
 .PP
 Default processed-message database: ~/.local/state/ttychatter/mailbot/processed-ids.txt
 .PP
-Default session directory: ~/.local/share/ttychatter/openrouter/sessions
+Default user registry: ~/.local/state/ttychatter/mailbot/users.json
 .PP
-Default model cache: ~/.config/ttychatter/openrouter/models-cache.json
+Default per-user homes: ~/.local/state/ttychatter/mailbot/users/
+.PP
+Default server OpenRouter key: ~/.secrets/ttychatter/mailbot/openrouter-default.key
+.PP
+Default per-user OpenRouter keys: ~/.secrets/ttychatter/mailbot/openrouter-users/
+.PP
+Default session directory without USER_REGISTRY: ~/.local/share/ttychatter/openrouter/sessions
+.PP
+Default model cache without USER_REGISTRY: ~/.config/ttychatter/openrouter/models-cache.json
 .SH EXIT STATUS
 0 indicates success. Nonzero status indicates configuration, IMAP, SMTP,
 sendmail, or ttychatter subprocess failure.

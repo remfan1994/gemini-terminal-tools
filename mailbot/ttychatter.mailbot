@@ -44,14 +44,14 @@ import sys
 import tempfile
 import time
 import textwrap
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from email.message import EmailMessage, Message
 from email.utils import getaddresses, make_msgid, parseaddr
 from pathlib import Path
 from typing import Any, Iterable, List, Optional, Tuple
 
 PROGRAM = "ttychatter.mailbot"
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 
 DEFAULT_CONFIG_DIR = Path.home() / ".config" / "ttychatter" / "mailbot"
 DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config"
@@ -60,6 +60,13 @@ DEFAULT_CACHE_DIR = Path.home() / ".cache" / "ttychatter" / "mailbot"
 DEFAULT_SESSION_DIR = Path.home() / ".local" / "share" / "ttychatter" / "openrouter" / "sessions"
 DEFAULT_ATTACHMENT_DIR = Path.home() / ".local" / "share" / "ttychatter" / "openrouter" / "attachments"
 DEFAULT_MODEL_CACHE_FILE = Path.home() / ".config" / "ttychatter" / "openrouter" / "models-cache.json"
+DEFAULT_USER_REGISTRY_FILE = DEFAULT_STATE_DIR / "users.json"
+DEFAULT_USER_HOME_ROOT = DEFAULT_STATE_DIR / "users"
+DEFAULT_SECRET_DIR = Path.home() / ".secrets" / "ttychatter" / "mailbot"
+DEFAULT_USER_SECRET_DIR = DEFAULT_SECRET_DIR / "openrouter-users"
+DEFAULT_OPENROUTER_API_KEY_FILE = DEFAULT_SECRET_DIR / "openrouter-default.key"
+DEFAULT_LEGACY_OPENROUTER_CONFIG_FILE = Path.home() / ".config" / "ttychatter" / "openrouter" / "config"
+DEFAULT_RATE_LIMIT_DB = DEFAULT_STATE_DIR / "rate-limits.json"
 CONFIG_ENV_VAR = "TTYCHATTER_MAILBOT_CONFIG"
 
 
@@ -109,6 +116,8 @@ class Config:
     mail_from: str = ""
     mail_to: str = ""
     allowed_from: List[str] = field(default_factory=list)
+    deny_from: List[str] = field(default_factory=list)
+    reject_self_sender: bool = True
 
     subject_prefix: str = "tc"
     subject_separator: str = ":"
@@ -172,6 +181,54 @@ class Config:
     reply_subject_prefix: str = "Re:"
     include_ttychatter_stderr: bool = False
 
+    # Multi-user registry / per-sender ttychatter homes. The mail transport
+    # config remains global, but each sender gets a private ttychatter HOME,
+    # config file, session directory, model cache, favorites file, and optional
+    # API-key secret. This keeps subject-line sessions from colliding across
+    # users and keeps plaintext keys out of normal config files.
+    user_registry: bool = True
+    subject_sessions: bool = True
+    user_registry_file: Path = DEFAULT_USER_REGISTRY_FILE
+    user_home_root: Path = DEFAULT_USER_HOME_ROOT
+    user_secret_dir: Path = DEFAULT_USER_SECRET_DIR
+    default_openrouter_api_key_file: Path = DEFAULT_OPENROUTER_API_KEY_FILE
+    legacy_openrouter_config_file: Path = DEFAULT_LEGACY_OPENROUTER_CONFIG_FILE
+    migrate_plaintext_openrouter_api_key: bool = True
+    allow_user_api_keys: bool = True
+    user_ttyconfig_allowed_keys: List[str] = field(default_factory=lambda: [
+        "MODEL", "CONTEXT_TURNS", "HISTORY_LIMIT", "MODEL_TEST_PROMPT",
+        "DEMO_MODE", "STARTUP_NOTICE", "MODEL_FILTER_GENERATE_CONTENT",
+        "MODEL_FILTER_REQUIRE_TOKENS", "MODEL_FILTER_HIDE_PREVIEW",
+        "MODEL_MIN_INPUT_TOKENS", "MODEL_MIN_OUTPUT_TOKENS",
+        "MODEL_SORT_ORDER", "MODEL_TYPE_FILTER", "THEME", "SEND_INPUT",
+        "CODE_ATTACHMENT_MIN_LINES", "MAX_ATTACHMENT_BYTES", "EDITOR",
+    ])
+
+    # Anti-abuse defaults are conservative and cheap: reject common mail-loop
+    # and mailing-list headers, and cap work by sender plus globally. The bot
+    # silently ignores refused mail by default to avoid backscatter.
+    spam_protection: bool = True
+    spam_reject_auto_submitted: bool = True
+    spam_reject_list_mail: bool = True
+    spam_max_recipients: int = 25
+    rate_limit_enabled: bool = True
+    rate_limit_db: Path = DEFAULT_RATE_LIMIT_DB
+    rate_limit_window_seconds: int = 3600
+    rate_limit_sender_messages: int = 20
+    rate_limit_global_messages: int = 200
+    rate_limit_public_sender_messages: int = 6
+    rate_limit_public_global_messages: int = 60
+    rate_limit_allowed_from: bool = True
+
+    # Runtime-only fields populated after a sender is mapped to a registry user.
+    runtime_user_email: str = ""
+    runtime_user_id: str = ""
+    runtime_ttychatter_home: Optional[Path] = None
+    runtime_ttychatter_config_file: Optional[Path] = None
+    runtime_user_api_key_file: Optional[Path] = None
+    runtime_openrouter_api_key: str = ""
+    runtime_api_key_source: str = ""
+
 
 @dataclass
 class ReplyAttachment:
@@ -191,6 +248,19 @@ class SubjectRequest:
     public_resume: bool = False
 
 
+@dataclass
+class UserProfile:
+    email: str
+    user_id: str
+    home_dir: Path
+    config_file: Path
+    session_dir: Path
+    attachment_dir: Path
+    model_cache_file: Path
+    favorites_file: Path
+    api_key_file: Path
+
+
 def expand_path(value: str) -> Path:
     return Path(os.path.expandvars(os.path.expanduser(value))).resolve()
 
@@ -200,7 +270,8 @@ KNOWN_CONFIG_KEYS = {
     "IMAP_PASSWORD_GPG_FILE", "IMAP_MAILBOX", "SEND_METHOD", "REPLY_METHOD",
     "SENDMAIL", "SENDMAIL_PATH", "SMTP_HOST", "SMTP_PORT", "SMTP_SSL",
     "SMTP_STARTTLS", "SMTP_USER", "SMTP_PASSWORD", "SMTP_PASSWORD_GPG_FILE",
-    "MAIL_FROM", "MAIL_TO", "ALLOWED_FROM", "SUBJECT_PREFIX", "POLL_INTERVAL",
+    "MAIL_FROM", "MAIL_TO", "ALLOWED_FROM", "DENY_FROM", "BANNED_FROM",
+    "BANNED_LIST", "REJECT_SELF_SENDER", "SUBJECT_PREFIX", "POLL_INTERVAL",
     "MAX_MESSAGES_PER_RUN", "MAX_BODY_BYTES", "MAX_ATTACHMENT_BYTES",
     "PROCESS_ATTACHMENTS", "MARK_SEEN", "TTYCHATTER_COMMAND",
     "TTYCHATTER_EXTRA_ARGS", "SESSION_DIR", "ATTACHMENT_DIR", "WORK_DIR",
@@ -226,9 +297,19 @@ KNOWN_CONFIG_KEYS = {
     "MODEL_SEARCH_OUTPUT", "MODEL_LIST_OUTPUT", "SESSIONS_OUTPUT",
     "CONFIG_OUTPUT", "OUTPUT_INLINE_MAX_BYTES", "MAX_COMMAND_OUTPUT_BYTES",
     "MAX_OUTGOING_ATTACHMENT_BYTES",
+    "USER_REGISTRY", "SUBJECT_SESSIONS", "USER_REGISTRY_FILE",
+    "USER_HOME_ROOT", "USER_SECRET_DIR", "DEFAULT_OPENROUTER_API_KEY_FILE",
+    "SERVER_OPENROUTER_API_KEY_FILE", "OPENROUTER_API_KEY_FILE",
+    "LEGACY_OPENROUTER_CONFIG_FILE", "MIGRATE_PLAINTEXT_OPENROUTER_API_KEY",
+    "ALLOW_USER_API_KEYS", "USER_TTYCONFIG_ALLOWED_KEYS",
+    "SPAM_PROTECTION", "SPAM_REJECT_AUTO_SUBMITTED", "SPAM_REJECT_LIST_MAIL",
+    "SPAM_MAX_RECIPIENTS", "RATE_LIMIT_ENABLED", "RATE_LIMIT_DB",
+    "RATE_LIMIT_WINDOW_SECONDS", "RATE_LIMIT_SENDER_MESSAGES",
+    "RATE_LIMIT_GLOBAL_MESSAGES", "RATE_LIMIT_PUBLIC_SENDER_MESSAGES",
+    "RATE_LIMIT_PUBLIC_GLOBAL_MESSAGES", "RATE_LIMIT_ALLOWED_FROM",
 }
 
-SECRET_CONFIG_KEYS = {"IMAP_PASSWORD", "SMTP_PASSWORD"}
+SECRET_CONFIG_KEYS = {"IMAP_PASSWORD", "SMTP_PASSWORD", "OPENROUTER_API_KEY", "API_KEY", "TTYCHATTER_API_KEY"}
 
 
 def strip_config_quotes(value: str) -> str:
@@ -339,11 +420,11 @@ def split_addresses(value: str) -> List[str]:
     """
     out: List[str] = []
     for item in re.split(r"[;,\s]+", value.strip()):
-        item = item.strip()
+        item = item.strip().lower()
         if not item:
             continue
-        if item == "*":
-            out.append("*")
+        if item == "*" or item.startswith("@") or item.startswith("*@"):
+            out.append(item)
             continue
         parsed = parseaddr(item)[1].strip().lower()
         if parsed:
@@ -449,6 +530,8 @@ def load_config(path: Path = DEFAULT_CONFIG_FILE) -> Config:
         elif key == "MAIL_FROM": cfg.mail_from = value
         elif key == "MAIL_TO": cfg.mail_to = value
         elif key == "ALLOWED_FROM": cfg.allowed_from = split_addresses(value)
+        elif key in {"DENY_FROM", "BANNED_FROM", "BANNED_LIST"}: cfg.deny_from = split_addresses(value)
+        elif key == "REJECT_SELF_SENDER": cfg.reject_self_sender = parse_bool(value, cfg.reject_self_sender)
 
         elif key == "SUBJECT_PREFIX": cfg.subject_prefix = value
         elif key == "SUBJECT_SEPARATOR": cfg.subject_separator = value
@@ -493,6 +576,31 @@ def load_config(path: Path = DEFAULT_CONFIG_FILE) -> Config:
 
         elif key == "REPLY_SUBJECT_PREFIX": cfg.reply_subject_prefix = value
         elif key == "INCLUDE_TTYCHATTER_STDERR": cfg.include_ttychatter_stderr = parse_bool(value, cfg.include_ttychatter_stderr)
+
+        elif key == "USER_REGISTRY": cfg.user_registry = parse_bool(value, cfg.user_registry)
+        elif key == "SUBJECT_SESSIONS": cfg.subject_sessions = parse_bool(value, cfg.subject_sessions)
+        elif key == "USER_REGISTRY_FILE": cfg.user_registry_file = expand_path(value)
+        elif key == "USER_HOME_ROOT": cfg.user_home_root = expand_path(value)
+        elif key == "USER_SECRET_DIR": cfg.user_secret_dir = expand_path(value)
+        elif key in {"DEFAULT_OPENROUTER_API_KEY_FILE", "SERVER_OPENROUTER_API_KEY_FILE", "OPENROUTER_API_KEY_FILE"}: cfg.default_openrouter_api_key_file = expand_path(value)
+        elif key == "LEGACY_OPENROUTER_CONFIG_FILE": cfg.legacy_openrouter_config_file = expand_path(value)
+        elif key == "MIGRATE_PLAINTEXT_OPENROUTER_API_KEY": cfg.migrate_plaintext_openrouter_api_key = parse_bool(value, cfg.migrate_plaintext_openrouter_api_key)
+        elif key == "ALLOW_USER_API_KEYS": cfg.allow_user_api_keys = parse_bool(value, cfg.allow_user_api_keys)
+        elif key == "USER_TTYCONFIG_ALLOWED_KEYS": cfg.user_ttyconfig_allowed_keys = [x.upper() for x in split_config_words(value)]
+
+        elif key == "SPAM_PROTECTION": cfg.spam_protection = parse_bool(value, cfg.spam_protection)
+        elif key == "SPAM_REJECT_AUTO_SUBMITTED": cfg.spam_reject_auto_submitted = parse_bool(value, cfg.spam_reject_auto_submitted)
+        elif key == "SPAM_REJECT_LIST_MAIL": cfg.spam_reject_list_mail = parse_bool(value, cfg.spam_reject_list_mail)
+        elif key == "SPAM_MAX_RECIPIENTS": cfg.spam_max_recipients = max(1, parse_int(value, cfg.spam_max_recipients))
+        elif key == "RATE_LIMIT_ENABLED": cfg.rate_limit_enabled = parse_bool(value, cfg.rate_limit_enabled)
+        elif key == "RATE_LIMIT_DB": cfg.rate_limit_db = expand_path(value)
+        elif key == "RATE_LIMIT_WINDOW_SECONDS": cfg.rate_limit_window_seconds = max(1, parse_int(value, cfg.rate_limit_window_seconds))
+        elif key == "RATE_LIMIT_SENDER_MESSAGES": cfg.rate_limit_sender_messages = max(1, parse_int(value, cfg.rate_limit_sender_messages))
+        elif key == "RATE_LIMIT_GLOBAL_MESSAGES": cfg.rate_limit_global_messages = max(1, parse_int(value, cfg.rate_limit_global_messages))
+        elif key == "RATE_LIMIT_PUBLIC_SENDER_MESSAGES": cfg.rate_limit_public_sender_messages = max(1, parse_int(value, cfg.rate_limit_public_sender_messages))
+        elif key == "RATE_LIMIT_PUBLIC_GLOBAL_MESSAGES": cfg.rate_limit_public_global_messages = max(1, parse_int(value, cfg.rate_limit_public_global_messages))
+        elif key == "RATE_LIMIT_ALLOWED_FROM": cfg.rate_limit_allowed_from = parse_bool(value, cfg.rate_limit_allowed_from)
+
         elif key == "CONFIG_SUBJECT_TOKEN": cfg.config_subject_token = value
         elif key == "MODELS_SUBJECT_TOKEN": cfg.models_subject_token = value
         elif key == "COMMAND_SUBJECT_TOKEN": cfg.command_subject_token = value
@@ -547,6 +655,10 @@ def load_config(path: Path = DEFAULT_CONFIG_FILE) -> Config:
         cfg.public_session_archive_failure_policy = "keep"
     if not cfg.body_command_subjects:
         cfg.body_command_subjects = ["MAILBOT", "CMD"]
+    cfg.user_ttyconfig_allowed_keys = sorted({x.strip().upper() for x in cfg.user_ttyconfig_allowed_keys if x.strip()})
+    if not cfg.user_ttyconfig_allowed_keys:
+        cfg.config_load_notes.append("USER_TTYCONFIG_ALLOWED_KEYS empty; using MODEL and CONTEXT_TURNS")
+        cfg.user_ttyconfig_allowed_keys = ["CONTEXT_TURNS", "MODEL"]
     return cfg
 
 
@@ -698,6 +810,436 @@ def imap_login_failure(exc: Exception, cfg: Config) -> RuntimeError:
     return RuntimeError("\n".join(lines))
 
 
+
+# ---------------------------------------------------------------------------
+# User registry, per-user ttychatter homes, and API-key secret files
+# ---------------------------------------------------------------------------
+# The mailbot is the multi-user boundary. ttychatter.python still sees a
+# normal HOME with a normal ~/.config/ttychatter/openrouter/config, but that
+# HOME is synthesized per sender. API keys are injected through the subprocess
+# environment after being read from chmod 600 secret files; they are not written
+# to ttychatter config.
+# ---------------------------------------------------------------------------
+
+
+def chmod_private_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
+
+
+def chmod_private_file(path: Path) -> None:
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def write_private_text(path: Path, text: str, mode: int = 0o600) -> None:
+    chmod_private_dir(path.parent)
+    tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}-{int(time.time() * 1000)}")
+    tmp.write_text(text, encoding="utf-8")
+    try:
+        os.chmod(tmp, mode)
+    except OSError:
+        pass
+    tmp.replace(path)
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        pass
+
+
+def read_json_file(path: Path, default: Any) -> Any:
+    try:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return default
+    return default
+
+
+def write_json_file(path: Path, value: Any) -> None:
+    data = json.dumps(value, indent=2, sort_keys=True) + "\n"
+    write_private_text(path, data, mode=0o600)
+
+
+def read_secret_file(path: Path) -> str:
+    try:
+        if not path.exists():
+            return ""
+        return path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+
+
+def write_secret_file(path: Path, secret: str) -> None:
+    secret = (secret or "").strip()
+    if not secret:
+        raise ValueError("empty secret refused")
+    if "\r" in secret or "\n" in secret:
+        raise ValueError("secret must be a single line")
+    write_private_text(path, secret + "\n", mode=0o600)
+
+
+def plaintext_openrouter_key_from_config(path: Path) -> str:
+    if not path.exists():
+        return ""
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        parsed = parse_config_line(raw)
+        if parsed is None:
+            continue
+        key, value = parsed
+        if key in {"OPENROUTER_API_KEY", "API_KEY", "TTYCHATTER_API_KEY"} and value and "REDACTED" not in value.upper():
+            return value.strip()
+    return ""
+
+
+def remove_plaintext_openrouter_keys_from_config(path: Path) -> Optional[Path]:
+    if not path.exists():
+        return None
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    out: List[str] = []
+    removed = False
+    for raw in lines:
+        key = config_line_key(raw)
+        if key in {"OPENROUTER_API_KEY", "API_KEY", "TTYCHATTER_API_KEY"}:
+            removed = True
+            continue
+        out.append(raw)
+    if not removed:
+        return None
+    backup = path.with_name(path.name + ".bak-secret-migration-" + time.strftime("%Y%m%d-%H%M%S"))
+    backup.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    chmod_private_file(backup)
+    write_private_text(path, "\n".join(out).rstrip() + ("\n" if out else ""), mode=0o600)
+    return backup
+
+
+def migrate_plaintext_openrouter_api_key(cfg: Config) -> None:
+    """Move a legacy plaintext OpenRouter key to the configured secret file.
+
+    This targets the exact hazard of ~/.config/ttychatter/openrouter/config
+    containing OPENROUTER_API_KEY. A backup is kept, and an existing different
+    DEFAULT_OPENROUTER_API_KEY_FILE prevents destructive migration.
+    """
+    if not cfg.migrate_plaintext_openrouter_api_key:
+        return
+    legacy = cfg.legacy_openrouter_config_file
+    if not legacy.exists():
+        return
+    key = plaintext_openrouter_key_from_config(legacy)
+    if not key:
+        return
+    existing = read_secret_file(cfg.default_openrouter_api_key_file)
+    if existing and existing != key:
+        cfg.config_load_notes.append(
+            f"legacy OpenRouter key remains in {legacy}; default key file differs: {cfg.default_openrouter_api_key_file}"
+        )
+        return
+    if not existing:
+        write_secret_file(cfg.default_openrouter_api_key_file, key)
+    backup = remove_plaintext_openrouter_keys_from_config(legacy)
+    if backup:
+        cfg.config_load_notes.append(
+            f"migrated plaintext OpenRouter key from {legacy} to {cfg.default_openrouter_api_key_file}; backup {backup}"
+        )
+
+
+def user_id_for_sender(sender: str) -> str:
+    email_addr = sender_address(sender)
+    digest = hashlib.sha256(email_addr.encode("utf-8")).hexdigest()[:16]
+    return "u_" + digest
+
+
+def profile_for_user_id(cfg: Config, email_addr: str, user_id: str) -> UserProfile:
+    home = cfg.user_home_root / user_id
+    tty_cfg_dir = home / ".config" / "ttychatter" / "openrouter"
+    data_dir = home / ".local" / "share" / "ttychatter" / "openrouter"
+    return UserProfile(
+        email=email_addr,
+        user_id=user_id,
+        home_dir=home,
+        config_file=tty_cfg_dir / "config",
+        session_dir=data_dir / "sessions",
+        attachment_dir=data_dir / "attachments",
+        model_cache_file=tty_cfg_dir / "models-cache.json",
+        favorites_file=tty_cfg_dir / "model-favorites.txt",
+        api_key_file=cfg.user_secret_dir / f"{user_id}.openrouter.key",
+    )
+
+
+def load_user_registry(cfg: Config) -> dict:
+    data = read_json_file(cfg.user_registry_file, {"version": 1, "users": {}})
+    if not isinstance(data, dict):
+        data = {"version": 1, "users": {}}
+    if not isinstance(data.get("users"), dict):
+        data["users"] = {}
+    data.setdefault("version", 1)
+    return data
+
+
+def save_user_registry(cfg: Config, data: dict) -> None:
+    write_json_file(cfg.user_registry_file, data)
+
+
+def initial_user_config_text(profile: UserProfile) -> str:
+    return textwrap.dedent(f"""\
+        # ttychatter.mailbot per-user ttychatter.python config
+        # This file stores non-secret ttychatter preferences only.
+        # API keys are stored as chmod 600 files outside .config and injected by mailbot.
+        CONTEXT_TURNS=12
+        SESSION_DIR={profile.session_dir}
+        ATTACHMENT_DIR={profile.attachment_dir}
+        MODEL_CACHE_FILE={profile.model_cache_file}
+        MODEL_FAVORITES_FILE={profile.favorites_file}
+        """)
+
+
+def ensure_user_profile(cfg: Config, profile: UserProfile) -> None:
+    chmod_private_dir(cfg.user_home_root)
+    chmod_private_dir(profile.home_dir)
+    for path in [
+        profile.config_file.parent,
+        profile.session_dir,
+        profile.attachment_dir,
+        profile.model_cache_file.parent,
+        profile.favorites_file.parent,
+        cfg.user_secret_dir,
+    ]:
+        chmod_private_dir(path)
+    if not profile.config_file.exists():
+        write_private_text(profile.config_file, initial_user_config_text(profile), mode=0o600)
+    # Enforce per-user paths while preserving user-editable preferences.
+    set_config_value(profile.config_file, "SESSION_DIR", str(profile.session_dir))
+    set_config_value(profile.config_file, "ATTACHMENT_DIR", str(profile.attachment_dir))
+    set_config_value(profile.config_file, "MODEL_CACHE_FILE", str(profile.model_cache_file))
+    set_config_value(profile.config_file, "MODEL_FAVORITES_FILE", str(profile.favorites_file))
+    # If a user somehow placed a plaintext key in their ttychatter config,
+    # immediately move it to the secret file and remove the config line.
+    key = plaintext_openrouter_key_from_config(profile.config_file)
+    if key:
+        write_secret_file(profile.api_key_file, key)
+        remove_plaintext_openrouter_keys_from_config(profile.config_file)
+
+
+def lookup_or_create_user_profile(cfg: Config, sender: str) -> UserProfile:
+    email_addr = sender_address(sender)
+    if not email_addr:
+        raise ValueError("cannot create registry user for empty sender")
+    user_id = user_id_for_sender(email_addr)
+    data = load_user_registry(cfg)
+    users = data.setdefault("users", {})
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    entry = users.get(email_addr)
+    if not isinstance(entry, dict):
+        entry = {"user_id": user_id, "created_at": now}
+    entry["user_id"] = entry.get("user_id") or user_id
+    entry["email"] = email_addr
+    entry["updated_at"] = now
+    entry["home_dir"] = str(cfg.user_home_root / entry["user_id"])
+    entry["api_key_file"] = str(cfg.user_secret_dir / f"{entry['user_id']}.openrouter.key")
+    users[email_addr] = entry
+    save_user_registry(cfg, data)
+    profile = profile_for_user_id(cfg, email_addr, entry["user_id"])
+    ensure_user_profile(cfg, profile)
+    return profile
+
+
+def resolve_openrouter_api_key(cfg: Config, profile: Optional[UserProfile]) -> Tuple[str, str]:
+    if profile is not None:
+        user_key = read_secret_file(profile.api_key_file)
+        if user_key:
+            return user_key, f"user secret file {profile.api_key_file}"
+    default_key = read_secret_file(cfg.default_openrouter_api_key_file)
+    if default_key:
+        return default_key, f"default secret file {cfg.default_openrouter_api_key_file}"
+    env_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    if env_key:
+        return env_key, "environment OPENROUTER_API_KEY"
+    env_key = os.environ.get("TTYCHATTER_API_KEY", "").strip()
+    if env_key:
+        return env_key, "environment TTYCHATTER_API_KEY"
+    return "", "missing"
+
+
+def runtime_config_for_sender(cfg: Config, sender: str) -> Config:
+    if not cfg.user_registry:
+        key, source = resolve_openrouter_api_key(cfg, None)
+        return replace(cfg, runtime_openrouter_api_key=key, runtime_api_key_source=source)
+    profile = lookup_or_create_user_profile(cfg, sender)
+    key, source = resolve_openrouter_api_key(cfg, profile)
+    return replace(
+        cfg,
+        session_dir=profile.session_dir,
+        attachment_dir=profile.attachment_dir,
+        model_cache_file=profile.model_cache_file,
+        work_dir=cfg.work_dir / profile.user_id,
+        runtime_user_email=profile.email,
+        runtime_user_id=profile.user_id,
+        runtime_ttychatter_home=profile.home_dir,
+        runtime_ttychatter_config_file=profile.config_file,
+        runtime_user_api_key_file=profile.api_key_file,
+        runtime_openrouter_api_key=key,
+        runtime_api_key_source=source,
+    )
+
+
+def ttychatter_environment(cfg: Config) -> dict:
+    env = os.environ.copy()
+    if cfg.runtime_ttychatter_home is not None:
+        home = cfg.runtime_ttychatter_home
+        env["HOME"] = str(home)
+        env["XDG_CONFIG_HOME"] = str(home / ".config")
+        env["XDG_DATA_HOME"] = str(home / ".local" / "share")
+        env["XDG_CACHE_HOME"] = str(home / ".cache")
+    if cfg.runtime_openrouter_api_key:
+        env["OPENROUTER_API_KEY"] = cfg.runtime_openrouter_api_key
+        env["TTYCHATTER_API_KEY"] = cfg.runtime_openrouter_api_key
+    return env
+
+
+def save_runtime_user_api_key(cfg: Config, secret: str) -> str:
+    if not cfg.allow_user_api_keys:
+        return "per-user API keys are disabled by ALLOW_USER_API_KEYS=0\n"
+    if cfg.runtime_user_api_key_file is None:
+        return "per-user API-key storage requires USER_REGISTRY=1\n"
+    write_secret_file(cfg.runtime_user_api_key_file, secret)
+    if cfg.runtime_ttychatter_config_file is not None:
+        unset_config_value(cfg.runtime_ttychatter_config_file, "OPENROUTER_API_KEY")
+        unset_config_value(cfg.runtime_ttychatter_config_file, "API_KEY")
+        unset_config_value(cfg.runtime_ttychatter_config_file, "TTYCHATTER_API_KEY")
+    return f"saved per-user OpenRouter API key to secret file: {cfg.runtime_user_api_key_file}\nplaintext API-key config entries removed if present\n"
+
+
+def forget_runtime_user_api_key(cfg: Config) -> str:
+    if cfg.runtime_user_api_key_file is None:
+        return "per-user API-key storage requires USER_REGISTRY=1\n"
+    try:
+        cfg.runtime_user_api_key_file.unlink()
+        removed = True
+    except FileNotFoundError:
+        removed = False
+    if cfg.runtime_ttychatter_config_file is not None:
+        unset_config_value(cfg.runtime_ttychatter_config_file, "OPENROUTER_API_KEY")
+        unset_config_value(cfg.runtime_ttychatter_config_file, "API_KEY")
+        unset_config_value(cfg.runtime_ttychatter_config_file, "TTYCHATTER_API_KEY")
+    if removed:
+        return "removed per-user OpenRouter API key; this user now falls back to the server default key if available\n"
+    return "no per-user OpenRouter API key was stored; this user already falls back to the server default key if available\n"
+
+
+def runtime_user_status(cfg: Config) -> str:
+    lines = ["ttychatter.mailbot user registry status"]
+    if not cfg.user_registry:
+        lines.append("USER_REGISTRY=0")
+        lines.append(f"api_key_source={cfg.runtime_api_key_source or 'not resolved'}")
+        return "\n".join(lines) + "\n"
+    lines.extend([
+        f"sender={cfg.runtime_user_email or '(not mapped)'}",
+        f"user_id={cfg.runtime_user_id or '(not mapped)'}",
+        f"ttychatter_home={cfg.runtime_ttychatter_home or '(not mapped)'}",
+        f"ttychatter_config={cfg.runtime_ttychatter_config_file or '(not mapped)'}",
+        f"session_dir={cfg.session_dir}",
+        f"model_cache_file={cfg.model_cache_file}",
+        f"user_api_key_file={cfg.runtime_user_api_key_file or '(not mapped)'}",
+        f"api_key_source={cfg.runtime_api_key_source or 'missing'}",
+    ])
+    return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Spam and abuse controls
+# ---------------------------------------------------------------------------
+
+
+def header_value(msg: Message, name: str) -> str:
+    return (msg.get(name, "") or "").strip()
+
+
+def message_recipient_count(msg: Message) -> int:
+    fields = []
+    for name in ("To", "Cc"):
+        value = msg.get(name)
+        if value:
+            fields.append(value)
+    return len(getaddresses(fields))
+
+
+def spam_reject_reason(cfg: Config, msg: Message, sender: str) -> Optional[str]:
+    if not cfg.spam_protection:
+        return None
+    if cfg.spam_reject_auto_submitted:
+        auto = header_value(msg, "Auto-Submitted").lower()
+        if auto and auto != "no":
+            return f"Auto-Submitted={auto}"
+        suppress = header_value(msg, "X-Auto-Response-Suppress").lower()
+        if suppress and suppress != "none":
+            return "auto-response suppression header present"
+    if cfg.spam_reject_list_mail:
+        precedence = header_value(msg, "Precedence").lower()
+        if precedence in {"bulk", "junk", "list"}:
+            return f"Precedence={precedence}"
+        for name in ("List-Id", "List-Unsubscribe", "List-Post", "Feedback-ID"):
+            if header_value(msg, name):
+                return f"mailing-list/bulk header present: {name}"
+    if cfg.spam_max_recipients > 0:
+        count = message_recipient_count(msg)
+        if count > cfg.spam_max_recipients:
+            return f"too many visible recipients: {count} > {cfg.spam_max_recipients}"
+    return None
+
+
+def load_rate_limit_data(cfg: Config) -> dict:
+    data = read_json_file(cfg.rate_limit_db, {"version": 1, "events": []})
+    if not isinstance(data, dict):
+        return {"version": 1, "events": []}
+    if not isinstance(data.get("events"), list):
+        data["events"] = []
+    data.setdefault("version", 1)
+    return data
+
+
+def rate_limit_sender_key(sender: str) -> str:
+    normalized = sender_address(sender)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24]
+
+
+def rate_limit_check(cfg: Config, sender: str, privileged: bool, record: bool = False) -> Optional[str]:
+    if not cfg.rate_limit_enabled:
+        return None
+    if privileged and not cfg.rate_limit_allowed_from:
+        return None
+    now = time.time()
+    cutoff = now - max(1, cfg.rate_limit_window_seconds)
+    data = load_rate_limit_data(cfg)
+    events = []
+    for item in data.get("events", []):
+        try:
+            when = float(item.get("t", 0))
+        except Exception:
+            continue
+        if when >= cutoff:
+            events.append({"t": when, "sender": str(item.get("sender", ""))})
+    key = rate_limit_sender_key(sender)
+    public_unprivileged = bool(cfg.open_to_public and not privileged)
+    sender_limit = cfg.rate_limit_public_sender_messages if public_unprivileged else cfg.rate_limit_sender_messages
+    global_limit = cfg.rate_limit_public_global_messages if public_unprivileged else cfg.rate_limit_global_messages
+    sender_count = sum(1 for item in events if item.get("sender") == key)
+    global_count = len(events)
+    window = cfg.rate_limit_window_seconds
+    if sender_limit > 0 and sender_count >= sender_limit:
+        return f"rate limit exceeded for sender: {sender_count}/{sender_limit} in {window}s"
+    if global_limit > 0 and global_count >= global_limit:
+        return f"global rate limit exceeded: {global_count}/{global_limit} in {window}s"
+    if record:
+        events.append({"t": now, "sender": key})
+        data["events"] = events
+        write_json_file(cfg.rate_limit_db, data)
+    return None
+
 # ---------------------------------------------------------------------------
 # Message parsing
 # ---------------------------------------------------------------------------
@@ -774,6 +1316,27 @@ def re_session_candidate(subject: str, cfg: Config) -> Optional[str]:
     return candidate or None
 
 
+def subject_session_candidate(subject: str, cfg: Config) -> Optional[str]:
+    """Return the plain email subject as a session name candidate.
+
+    This is the registry-era default: a user writes a normal email subject, and
+    that subject names their private session. Reply prefixes are stripped so
+    Re: naturally resumes the same session. Control subjects still win first.
+    """
+    stripped, _saw_reply = strip_reply_prefixes(subject)
+    if not stripped:
+        return None
+    marker = subject_marker(cfg)
+    if marker and stripped.casefold().startswith(marker.casefold()):
+        return None
+    if stripped.casefold() in {x.casefold() for x in cfg.body_command_subjects}:
+        return None
+    candidate = stripped.splitlines()[0].strip()
+    if not candidate:
+        return None
+    return candidate[:160]
+
+
 def body_after_first_command_line(body: str) -> str:
     lines = (body or "").splitlines()
     for idx, raw in enumerate(lines):
@@ -822,6 +1385,15 @@ def canonical_mailbot_command_word(word: str) -> str:
         "unbookmark-model": "unfavorite-model",
         "doctor": "ttydoctor",
         "ttyconfig-summary": "ttyconfig",
+        "prefs": "ttyconfig",
+        "preferences": "ttyconfig",
+        "set": "tty-set",
+        "unset": "tty-unset",
+        "profile": "user",
+        "registry": "user",
+        "set-api-key": "api-key",
+        "forget-api-key": "forget-api-key",
+        "remove-api-key": "forget-api-key",
         "archive-public-session": "archive-session",
         "archive-on-expire": "archive-session",
         "public-archive": "archive-session",
@@ -856,6 +1428,9 @@ def known_mailbot_command_words() -> set[str]:
         "ttyconfig",
         "ttydoctor",
         "credits",
+        "user",
+        "api-key",
+        "forget-api-key",
         "tty-set",
         "tty-unset",
     }
@@ -1062,6 +1637,11 @@ def parse_subject_request(subject: str, cfg: Config, body: str = "") -> Optional
         candidate = re_session_candidate(subject, cfg)
         if candidate:
             return SubjectRequest("session", candidate, raw=candidate, public_resume=True)
+
+    if cfg.subject_sessions:
+        candidate = subject_session_candidate(subject, cfg)
+        if candidate:
+            return SubjectRequest("session", candidate, raw=candidate)
 
     return None
 
@@ -1310,6 +1890,60 @@ def private_allowed_sender(sender: str, cfg: Config) -> bool:
     return parsed_sender in allowed
 
 
+def sender_address(value: str) -> str:
+    return parseaddr(value or "")[1].strip().lower()
+
+
+def sender_matches_list(sender: str, entries: List[str]) -> bool:
+    parsed_sender = sender_address(sender)
+    if not parsed_sender:
+        return False
+    sender_domain = parsed_sender.rsplit("@", 1)[-1] if "@" in parsed_sender else ""
+    for raw in entries:
+        item = (raw or "").strip().lower()
+        if not item:
+            continue
+        if item == "*":
+            return True
+        if item.startswith("@") and sender_domain and sender_domain == item[1:]:
+            return True
+        if item.startswith("*@") and sender_domain and sender_domain == item[2:]:
+            return True
+        if parsed_sender == item:
+            return True
+    return False
+
+
+def configured_self_senders(cfg: Config) -> set[str]:
+    values = {
+        sender_address(cfg.mail_from),
+        sender_address(cfg.mail_to),
+        sender_address(cfg.smtp_user),
+        sender_address(cfg.imap_user),
+    }
+    return {v for v in values if v}
+
+
+def is_self_sender(sender: str, cfg: Config) -> bool:
+    parsed_sender = sender_address(sender)
+    return bool(parsed_sender and parsed_sender in configured_self_senders(cfg))
+
+
+def is_banned_sender(sender: str, cfg: Config) -> bool:
+    return sender_matches_list(sender, cfg.deny_from)
+
+
+def sender_reject_reason(sender: str, cfg: Config) -> Optional[str]:
+    parsed_sender = sender_address(sender)
+    if not parsed_sender:
+        return "empty sender"
+    if is_banned_sender(parsed_sender, cfg):
+        return "sender is in DENY_FROM/BANNED_LIST"
+    if cfg.reject_self_sender and is_self_sender(parsed_sender, cfg):
+        return "self-sender rejected"
+    return None
+
+
 def allowed_sender(sender: str, cfg: Config) -> bool:
     """Return true when an incoming sender is allowed to produce work.
 
@@ -1318,11 +1952,13 @@ def allowed_sender(sender: str, cfg: Config) -> bool:
     mutating mailbot controls such as config, update-models, delete-session, and
     tty-set.
     """
+    if sender_reject_reason(sender, cfg):
+        return False
     return private_allowed_sender(sender, cfg) or bool(cfg.open_to_public)
 
 
 def public_sender_is_privileged(sender: str, cfg: Config) -> bool:
-    return private_allowed_sender(sender, cfg)
+    return not sender_reject_reason(sender, cfg) and private_allowed_sender(sender, cfg)
 
 
 def load_processed(path: Path) -> set[str]:
@@ -1894,6 +2530,15 @@ def public_command_allowed(cfg: Config, command_line: str) -> bool:
         "find-model": "model-search",
         "find-models": "model-search",
         "grep-models": "model-search",
+        "prefs": "ttyconfig",
+        "preferences": "ttyconfig",
+        "set": "tty-set",
+        "unset": "tty-unset",
+        "profile": "user",
+        "registry": "user",
+        "set-api-key": "api-key",
+        "forget-api-key": "forget-api-key",
+        "remove-api-key": "forget-api-key",
         "archive-public-session": "archive-session",
         "archive-on-expire": "archive-session",
         "public-archive": "archive-session",
@@ -2017,6 +2662,7 @@ def run_ttychatter(cfg: Config, session: str, body: str, attachments: List[Path]
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=ttychatter_environment(cfg),
     )
     return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
 
@@ -2053,6 +2699,7 @@ def run_ttychatter_cli(cfg: Config, args: List[str], input_text: str = "", timeo
             stderr=subprocess.PIPE,
             text=True,
             timeout=timeout or cfg.ttychatter_control_timeout,
+            env=ttychatter_environment(cfg),
         )
         return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
     except FileNotFoundError:
@@ -2341,6 +2988,39 @@ def build_reply(cfg: Config, original: Message, session: str, body: str, stderr_
     return msg
 
 
+def redact_api_key_literals(text: str) -> str:
+    # Defensive scrub for subjects/logging paths. The command redactor catches
+    # nonstandard BYO keys too, but this avoids accidentally echoing common
+    # OpenRouter/OpenAI-style key literals in a free-form subject.
+    return re.sub(r"\b(sk-or-v1-[A-Za-z0-9._-]+|sk-or-[A-Za-z0-9._-]+|sk-[A-Za-z0-9._-]+)\b", "REDACTED", text or "")
+
+
+def redact_command_for_reply(command: str) -> str:
+    text = (command or "help").strip()
+    try:
+        tokens = shlex.split(text)
+    except ValueError:
+        tokens = text.split()
+    if not tokens:
+        return "help"
+    head = normalize_keyword(tokens[0])
+    if head in {"api-key", "set-api-key"}:
+        return f"{tokens[0]} REDACTED"
+    if head in {"tty-set", "set"} and len(tokens) >= 2 and tokens[1].upper() in {"OPENROUTER_API_KEY", "API_KEY", "TTYCHATTER_API_KEY"}:
+        return f"{tokens[0]} {tokens[1]} REDACTED"
+    return redact_api_key_literals(text)
+
+
+def redact_subject_for_reply(subject: str, cfg: Config) -> str:
+    raw = subject or f"{cfg.subject_prefix}:help"
+    req = parse_subject_request(raw, cfg, "")
+    if req and req.kind == "command":
+        redacted = redact_command_for_reply(req.value)
+        if redacted != (req.value or "").strip():
+            return f"{subject_marker(cfg)}{redacted}"
+    return redact_api_key_literals(raw)
+
+
 def build_control_reply(
     cfg: Config,
     original: Message,
@@ -2352,7 +3032,7 @@ def build_control_reply(
     sender = message_sender(original)
     reply_to = parseaddr(original.get("Reply-To") or original.get("From") or sender)[1]
     dest = cfg.mail_to or reply_to
-    subject = original.get("Subject", f"{cfg.subject_prefix}:help")
+    subject = redact_subject_for_reply(original.get("Subject", f"{cfg.subject_prefix}:help"), cfg)
 
     msg = EmailMessage()
     msg["From"] = cfg.mail_from or cfg.smtp_user or cfg.imap_user
@@ -2366,7 +3046,7 @@ def build_control_reply(
     status = "success" if ok else "error"
     text = [
         f"ttychatter.mailbot {status}",
-        f"command: {command or 'help'}",
+        f"command: {redact_command_for_reply(command)}",
         "",
         body or "(empty response)",
     ]
@@ -2385,7 +3065,7 @@ BODY_ARG_COMMANDS = {
     "models", "routers", "model-list", "models-list", "list-models", "show-models",
     "search", "search-session", "rename-session", "favorite-model",
     "unfavorite-model", "test-model", "show-memory", "clear-memory",
-    "tty-set", "tty-unset",
+    "tty-set", "tty-unset", "set", "unset", "api-key", "set-api-key",
 }
 
 
@@ -2439,6 +3119,8 @@ def mailbot_command_help(cfg: Config) -> str:
 
 Address private-mode mail to the bot from an ALLOWED_FROM sender. Preferred subject forms:
 
+  ordinary email subject      Uses the subject as this sender's private session name when SUBJECT_SESSIONS=1
+  Re: ordinary email subject  Resumes that same private session
   {marker}CONFIG
   {marker}MODELS
   {marker}CMD
@@ -2450,8 +3132,9 @@ Address private-mode mail to the bot from an ALLOWED_FROM sender. Preferred subj
 Public mode:
   open_to_public: {public_note}
   In --open-to-public mode, non-control subjects are accepted as prompts.
-  Non-ALLOWED_FROM public senders are isolated according to PUBLIC_SESSION_MODE.
-  Replies advertise the public session name; replying with "Re: session-name" resumes it.
+  With USER_REGISTRY=1 and SUBJECT_SESSIONS=1, public senders also get per-sender homes and subject-named private logs.
+  Without registry subject sessions, non-ALLOWED_FROM public senders are isolated according to PUBLIC_SESSION_MODE.
+  Replies advertise the session name; replying with "Re: session-name" resumes it.
   Public senders may use only: {', '.join(cfg.public_allowed_commands)}
   Expiring public logs are archived before deletion when PUBLIC_SESSION_ARCHIVE_ON_DELETE=1.
   Public users may send {marker}archive-session on/off when PUBLIC_SESSION_ARCHIVE_USER_TOGGLE=1.
@@ -2506,14 +3189,21 @@ Model favorites/tests:
   {marker}unfavorite-model MODEL  Run ttychatter.python --unfavorite-model MODEL
   {marker}test-model MODEL        Run ttychatter.python --test-model MODEL
 
-Ttychatter utilities:
-  {marker}ttyconfig               Run ttychatter.python --config
+Ttychatter utilities and per-user preferences:
+  {marker}user                    Show this sender's registry mapping and API-key source
+  {marker}ttyconfig | prefs       Run ttychatter.python --config in this sender's private HOME
   {marker}ttydoctor               Run ttychatter.python --doctor
   {marker}credits                 Run ttychatter.python --credits
   {marker}show-memory SESSION     Run ttychatter.python --show-memory SESSION
   {marker}clear-memory SESSION    Run ttychatter.python --clear-memory SESSION
-  {marker}tty-set KEY VALUE       Run ttychatter.python --set KEY VALUE
-  {marker}tty-unset KEY           Run ttychatter.python --unset KEY
+  {marker}tty-set KEY VALUE       Save an allowed ttychatter preference for this sender
+  {marker}set KEY VALUE           Alias for tty-set
+  {marker}tty-unset KEY           Remove an allowed ttychatter preference for this sender
+  {marker}api-key KEY             Save this sender's OpenRouter API key to a chmod 600 secret file
+  {marker}forget-api-key          Remove this sender's OpenRouter API key and fall back to the server key
+
+Allowed tty-set keys:
+  {', '.join(cfg.user_ttyconfig_allowed_keys)}
 
 Compatibility:
   Legacy braced controls remain accepted when ALLOW_LEGACY_BRACED_CONTROL=1.
@@ -2562,7 +3252,15 @@ def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
     .B --open-to-public
     or OPEN_TO_PUBLIC=1, accepts mail from any sender but restricts non-ALLOWED_FROM
     senders to public chat and the PUBLIC_ALLOWED_COMMANDS set.
+    .PP
+    USER_REGISTRY=1 maps each accepted sender to a private ttychatter HOME.
+    SUBJECT_SESSIONS=1 lets ordinary email subjects become per-sender session
+    names; Re: replies resume the same sender/session pair.
     .SH PRIVATE SUBJECT GRAMMAR
+    .TP
+    .B ordinary email subject
+    Send the message body to this sender's private subject-named session when
+    SUBJECT_SESSIONS=1. Reply prefixes such as Re: and Fwd: are stripped.
     .TP
     .B {marker}{open_d}session-name{close_d}
     Send the message body to the named ttychatter session.
@@ -2639,6 +3337,28 @@ def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
     Show or change the sender's public-mode archive-on-expire preference. Aliases:
     archive-opt-in and archive-opt-out.
     .TP
+    .B user
+    Show this sender's registry id, private HOME, per-user config path, and
+    API-key source.
+    .TP
+    .B prefs
+    Show this sender's ttychatter configuration. Alias for ttyconfig.
+    .TP
+    .B tty-set KEY VALUE
+    Set an allowlisted per-user ttychatter preference. The allowed list is
+    USER_TTYCONFIG_ALLOWED_KEYS. Alias: set.
+    .TP
+    .B tty-unset KEY
+    Remove an allowlisted per-user ttychatter preference. Alias: unset.
+    .TP
+    .B api-key KEY
+    Store this sender's OpenRouter API key in USER_SECRET_DIR as a chmod 600
+    secret file. The key is not written to .config. Alias: set-api-key.
+    .TP
+    .B forget-api-key
+    Remove this sender's stored OpenRouter API key and fall back to the server
+    default key file.
+    .TP
     .B model-cache
     Return the existing MODEL_CACHE_FILE only. Never refreshes the cache.
     .TP
@@ -2661,7 +3381,7 @@ def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
     .SH CONFIGURATION KEYS
     Important keys include IMAP_HOST, IMAP_PORT, IMAP_SSL, IMAP_USER,
     IMAP_PASSWORD, IMAP_PASSWORD_GPG_FILE, SEND_METHOD, SENDMAIL_PATH,
-    MAIL_FROM, MAIL_TO, ALLOWED_FROM, SUBJECT_PREFIX, SUBJECT_SEPARATOR,
+    MAIL_FROM, MAIL_TO, ALLOWED_FROM, DENY_FROM, BANNED_FROM, BANNED_LIST, REJECT_SELF_SENDER, SUBJECT_PREFIX, SUBJECT_SEPARATOR,
     SESSION_OPEN_DELIM, SESSION_CLOSE_DELIM, BODY_COMMAND_SUBJECTS,
     ALLOW_COMMANDS_IN_SUBJECT, ALLOW_BODY_COMMAND_SUBJECTS,
     ALLOW_BARE_CONTROL_SUBJECTS, ALLOW_LEGACY_BRACED_CONTROL,
@@ -2672,6 +3392,13 @@ def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
     PUBLIC_SESSION_MAX_TURNS, PUBLIC_SESSION_INDEX_FILE,
     PUBLIC_SESSION_ARCHIVE_ON_DELETE, PUBLIC_SESSION_ARCHIVE_USER_TOGGLE,
     PUBLIC_SESSION_ARCHIVE_FAILURE_POLICY, PUBLIC_SESSION_ARCHIVE_MAX_BYTES,
+    USER_REGISTRY, SUBJECT_SESSIONS, USER_REGISTRY_FILE, USER_HOME_ROOT,
+    USER_SECRET_DIR, DEFAULT_OPENROUTER_API_KEY_FILE,
+    MIGRATE_PLAINTEXT_OPENROUTER_API_KEY, ALLOW_USER_API_KEYS,
+    USER_TTYCONFIG_ALLOWED_KEYS, SPAM_PROTECTION, SPAM_MAX_RECIPIENTS,
+    RATE_LIMIT_ENABLED, RATE_LIMIT_DB, RATE_LIMIT_WINDOW_SECONDS,
+    RATE_LIMIT_SENDER_MESSAGES, RATE_LIMIT_GLOBAL_MESSAGES,
+    RATE_LIMIT_PUBLIC_SENDER_MESSAGES, RATE_LIMIT_PUBLIC_GLOBAL_MESSAGES,
     MODEL_CACHE_FILE,
     SESSION_DIR, ATTACHMENT_DIR, WORK_DIR, PROCESSED_DB, COMMAND_OUTPUT_MODE,
     MODEL_CACHE_OUTPUT, MODEL_SEARCH_OUTPUT, MODEL_LIST_OUTPUT, SESSIONS_OUTPUT,
@@ -2679,17 +3406,35 @@ def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
     MAX_OUTGOING_ATTACHMENT_BYTES.
     .SH SECURITY
     Public mode is for demos. It should use a separate mailbox, conservative
-    attachment/body limits, per-sender sessions, and a small PUBLIC_ALLOWED_COMMANDS
-    set. Do not expose config mutation, model refresh, session deletion, or tty-set
-    to non-ALLOWED_FROM senders.
+    attachment/body limits, per-sender registry homes, subject sessions, and a
+    small PUBLIC_ALLOWED_COMMANDS set. Do not expose config mutation, model
+    refresh, session deletion, api-key, tty-set, or tty-unset to non-ALLOWED_FROM
+    senders unless the deployment is intentionally disposable.
+    .PP
+    OpenRouter keys are loaded from DEFAULT_OPENROUTER_API_KEY_FILE or a
+    per-user secret file and injected into the ttychatter subprocess environment.
+    The mailbot migrates legacy plaintext API-key lines out of the ttychatter
+    config when MIGRATE_PLAINTEXT_OPENROUTER_API_KEY=1.
+    .PP
+    SPAM_PROTECTION rejects auto-submitted/list/bulk mail and recipient floods.
+    RATE_LIMIT_ENABLED enforces sender and global work caps. Enforce SPF, DKIM,
+    DMARC, greylisting, and reputation at the MTA.
     .SH FILES
     Default config: ~/.config/ttychatter/mailbot/config
     .PP
     Default processed-message database: ~/.local/state/ttychatter/mailbot/processed-ids.txt
     .PP
-    Default session directory: ~/.local/share/ttychatter/openrouter/sessions
+    Default user registry: ~/.local/state/ttychatter/mailbot/users.json
     .PP
-    Default model cache: ~/.config/ttychatter/openrouter/models-cache.json
+    Default per-user homes: ~/.local/state/ttychatter/mailbot/users/
+    .PP
+    Default server OpenRouter key: ~/.secrets/ttychatter/mailbot/openrouter-default.key
+    .PP
+    Default per-user OpenRouter keys: ~/.secrets/ttychatter/mailbot/openrouter-users/
+    .PP
+    Default session directory without USER_REGISTRY: ~/.local/share/ttychatter/openrouter/sessions
+    .PP
+    Default model cache without USER_REGISTRY: ~/.config/ttychatter/openrouter/models-cache.json
     .SH EXIT STATUS
     0 indicates success. Nonzero status indicates configuration, IMAP, SMTP,
     sendmail, or ttychatter subprocess failure.
@@ -2800,6 +3545,14 @@ def validate_model_list_args(args: List[str]) -> Tuple[bool, List[str], str]:
     return True, safe, ""
 
 
+def user_ttyconfig_key_allowed(cfg: Config, key: str) -> bool:
+    return key.strip().upper() in {x.strip().upper() for x in cfg.user_ttyconfig_allowed_keys}
+
+
+def api_key_config_key(key: str) -> bool:
+    return key.strip().upper() in {"OPENROUTER_API_KEY", "API_KEY", "TTYCHATTER_API_KEY"}
+
+
 def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = False, sender: str = "") -> Tuple[bool, str, List[ReplyAttachment]]:
     braced_delete = parse_braced_delete_command(command_line or "")
     if braced_delete is not None:
@@ -2848,6 +3601,15 @@ def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = Fal
         "unbookmark-model": "unfavorite-model",
         "doctor": "ttydoctor",
         "ttyconfig-summary": "ttyconfig",
+        "prefs": "ttyconfig",
+        "preferences": "ttyconfig",
+        "set": "tty-set",
+        "unset": "tty-unset",
+        "profile": "user",
+        "registry": "user",
+        "set-api-key": "api-key",
+        "forget-api-key": "forget-api-key",
+        "remove-api-key": "forget-api-key",
         "archive-public-session": "archive-session",
         "archive-on-expire": "archive-session",
         "public-archive": "archive-session",
@@ -2880,6 +3642,29 @@ def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = Fal
             "ttychatter.mailbot config export",
         )
         return True, body, attachments
+
+    if command == "user":
+        return True, runtime_user_status(cfg), []
+
+    if command == "api-key":
+        if len(args) != 1:
+            return False, "usage: api-key OPENROUTER_API_KEY\n", []
+        if dry_run:
+            return True, "[dry-run] would save per-user OpenRouter API key to a secret file\n", []
+        try:
+            return True, save_runtime_user_api_key(cfg, args[0]), []
+        except Exception as exc:
+            return False, f"api-key save failed: {exc}\n", []
+
+    if command == "forget-api-key":
+        if args:
+            return False, "usage: forget-api-key\n", []
+        if dry_run:
+            return True, "[dry-run] would remove this user's per-user OpenRouter API key\n", []
+        try:
+            return True, forget_runtime_user_api_key(cfg), []
+        except Exception as exc:
+            return False, f"forget-api-key failed: {exc}\n", []
 
     if command == "sessions":
         body, attachments = deliver_text_output(cfg, "sessions", format_session_list_with_previews(cfg), "ttychatter-sessions.txt")
@@ -2996,7 +3781,6 @@ def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = Fal
         "test-model": "--test-model",
         "show-memory": "--show-memory",
         "clear-memory": "--clear-memory",
-        "tty-unset": "--unset",
     }
     if command in single_arg_tty_commands:
         if len(args) != 1:
@@ -3007,13 +3791,39 @@ def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = Fal
         rc, stdout, stderr_text = run_ttychatter_cli(cfg, cli)
         return rc == 0, format_cli_result("ttychatter.python " + " ".join(cli), rc, stdout, stderr_text, cfg.max_command_output_bytes), []
 
+    if command == "tty-unset":
+        if len(args) != 1:
+            return False, "usage: tty-unset KEY\n", []
+        key = args[0]
+        if api_key_config_key(key):
+            if dry_run:
+                return True, "[dry-run] would remove this user's per-user OpenRouter API key\n", []
+            try:
+                return True, forget_runtime_user_api_key(cfg), []
+            except Exception as exc:
+                return False, f"forget-api-key failed: {exc}\n", []
+        if not user_ttyconfig_key_allowed(cfg, key):
+            return False, "tty-unset refused; allowed keys: " + ", ".join(cfg.user_ttyconfig_allowed_keys) + "\n", []
+        cli = ["--unset", key]
+        if dry_run:
+            return True, "[dry-run] would run: " + " ".join([cfg.ttychatter_command] + cli) + "\n", []
+        rc, stdout, stderr_text = run_ttychatter_cli(cfg, cli)
+        return rc == 0, format_cli_result("ttychatter.python --unset " + key, rc, stdout, stderr_text, cfg.max_command_output_bytes), []
+
     if command == "tty-set":
         if len(args) < 2:
             return False, "usage: tty-set KEY VALUE\n", []
         key = args[0]
         value = " ".join(args[1:])
-        if key.upper() in {"OPENROUTER_API_KEY", "API_KEY"}:
-            return False, "refusing to set API keys by email; use ttychatter.python --set-api-key locally\n", []
+        if api_key_config_key(key):
+            if dry_run:
+                return True, "[dry-run] would save per-user OpenRouter API key to a secret file\n", []
+            try:
+                return True, save_runtime_user_api_key(cfg, value), []
+            except Exception as exc:
+                return False, f"api-key save failed: {exc}\n", []
+        if not user_ttyconfig_key_allowed(cfg, key):
+            return False, "tty-set refused; allowed keys: " + ", ".join(cfg.user_ttyconfig_allowed_keys) + "\n", []
         cli = ["--set", key, value]
         if dry_run:
             return True, "[dry-run] would run: " + " ".join([cfg.ttychatter_command, "--set", key, "VALUE"]) + "\n", []
@@ -3047,12 +3857,24 @@ def candidate_skip_reason(cfg: Config, msg: Message, uid: bytes, processed: set[
     msgid = msg.get("Message-ID", f"imap-uid-{uid.decode(errors='replace')}")
     if msgid in processed:
         return "skip: Message-ID already processed"
+    reject_reason = sender_reject_reason(sender, cfg)
+    if reject_reason:
+        return f"skip: {reject_reason} ({sender or 'empty sender'})"
+    spam_reason = spam_reject_reason(cfg, msg, sender)
+    if spam_reason:
+        return f"skip: spam protection: {spam_reason}"
     if request is None:
         if cfg.open_to_public:
             return "match: public prompt (no control subject)"
+        if cfg.subject_sessions:
+            return "skip: empty or unrecognized subject"
         return f"skip: subject does not contain {subject_marker(cfg)}COMMAND or {subject_marker(cfg)}{cfg.session_open_delim}session{cfg.session_close_delim}"
     if not allowed_sender(sender, cfg):
         return f"skip: sender not allowed ({sender or 'empty sender'}); allowed={','.join(cfg.allowed_from) or 'empty'}"
+    privileged = private_allowed_sender(sender, cfg)
+    rate_reason = rate_limit_check(cfg, sender, privileged, record=False)
+    if rate_reason:
+        return f"skip: {rate_reason}"
     if cfg.open_to_public and not private_allowed_sender(sender, cfg) and request.kind == "command" and not public_command_allowed(cfg, request.value):
         return "match: public command refused"
     if cfg.open_to_public and not private_allowed_sender(sender, cfg) and request.kind == "config":
@@ -3143,6 +3965,10 @@ def process_message(cfg: Config, conn: imaplib.IMAP4, uid: bytes, dry_run: bool 
     msgid = msg.get("Message-ID", f"imap-uid-{uid.decode(errors='replace')}")
     subject = msg.get("Subject", "")
     sender = message_sender(msg)
+    if sender_reject_reason(sender, cfg):
+        return False
+    if spam_reject_reason(cfg, msg, sender):
+        return False
     body_for_command = extract_body(msg, cfg.max_body_bytes)
     request = parse_subject_request(subject, cfg, body_for_command)
     if request is None:
@@ -3158,7 +3984,17 @@ def process_message(cfg: Config, conn: imaplib.IMAP4, uid: bytes, dry_run: bool 
         return False
 
     privileged = private_allowed_sender(sender, cfg)
+    rate_reason = rate_limit_check(cfg, sender, privileged, record=not dry_run)
+    if rate_reason:
+        return False
     public_unprivileged = bool(cfg.open_to_public and not privileged)
+    runtime_cfg = cfg
+    if request.kind != "config":
+        try:
+            runtime_cfg = runtime_config_for_sender(cfg, sender)
+        except Exception as exc:
+            print(f"user registry setup failed for {sender}: {exc}", file=sys.stderr)
+            return False
     if request.kind == "config":
         if cfg.open_to_public and not privileged:
             return process_denied_control_message(
@@ -3182,34 +4018,38 @@ def process_message(cfg: Config, conn: imaplib.IMAP4, uid: bytes, dry_run: bool 
                 "public mode allows only: " + ", ".join(cfg.public_allowed_commands),
                 dry_run=dry_run,
             )
-        return process_mailbot_command_message(cfg, conn, uid, msg, request.value, dry_run=dry_run)
+        return process_mailbot_command_message(runtime_cfg, conn, uid, msg, request.value, dry_run=dry_run)
 
     session = request.value
     if public_unprivileged:
-        session = public_session_from_request(cfg, request, msg, uid)
-        if not dry_run:
-            record_public_session(cfg, session, sender)
+        if cfg.user_registry and cfg.subject_sessions:
+            session = request.value or public_session_name_for_message(cfg, msg, uid)
+        else:
+            session = public_session_from_request(cfg, request, msg, uid)
+            if not dry_run:
+                record_public_session(cfg, session, sender)
     body = request.body_override if request.body_override is not None else body_for_command
     if not body:
         body = "(empty email body)"
 
-    with tempfile.TemporaryDirectory(prefix="ttychatter-mailbot-", dir=str(cfg.work_dir)) as tmp:
+    runtime_cfg.work_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="ttychatter-mailbot-", dir=str(runtime_cfg.work_dir)) as tmp:
         tempdir = Path(tmp)
-        attachments = save_attachments(msg, tempdir, cfg.max_attachment_bytes) if cfg.process_attachments else []
+        attachments = save_attachments(msg, tempdir, runtime_cfg.max_attachment_bytes) if runtime_cfg.process_attachments else []
         rc, output, stderr_text = (0, "[dry-run] would call ttychatter here", "")
         if not dry_run:
-            rc, output, stderr_text = run_ttychatter(cfg, session, body, attachments)
+            rc, output, stderr_text = run_ttychatter(runtime_cfg, session, body, attachments)
         ok = rc == 0
         reply_session = display_session_name(session, stderr_text)
-        reply = build_reply(cfg, msg, reply_session, output if ok else stderr_text or output, stderr_text, ok)
+        reply = build_reply(runtime_cfg, msg, reply_session, output if ok else stderr_text or output, stderr_text, ok)
         if not dry_run:
-            send_reply(cfg, reply)
+            send_reply(runtime_cfg, reply)
             if public_unprivileged and ok:
-                trim_note = trim_public_session_log(cfg, session_log_path(cfg, reply_session), dry_run=False)
+                trim_note = trim_public_session_log(runtime_cfg, session_log_path(runtime_cfg, reply_session), dry_run=False)
                 if trim_note:
                     print(trim_note)
-            remember_processed(cfg.processed_db, msgid)
-            if cfg.mark_seen:
+            remember_processed(runtime_cfg.processed_db, msgid)
+            if runtime_cfg.mark_seen:
                 conn.uid("STORE", uid, "+FLAGS", "(\\Seen)")
         else:
             print(reply.as_string())
@@ -3335,9 +4175,17 @@ def doctor(cfg: Config) -> int:
     imap_password_source_ok = bool(cfg.imap_password or cfg.imap_password_gpg_file.exists())
     checks.append(("imap password source", imap_password_source_ok, password_source_description(cfg.imap_password, cfg.imap_password_gpg_file)))
     checks.append(("open to public", True, "yes" if cfg.open_to_public else "no"))
+    checks.append(("reject self sender", True, "yes" if cfg.reject_self_sender else "no"))
+    checks.append(("deny from", True, ", ".join(cfg.deny_from) or "empty"))
     checks.append(("allowed from", bool(cfg.allowed_from) or cfg.open_to_public, ", ".join(cfg.allowed_from) or ("not required in public mode" if cfg.open_to_public else "missing")))
     checks.append(("public session mode", True, cfg.public_session_mode if cfg.open_to_public else "inactive"))
     checks.append(("public allowed commands", True, ",".join(cfg.public_allowed_commands) if cfg.open_to_public else "inactive"))
+    checks.append(("user registry", True, "enabled" if cfg.user_registry else "disabled"))
+    checks.append(("subject sessions", True, "enabled" if cfg.subject_sessions else "disabled"))
+    default_key_present = bool(read_secret_file(cfg.default_openrouter_api_key_file) or os.environ.get("OPENROUTER_API_KEY") or os.environ.get("TTYCHATTER_API_KEY"))
+    checks.append(("default OpenRouter key", default_key_present, cfg.runtime_api_key_source or str(cfg.default_openrouter_api_key_file)))
+    checks.append(("spam protection", True, "enabled" if cfg.spam_protection else "disabled"))
+    checks.append(("rate limit", True, "enabled" if cfg.rate_limit_enabled else "disabled"))
     checks.append(("mail from", bool(cfg.mail_from or cfg.smtp_user or cfg.imap_user), cfg.mail_from or cfg.smtp_user or cfg.imap_user or "missing"))
     checks.append(("gpg", gpg_available(), "found" if gpg_available() else "not found"))
     checks.append(("ttychatter command", bool(cfg.ttychatter_command), cfg.ttychatter_command))
@@ -3351,6 +4199,11 @@ def doctor(cfg: Config) -> int:
         ("work dir", cfg.work_dir),
         ("processed db dir", cfg.processed_db.parent),
         ("public session index dir", cfg.public_session_index_file.parent),
+        ("user registry dir", cfg.user_registry_file.parent),
+        ("user home root", cfg.user_home_root),
+        ("user secret dir", cfg.user_secret_dir),
+        ("default key dir", cfg.default_openrouter_api_key_file.parent),
+        ("rate limit db dir", cfg.rate_limit_db.parent),
     ]:
         try:
             path.mkdir(parents=True, exist_ok=True)
@@ -3410,6 +4263,8 @@ def print_config(cfg: Config) -> None:
     print(f"MAIL_FROM={cfg.mail_from}")
     print(f"MAIL_TO={cfg.mail_to}")
     print(f"ALLOWED_FROM={','.join(cfg.allowed_from)}")
+    print(f"DENY_FROM={','.join(cfg.deny_from)}")
+    print(f"REJECT_SELF_SENDER={int(cfg.reject_self_sender)}")
     print(f"OPEN_TO_PUBLIC={int(cfg.open_to_public)}")
     print(f"PUBLIC_SESSION_MODE={cfg.public_session_mode}")
     print(f"PUBLIC_SESSION_PREFIX={cfg.public_session_prefix}")
@@ -3473,6 +4328,28 @@ def print_config(cfg: Config) -> None:
     print(f"MAX_OUTGOING_ATTACHMENT_BYTES={cfg.max_outgoing_attachment_bytes}")
     print(f"REPLY_SUBJECT_PREFIX={cfg.reply_subject_prefix}")
     print(f"INCLUDE_TTYCHATTER_STDERR={int(cfg.include_ttychatter_stderr)}")
+    print(f"USER_REGISTRY={int(cfg.user_registry)}")
+    print(f"SUBJECT_SESSIONS={int(cfg.subject_sessions)}")
+    print(f"USER_REGISTRY_FILE={cfg.user_registry_file}")
+    print(f"USER_HOME_ROOT={cfg.user_home_root}")
+    print(f"USER_SECRET_DIR={cfg.user_secret_dir}")
+    print(f"DEFAULT_OPENROUTER_API_KEY_FILE={cfg.default_openrouter_api_key_file}")
+    print(f"LEGACY_OPENROUTER_CONFIG_FILE={cfg.legacy_openrouter_config_file}")
+    print(f"MIGRATE_PLAINTEXT_OPENROUTER_API_KEY={int(cfg.migrate_plaintext_openrouter_api_key)}")
+    print(f"ALLOW_USER_API_KEYS={int(cfg.allow_user_api_keys)}")
+    print(f"USER_TTYCONFIG_ALLOWED_KEYS={','.join(cfg.user_ttyconfig_allowed_keys)}")
+    print(f"SPAM_PROTECTION={int(cfg.spam_protection)}")
+    print(f"SPAM_REJECT_AUTO_SUBMITTED={int(cfg.spam_reject_auto_submitted)}")
+    print(f"SPAM_REJECT_LIST_MAIL={int(cfg.spam_reject_list_mail)}")
+    print(f"SPAM_MAX_RECIPIENTS={cfg.spam_max_recipients}")
+    print(f"RATE_LIMIT_ENABLED={int(cfg.rate_limit_enabled)}")
+    print(f"RATE_LIMIT_DB={cfg.rate_limit_db}")
+    print(f"RATE_LIMIT_WINDOW_SECONDS={cfg.rate_limit_window_seconds}")
+    print(f"RATE_LIMIT_SENDER_MESSAGES={cfg.rate_limit_sender_messages}")
+    print(f"RATE_LIMIT_GLOBAL_MESSAGES={cfg.rate_limit_global_messages}")
+    print(f"RATE_LIMIT_PUBLIC_SENDER_MESSAGES={cfg.rate_limit_public_sender_messages}")
+    print(f"RATE_LIMIT_PUBLIC_GLOBAL_MESSAGES={cfg.rate_limit_public_global_messages}")
+    print(f"RATE_LIMIT_ALLOWED_FROM={int(cfg.rate_limit_allowed_from)}")
 
 def set_password_command(cfg: Config, which: str, encrypted: bool) -> int:
     if encrypted and not gpg_available():
@@ -3528,6 +4405,8 @@ USAGE
     {PROGRAM} --help
 
 MAIL SUBJECTS
+    Ordinary subject             Uses the subject as the sender's private session name when SUBJECT_SESSIONS=1
+    Re: ordinary subject         Resumes that same sender/session pair
     tc:CONFIG                    Export/apply mailbot config attachment
     tc:MODELS                    Return existing models-cache.json; no refresh
     tc:MODELS TEXT               Search existing model cache for TEXT
@@ -3539,12 +4418,27 @@ MAIL SUBJECTS
     tc:{{session-name}}          Send body to ttychatter session
     tc:{{new}}                   Let ttychatter create its default timestamped session
     MAILBOT                      Use first nonempty body line as command/session selector
-    Re: session-name             Resume by subject when RE_SESSION_SUBJECTS permits it
+
+USER REGISTRY AND PREFERENCES
+    USER_REGISTRY=1 creates a private ttychatter HOME per sender. The registry
+    stores user metadata, while each user's ttychatter config stores allowed
+    non-secret preferences. API keys are stored outside .config as chmod 600
+    secret files and injected into ttychatter through the subprocess environment.
+
+    Email commands:
+      tc:user                    Show this sender's registry status
+      tc:prefs                   Show this sender's ttychatter config
+      tc:set MODEL openrouter/free
+      tc:set CONTEXT_TURNS 12
+      tc:api-key KEY             Save this sender's OpenRouter key to a secret file
+      tc:forget-api-key          Remove this sender's key and use the server default
 
 PUBLIC MODE
     --open-to-public accepts non-control subjects as prompts from any sender.
-    Non-ALLOWED_FROM senders are isolated by PUBLIC_SESSION_MODE and may use
-    only PUBLIC_ALLOWED_COMMANDS. Public sessions are cleaned up by the
+    With USER_REGISTRY=1 and SUBJECT_SESSIONS=1, senders are isolated by their
+    registry HOME and by subject-named sessions. Otherwise, non-ALLOWED_FROM
+    senders are isolated by PUBLIC_SESSION_MODE and may use only
+    PUBLIC_ALLOWED_COMMANDS. Public sessions are cleaned up by the
     PUBLIC_SESSION_* policy; by default inactive public logs expire after
     72 hours and are trimmed to the last 12 user/assistant cycles.
     When enabled, expired logs are emailed to the public sender before local
@@ -3563,7 +4457,11 @@ CONFIG PATH
 SECURITY
     Private mode requires ALLOWED_FROM. Public mode should use a separate
     mailbox, conservative limits, per-sender sessions, and a small public
-    command allowlist. Do not send secrets by email.
+    command allowlist. REJECT_SELF_SENDER=1 is the default and should stay
+    enabled for ALLOWED_FROM=*. DENY_FROM blocks listed senders before
+    allowlist or public-mode checks. Spam protection rejects auto-submitted and
+    list/bulk mail, and rate limits work by sender and globally. Email is not
+    a confidential transport; use api-key only when you accept that risk.
 """
 
 
@@ -3606,6 +4504,10 @@ def main() -> int:
         return 0
 
     cfg = load_config(resolve_config_file(args.config_file))
+    try:
+        migrate_plaintext_openrouter_api_key(cfg)
+    except Exception as exc:
+        cfg.config_load_notes.append(f"OpenRouter API-key migration failed: {exc}")
     if args.open_to_public:
         cfg.open_to_public = True
 

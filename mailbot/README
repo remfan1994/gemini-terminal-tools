@@ -1,4 +1,4 @@
-ttychatter.mailbot 0.5.0
+ttychatter.mailbot 0.6.0
 =========================
 
 ttychatter.mailbot is an IMAP/sendmail or IMAP/SMTP transport adapter for
@@ -15,6 +15,7 @@ Main features
 
     - Private mode with ALLOWED_FROM sender gating.
     - Public demo mode with --open-to-public or OPEN_TO_PUBLIC=1.
+    - Self-sender rejection and DENY_FROM/BANNED_LIST for public safety.
     - Public senders can use ordinary email subjects as prompts; tc: is not
       required in public mode.
     - Public senders are isolated by PUBLIC_SESSION_MODE, default per-sender.
@@ -24,6 +25,14 @@ Main features
       and optional transcript trimming.
     - Expiring public session logs can be emailed to their owner before local
       deletion. Public users can toggle this preference when enabled.
+    - Per-sender user registry with private ttychatter HOME directories.
+    - Subject-line sessions: ordinary subjects become session names, so Re:
+      resumes the same sender/session pair.
+    - Per-user ttychatter preferences such as MODEL and CONTEXT_TURNS by email.
+    - Per-user OpenRouter API keys stored in chmod 600 secret files, not config.
+    - Server fallback OpenRouter key loaded from a secret file.
+    - Spam protection for auto-submitted/list/bulk mail, recipient floods, and
+      sender/global rate limits.
     - Configurable mail grammar for the subject prefix, separator, session
       delimiters, body-command subjects, and subject/body command acceptance.
     - Uniform private command syntax:
@@ -58,6 +67,8 @@ Install or ship these files together:
     ttychatter.mailbot.1
     README
     MAILBOT-WALKTHROUGH
+    MAILBOT-0.6.0-UPGRADE-NOTES.txt
+    MAILBOT-0.6.0-VERIFICATION.txt
     CHANGELOG
 
 Typical local commands
@@ -89,6 +100,12 @@ Control subjects are bare. Chat-session subjects are braced.
     tc:command args              Run a mailbot command directly
     tc:delete{session-name}      Delete a session log
     tc:rm{session-name}          Alias for delete{session-name}
+    tc:user                      Show the sender registry/profile status
+    tc:prefs                     Show per-user ttychatter preferences
+    tc:set MODEL openrouter/free Set an allowed per-user ttychatter option
+    tc:set CONTEXT_TURNS 12      Set another allowed per-user option
+    tc:api-key KEY               Store this sender's OpenRouter key privately
+    tc:forget-api-key            Delete this sender's stored OpenRouter key
     tc:{session-name}            Send body to a ttychatter session
     tc:{new}                     Start a new chat using ttychatter's own default
                                   session-YYYY-MM-DD-HH-MM-SS name
@@ -127,6 +144,63 @@ If the first nonempty body line is a known mailbot command, it runs as a
 command. If it is not a known command, the message body is treated as an AI
 prompt and routed to a new/default chat session. In public mode, that default
 session is still isolated by PUBLIC_SESSION_MODE.
+
+User registry, subject sessions, and API-key secrets
+-----------------------------------------------------
+
+USER_REGISTRY=1 is enabled by default. The mailbot maps each accepted sender to
+an internal user id and runs ttychatter.python with that sender's private HOME.
+This keeps ttychatter config, sessions, caches, and preferences separate between
+senders.
+
+SUBJECT_SESSIONS=1 is also enabled by default. After control subjects are
+checked, an ordinary subject becomes the session name. Reply prefixes such as
+Re: and Fwd: are stripped, so this pair uses the same private session:
+
+    Subject: OpenRouter test
+    Subject: Re: OpenRouter test
+
+Per-user preferences are stored in the sender's private ttychatter config. Email
+mutation is restricted to USER_TTYCONFIG_ALLOWED_KEYS. Typical commands:
+
+    tc:user
+    tc:prefs
+    tc:set MODEL openrouter/free
+    tc:set CONTEXT_TURNS 12
+    tc:unset MODEL
+
+Server fallback OpenRouter key setup:
+
+    install -d -m 700 ~/.secrets/ttychatter/mailbot
+    printf '%s\n' 'sk-or-v1-your-server-key' > ~/.secrets/ttychatter/mailbot/openrouter-default.key
+    chmod 600 ~/.secrets/ttychatter/mailbot/openrouter-default.key
+
+The mailbot reads that file through DEFAULT_OPENROUTER_API_KEY_FILE and injects
+OPENROUTER_API_KEY into the ttychatter subprocess environment. The key is not
+written to the normal ttychatter config file.
+
+Users who bring their own key can send:
+
+    tc:api-key sk-or-v1-user-key
+
+or:
+
+    tc:set OPENROUTER_API_KEY sk-or-v1-user-key
+
+The key is immediately written to USER_SECRET_DIR as a chmod 600 secret file.
+The user's config only references behavior preferences; the literal key is not
+kept there and mailbot replies redact API-key commands.
+
+By default, MIGRATE_PLAINTEXT_OPENROUTER_API_KEY=1 migrates legacy plaintext
+OPENROUTER_API_KEY, API_KEY, and TTYCHATTER_API_KEY lines from:
+
+    ~/.config/ttychatter/openrouter/config
+
+to:
+
+    ~/.secrets/ttychatter/mailbot/openrouter-default.key
+
+A timestamped backup of the old config is left beside the original.
 
 Configurable grammar
 --------------------
@@ -175,6 +249,12 @@ In public mode:
 Recommended public config:
 
     OPEN_TO_PUBLIC=1
+    USER_REGISTRY=1
+    SUBJECT_SESSIONS=1
+    REJECT_SELF_SENDER=1
+    DENY_FROM=mailbot@thatiam.vip
+    SPAM_PROTECTION=1
+    RATE_LIMIT_ENABLED=1
     PUBLIC_SESSION_MODE=per-sender
     PUBLIC_SESSION_PREFIX=public
     PUBLIC_ALLOW_NAMED_SESSIONS=0
@@ -306,6 +386,53 @@ because email subject typos are easy and session logs are ordinary files.
 
 Security notes
 --------------
+
+User isolation and secret handling are defense layers, not a substitute for a
+conservative mail perimeter. Keep ALLOWED_FROM narrow for private deployments.
+For public deployments, keep PUBLIC_ALLOWED_COMMANDS small and do not expose
+config mutation, model refresh, deletion, rename, api-key, tty-set, or tty-unset
+unless the deployment is intentionally disposable.
+
+SPAM_PROTECTION=1 rejects common automated mail classes before any ttychatter
+work is attempted:
+
+    - Auto-Submitted headers unless spam_reject_auto_submitted is disabled.
+    - List/Bulk/Precedence junk unless spam_reject_list_mail is disabled.
+    - Messages with more than SPAM_MAX_RECIPIENTS visible recipients.
+
+RATE_LIMIT_ENABLED=1 maintains a small JSON counter database and enforces per
+sender and global hourly caps. Public unprivileged senders use stricter caps:
+
+    RATE_LIMIT_SENDER_MESSAGES=20
+    RATE_LIMIT_GLOBAL_MESSAGES=200
+    RATE_LIMIT_PUBLIC_SENDER_MESSAGES=6
+    RATE_LIMIT_PUBLIC_GLOBAL_MESSAGES=60
+
+The mailbot cannot prove SPF, DKIM, DMARC, greylisting, or reputation by itself.
+Enforce those at the MTA if public exposure matters.
+
+Self-sender and denylist safety
+---------------------------------
+
+Public mode may use:
+
+    ALLOWED_FROM=*
+
+but the bot should still reject itself.  The default is:
+
+    REJECT_SELF_SENDER=1
+
+This check runs before ALLOWED_FROM and before OPEN_TO_PUBLIC.  Therefore the
+bot refuses mail from its own MAIL_FROM identity even when ALLOWED_FROM=* is
+configured.
+
+A separate denylist is also supported:
+
+    DENY_FROM=mailbot@thatiam.vip,bad@example.org,@bad-domain.example
+
+The standardized key is DENY_FROM.  BANNED_FROM and BANNED_LIST are accepted
+as compatibility aliases.  Address entries match exact senders.  @domain and
+*@domain entries match all senders at that domain.
 
 Private mode should keep ALLOWED_FROM narrow. Public mode should normally use a
 separate mailbox and a small PUBLIC_ALLOWED_COMMANDS list. Do not expose config

@@ -1,0 +1,89 @@
+ttychatter.mailbot 0.6.0 upgrade notes
+======================================
+
+Purpose
+-------
+This release adds a per-sender user registry, subject-line sessions, per-user
+ttychatter preferences, secret-file OpenRouter API-key handling, and basic
+anti-abuse protection.
+
+No ttychatter.python patch is required. The mailbot sets HOME and
+OPENROUTER_API_KEY in the ttychatter.python subprocess environment for each
+sender.
+
+Server default OpenRouter key
+-----------------------------
+Do not keep OPENROUTER_API_KEY in ~/.config/ttychatter/openrouter/config.
+Install the server fallback key like this:
+
+    install -d -m 700 ~/.secrets/ttychatter/mailbot
+    printf '%s\n' 'sk-or-v1-your-server-key' > ~/.secrets/ttychatter/mailbot/openrouter-default.key
+    chmod 600 ~/.secrets/ttychatter/mailbot/openrouter-default.key
+
+The mailbot reads this through DEFAULT_OPENROUTER_API_KEY_FILE and injects it
+into ttychatter.python only at subprocess runtime.
+
+Automatic migration
+-------------------
+With MIGRATE_PLAINTEXT_OPENROUTER_API_KEY=1, the mailbot migrates these legacy
+plaintext lines from ~/.config/ttychatter/openrouter/config:
+
+    OPENROUTER_API_KEY=...
+    API_KEY=...
+    TTYCHATTER_API_KEY=...
+
+to ~/.secrets/ttychatter/mailbot/openrouter-default.key. It leaves a timestamped
+backup beside the old config.
+
+User registry defaults
+----------------------
+Defaults are enabled:
+
+    USER_REGISTRY=1
+    SUBJECT_SESSIONS=1
+
+Each sender gets a stable internal id under:
+
+    ~/.local/state/ttychatter/mailbot/users.json
+
+and a private ttychatter HOME under:
+
+    ~/.local/state/ttychatter/mailbot/users/u_xxxxxxxxxxxxxx/
+
+Subject sessions
+----------------
+After command subjects are checked, ordinary email subjects become session names.
+Reply prefixes are stripped, so these resume the same sender/session pair:
+
+    Subject: Project notes
+    Subject: Re: Project notes
+
+Per-user commands
+-----------------
+Typical allowed email commands:
+
+    tc:user
+    tc:prefs
+    tc:set MODEL openrouter/free
+    tc:set CONTEXT_TURNS 12
+    tc:unset MODEL
+    tc:api-key sk-or-v1-user-key
+    tc:forget-api-key
+
+API-key commands are redacted in reply bodies and reply subjects.
+
+Spam/rate controls
+------------------
+Defaults are enabled:
+
+    SPAM_PROTECTION=1
+    RATE_LIMIT_ENABLED=1
+
+The mailbot rejects auto-submitted/list/bulk mail, excessive visible recipient
+counts, and rate-limit excesses before ttychatter work starts. Public senders
+use stricter rate caps than allowed private senders.
+
+MTA boundary
+------------
+The mailbot cannot verify SPF, DKIM, DMARC, greylisting, or sender reputation.
+Enforce those at the MTA when exposing a public demo address.
