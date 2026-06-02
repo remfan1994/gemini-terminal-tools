@@ -51,7 +51,7 @@ from pathlib import Path
 from typing import Any, Iterable, List, Optional, Tuple
 
 PROGRAM = "ttychatter.mailbot"
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 
 DEFAULT_CONFIG_DIR = Path.home() / ".config" / "ttychatter" / "mailbot"
 DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config"
@@ -67,6 +67,7 @@ DEFAULT_USER_SECRET_DIR = DEFAULT_SECRET_DIR / "openrouter-users"
 DEFAULT_OPENROUTER_API_KEY_FILE = DEFAULT_SECRET_DIR / "openrouter-default.key"
 DEFAULT_LEGACY_OPENROUTER_CONFIG_FILE = Path.home() / ".config" / "ttychatter" / "openrouter" / "config"
 DEFAULT_RATE_LIMIT_DB = DEFAULT_STATE_DIR / "rate-limits.json"
+DEFAULT_DAILY_QUOTA_DB = DEFAULT_STATE_DIR / "daily-quotas.json"
 CONFIG_ENV_VAR = "TTYCHATTER_MAILBOT_CONFIG"
 
 
@@ -220,6 +221,23 @@ class Config:
     rate_limit_public_global_messages: int = 60
     rate_limit_allowed_from: bool = True
 
+    # Additional abuse controls. ALLOWED_FROM senders are treated as admins and
+    # may bypass these caps when ABUSE_LIMIT_ALLOWED_FROM=0.
+    abuse_limit_allowed_from: bool = True
+    max_message_bytes: int = 262144
+    max_attachment_count: int = 3
+    max_total_attachment_bytes: int = 2097152
+    daily_quota_enabled: bool = True
+    daily_quota_db: Path = DEFAULT_DAILY_QUOTA_DB
+    daily_quota_sender_messages: int = 50
+    daily_quota_public_sender_messages: int = 12
+    daily_quota_global_messages: int = 1000
+    max_sessions_per_sender: int = 25
+    api_cost_protection: bool = True
+    api_max_input_chars: int = 100000
+    api_max_estimated_tokens: int = 25000
+    api_max_attachment_bytes: int = 2097152
+
     # Runtime-only fields populated after a sender is mapped to a registry user.
     runtime_user_email: str = ""
     runtime_user_id: str = ""
@@ -307,6 +325,12 @@ KNOWN_CONFIG_KEYS = {
     "RATE_LIMIT_WINDOW_SECONDS", "RATE_LIMIT_SENDER_MESSAGES",
     "RATE_LIMIT_GLOBAL_MESSAGES", "RATE_LIMIT_PUBLIC_SENDER_MESSAGES",
     "RATE_LIMIT_PUBLIC_GLOBAL_MESSAGES", "RATE_LIMIT_ALLOWED_FROM",
+    "ABUSE_LIMIT_ALLOWED_FROM", "MAX_MESSAGE_BYTES", "MAX_ATTACHMENT_COUNT",
+    "MAX_TOTAL_ATTACHMENT_BYTES", "DAILY_QUOTA_ENABLED", "DAILY_QUOTA_DB",
+    "DAILY_QUOTA_SENDER_MESSAGES", "DAILY_QUOTA_PUBLIC_SENDER_MESSAGES",
+    "DAILY_QUOTA_GLOBAL_MESSAGES", "MAX_SESSIONS_PER_SENDER",
+    "API_COST_PROTECTION", "API_MAX_INPUT_CHARS", "API_MAX_ESTIMATED_TOKENS",
+    "API_MAX_ATTACHMENT_BYTES",
 }
 
 SECRET_CONFIG_KEYS = {"IMAP_PASSWORD", "SMTP_PASSWORD", "OPENROUTER_API_KEY", "API_KEY", "TTYCHATTER_API_KEY"}
@@ -600,6 +624,20 @@ def load_config(path: Path = DEFAULT_CONFIG_FILE) -> Config:
         elif key == "RATE_LIMIT_PUBLIC_SENDER_MESSAGES": cfg.rate_limit_public_sender_messages = max(1, parse_int(value, cfg.rate_limit_public_sender_messages))
         elif key == "RATE_LIMIT_PUBLIC_GLOBAL_MESSAGES": cfg.rate_limit_public_global_messages = max(1, parse_int(value, cfg.rate_limit_public_global_messages))
         elif key == "RATE_LIMIT_ALLOWED_FROM": cfg.rate_limit_allowed_from = parse_bool(value, cfg.rate_limit_allowed_from)
+        elif key == "ABUSE_LIMIT_ALLOWED_FROM": cfg.abuse_limit_allowed_from = parse_bool(value, cfg.abuse_limit_allowed_from)
+        elif key == "MAX_MESSAGE_BYTES": cfg.max_message_bytes = max(1, parse_int(value, cfg.max_message_bytes))
+        elif key == "MAX_ATTACHMENT_COUNT": cfg.max_attachment_count = max(0, parse_int(value, cfg.max_attachment_count))
+        elif key == "MAX_TOTAL_ATTACHMENT_BYTES": cfg.max_total_attachment_bytes = max(0, parse_int(value, cfg.max_total_attachment_bytes))
+        elif key == "DAILY_QUOTA_ENABLED": cfg.daily_quota_enabled = parse_bool(value, cfg.daily_quota_enabled)
+        elif key == "DAILY_QUOTA_DB": cfg.daily_quota_db = expand_path(value)
+        elif key == "DAILY_QUOTA_SENDER_MESSAGES": cfg.daily_quota_sender_messages = max(0, parse_int(value, cfg.daily_quota_sender_messages))
+        elif key == "DAILY_QUOTA_PUBLIC_SENDER_MESSAGES": cfg.daily_quota_public_sender_messages = max(0, parse_int(value, cfg.daily_quota_public_sender_messages))
+        elif key == "DAILY_QUOTA_GLOBAL_MESSAGES": cfg.daily_quota_global_messages = max(0, parse_int(value, cfg.daily_quota_global_messages))
+        elif key == "MAX_SESSIONS_PER_SENDER": cfg.max_sessions_per_sender = max(0, parse_int(value, cfg.max_sessions_per_sender))
+        elif key == "API_COST_PROTECTION": cfg.api_cost_protection = parse_bool(value, cfg.api_cost_protection)
+        elif key == "API_MAX_INPUT_CHARS": cfg.api_max_input_chars = max(0, parse_int(value, cfg.api_max_input_chars))
+        elif key == "API_MAX_ESTIMATED_TOKENS": cfg.api_max_estimated_tokens = max(0, parse_int(value, cfg.api_max_estimated_tokens))
+        elif key == "API_MAX_ATTACHMENT_BYTES": cfg.api_max_attachment_bytes = max(0, parse_int(value, cfg.api_max_attachment_bytes))
 
         elif key == "CONFIG_SUBJECT_TOKEN": cfg.config_subject_token = value
         elif key == "MODELS_SUBJECT_TOKEN": cfg.models_subject_token = value
@@ -1238,6 +1276,124 @@ def rate_limit_check(cfg: Config, sender: str, privileged: bool, record: bool = 
         events.append({"t": now, "sender": key})
         data["events"] = events
         write_json_file(cfg.rate_limit_db, data)
+    return None
+
+
+def abuse_admin_bypass(cfg: Config, privileged: bool) -> bool:
+    return bool(privileged and not cfg.abuse_limit_allowed_from)
+
+
+def message_size_bytes(msg: Message) -> int:
+    try:
+        return len(msg.as_bytes(policy=email.policy.default))
+    except Exception:
+        return len(str(msg).encode("utf-8", errors="replace"))
+
+
+def attachment_stats(msg: Message) -> Tuple[int, int]:
+    count = 0
+    total = 0
+    for part in msg.walk():
+        if part.is_multipart():
+            continue
+        disposition = (part.get_content_disposition() or "").lower()
+        filename = part.get_filename()
+        if disposition != "attachment" and not filename:
+            continue
+        count += 1
+        payload = part.get_payload(decode=True)
+        if payload is not None:
+            total += len(payload)
+    return count, total
+
+
+def message_limit_reject_reason(cfg: Config, msg: Message, privileged: bool) -> Optional[str]:
+    if abuse_admin_bypass(cfg, privileged):
+        return None
+    size = message_size_bytes(msg)
+    if cfg.max_message_bytes > 0 and size > cfg.max_message_bytes:
+        return f"message too large: {size} bytes > {cfg.max_message_bytes}"
+    count, total = attachment_stats(msg)
+    if cfg.max_attachment_count > 0 and count > cfg.max_attachment_count:
+        return f"too many attachments: {count} > {cfg.max_attachment_count}"
+    if cfg.max_total_attachment_bytes > 0 and total > cfg.max_total_attachment_bytes:
+        return f"attachments too large in total: {total} bytes > {cfg.max_total_attachment_bytes}"
+    return None
+
+
+def load_daily_quota_data(cfg: Config) -> dict:
+    data = read_json_file(cfg.daily_quota_db, {"version": 1, "days": {}})
+    if not isinstance(data, dict):
+        data = {"version": 1, "days": {}}
+    if not isinstance(data.get("days"), dict):
+        data["days"] = {}
+    data.setdefault("version", 1)
+    return data
+
+
+def daily_quota_check(cfg: Config, sender: str, privileged: bool, record: bool = False) -> Optional[str]:
+    if not cfg.daily_quota_enabled:
+        return None
+    if abuse_admin_bypass(cfg, privileged):
+        return None
+    today = time.strftime("%Y-%m-%d", time.localtime())
+    key = rate_limit_sender_key(sender)
+    data = load_daily_quota_data(cfg)
+    days = data.setdefault("days", {})
+    day = days.setdefault(today, {"global": 0, "senders": {}})
+    # Keep only today plus one previous day so the file cannot grow forever.
+    data["days"] = {k: v for k, v in days.items() if k >= today}
+    senders = day.setdefault("senders", {})
+    sender_count = int(senders.get(key, 0))
+    global_count = int(day.get("global", 0))
+    public_unprivileged = bool(cfg.open_to_public and not privileged)
+    sender_limit = cfg.daily_quota_public_sender_messages if public_unprivileged else cfg.daily_quota_sender_messages
+    global_limit = cfg.daily_quota_global_messages
+    if sender_limit > 0 and sender_count >= sender_limit:
+        return f"daily quota exceeded for sender: {sender_count}/{sender_limit}"
+    if global_limit > 0 and global_count >= global_limit:
+        return f"daily global quota exceeded: {global_count}/{global_limit}"
+    if record:
+        senders[key] = sender_count + 1
+        day["global"] = global_count + 1
+        write_json_file(cfg.daily_quota_db, data)
+    return None
+
+
+def session_count_reject_reason(cfg: Config, session: str, privileged: bool) -> Optional[str]:
+    if cfg.max_sessions_per_sender <= 0 or abuse_admin_bypass(cfg, privileged):
+        return None
+    existing = session_files_newest_first(cfg)
+    path = session_log_path(cfg, session)
+    if path.exists():
+        return None
+    if len(existing) >= cfg.max_sessions_per_sender:
+        return f"session-count limit exceeded: {len(existing)}/{cfg.max_sessions_per_sender}; resume an existing session or archive old sessions"
+    return None
+
+
+def rough_token_count(text_chars: int, attachment_bytes: int) -> int:
+    return max(0, (text_chars + attachment_bytes) // 4)
+
+
+def api_cost_reject_reason(cfg: Config, body: str, attachments: List[Path], privileged: bool) -> Optional[str]:
+    if not cfg.api_cost_protection or abuse_admin_bypass(cfg, privileged):
+        return None
+    body_chars = len((body or "").encode("utf-8", errors="replace"))
+    attach_bytes = 0
+    for path in attachments:
+        try:
+            attach_bytes += path.stat().st_size
+        except OSError:
+            pass
+    total_chars = body_chars + attach_bytes
+    if cfg.api_max_input_chars > 0 and total_chars > cfg.api_max_input_chars:
+        return f"API input too large: {total_chars} bytes/chars > {cfg.api_max_input_chars}"
+    if cfg.api_max_attachment_bytes > 0 and attach_bytes > cfg.api_max_attachment_bytes:
+        return f"API attachment input too large: {attach_bytes} bytes > {cfg.api_max_attachment_bytes}"
+    est_tokens = rough_token_count(body_chars, attach_bytes)
+    if cfg.api_max_estimated_tokens > 0 and est_tokens > cfg.api_max_estimated_tokens:
+        return f"estimated API token load too high: {est_tokens} > {cfg.api_max_estimated_tokens}"
     return None
 
 # ---------------------------------------------------------------------------
@@ -3399,7 +3555,12 @@ def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
     RATE_LIMIT_ENABLED, RATE_LIMIT_DB, RATE_LIMIT_WINDOW_SECONDS,
     RATE_LIMIT_SENDER_MESSAGES, RATE_LIMIT_GLOBAL_MESSAGES,
     RATE_LIMIT_PUBLIC_SENDER_MESSAGES, RATE_LIMIT_PUBLIC_GLOBAL_MESSAGES,
-    MODEL_CACHE_FILE,
+    ABUSE_LIMIT_ALLOWED_FROM, MAX_MESSAGE_BYTES, MAX_ATTACHMENT_COUNT,
+    MAX_TOTAL_ATTACHMENT_BYTES, DAILY_QUOTA_ENABLED, DAILY_QUOTA_DB,
+    DAILY_QUOTA_SENDER_MESSAGES, DAILY_QUOTA_PUBLIC_SENDER_MESSAGES,
+    DAILY_QUOTA_GLOBAL_MESSAGES, MAX_SESSIONS_PER_SENDER,
+    API_COST_PROTECTION, API_MAX_INPUT_CHARS, API_MAX_ESTIMATED_TOKENS,
+    API_MAX_ATTACHMENT_BYTES, MODEL_CACHE_FILE,
     SESSION_DIR, ATTACHMENT_DIR, WORK_DIR, PROCESSED_DB, COMMAND_OUTPUT_MODE,
     MODEL_CACHE_OUTPUT, MODEL_SEARCH_OUTPUT, MODEL_LIST_OUTPUT, SESSIONS_OUTPUT,
     CONFIG_OUTPUT, OUTPUT_INLINE_MAX_BYTES, MAX_COMMAND_OUTPUT_BYTES, and
@@ -3417,8 +3578,11 @@ def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
     config when MIGRATE_PLAINTEXT_OPENROUTER_API_KEY=1.
     .PP
     SPAM_PROTECTION rejects auto-submitted/list/bulk mail and recipient floods.
-    RATE_LIMIT_ENABLED enforces sender and global work caps. Enforce SPF, DKIM,
-    DMARC, greylisting, and reputation at the MTA.
+    RATE_LIMIT_ENABLED enforces rolling sender/global work caps. DAILY_QUOTA_ENABLED
+    enforces daily sender/global caps. MAX_MESSAGE_BYTES, MAX_ATTACHMENT_COUNT,
+    MAX_TOTAL_ATTACHMENT_BYTES, MAX_SESSIONS_PER_SENDER, and API_COST_PROTECTION
+    protect the mail-to-API boundary before ttychatter is called. Enforce SPF,
+    DKIM, DMARC, greylisting, and reputation at the MTA.
     .SH FILES
     Default config: ~/.config/ttychatter/mailbot/config
     .PP
@@ -3872,9 +4036,15 @@ def candidate_skip_reason(cfg: Config, msg: Message, uid: bytes, processed: set[
     if not allowed_sender(sender, cfg):
         return f"skip: sender not allowed ({sender or 'empty sender'}); allowed={','.join(cfg.allowed_from) or 'empty'}"
     privileged = private_allowed_sender(sender, cfg)
+    msg_limit_reason = message_limit_reject_reason(cfg, msg, privileged)
+    if msg_limit_reason:
+        return f"skip: {msg_limit_reason}"
     rate_reason = rate_limit_check(cfg, sender, privileged, record=False)
     if rate_reason:
         return f"skip: {rate_reason}"
+    quota_reason = daily_quota_check(cfg, sender, privileged, record=False)
+    if quota_reason:
+        return f"skip: {quota_reason}"
     if cfg.open_to_public and not private_allowed_sender(sender, cfg) and request.kind == "command" and not public_command_allowed(cfg, request.value):
         return "match: public command refused"
     if cfg.open_to_public and not private_allowed_sender(sender, cfg) and request.kind == "config":
@@ -3984,8 +4154,17 @@ def process_message(cfg: Config, conn: imaplib.IMAP4, uid: bytes, dry_run: bool 
         return False
 
     privileged = private_allowed_sender(sender, cfg)
+    msg_limit_reason = message_limit_reject_reason(cfg, msg, privileged)
+    if msg_limit_reason:
+        print(f"skip: {msg_limit_reason}", file=sys.stderr)
+        return False
     rate_reason = rate_limit_check(cfg, sender, privileged, record=not dry_run)
     if rate_reason:
+        print(f"skip: {rate_reason}", file=sys.stderr)
+        return False
+    quota_reason = daily_quota_check(cfg, sender, privileged, record=not dry_run)
+    if quota_reason:
+        print(f"skip: {quota_reason}", file=sys.stderr)
         return False
     public_unprivileged = bool(cfg.open_to_public and not privileged)
     runtime_cfg = cfg
@@ -4028,6 +4207,10 @@ def process_message(cfg: Config, conn: imaplib.IMAP4, uid: bytes, dry_run: bool 
             session = public_session_from_request(cfg, request, msg, uid)
             if not dry_run:
                 record_public_session(cfg, session, sender)
+    session_limit_reason = session_count_reject_reason(runtime_cfg, session, privileged)
+    if session_limit_reason:
+        print(f"skip: {session_limit_reason}", file=sys.stderr)
+        return False
     body = request.body_override if request.body_override is not None else body_for_command
     if not body:
         body = "(empty email body)"
@@ -4036,6 +4219,10 @@ def process_message(cfg: Config, conn: imaplib.IMAP4, uid: bytes, dry_run: bool 
     with tempfile.TemporaryDirectory(prefix="ttychatter-mailbot-", dir=str(runtime_cfg.work_dir)) as tmp:
         tempdir = Path(tmp)
         attachments = save_attachments(msg, tempdir, runtime_cfg.max_attachment_bytes) if runtime_cfg.process_attachments else []
+        api_reason = api_cost_reject_reason(runtime_cfg, body, attachments, privileged)
+        if api_reason:
+            print(f"skip: {api_reason}", file=sys.stderr)
+            return False
         rc, output, stderr_text = (0, "[dry-run] would call ttychatter here", "")
         if not dry_run:
             rc, output, stderr_text = run_ttychatter(runtime_cfg, session, body, attachments)
@@ -4186,6 +4373,8 @@ def doctor(cfg: Config) -> int:
     checks.append(("default OpenRouter key", default_key_present, cfg.runtime_api_key_source or str(cfg.default_openrouter_api_key_file)))
     checks.append(("spam protection", True, "enabled" if cfg.spam_protection else "disabled"))
     checks.append(("rate limit", True, "enabled" if cfg.rate_limit_enabled else "disabled"))
+    checks.append(("daily quota", True, "enabled" if cfg.daily_quota_enabled else "disabled"))
+    checks.append(("api cost protection", True, "enabled" if cfg.api_cost_protection else "disabled"))
     checks.append(("mail from", bool(cfg.mail_from or cfg.smtp_user or cfg.imap_user), cfg.mail_from or cfg.smtp_user or cfg.imap_user or "missing"))
     checks.append(("gpg", gpg_available(), "found" if gpg_available() else "not found"))
     checks.append(("ttychatter command", bool(cfg.ttychatter_command), cfg.ttychatter_command))
@@ -4204,6 +4393,7 @@ def doctor(cfg: Config) -> int:
         ("user secret dir", cfg.user_secret_dir),
         ("default key dir", cfg.default_openrouter_api_key_file.parent),
         ("rate limit db dir", cfg.rate_limit_db.parent),
+        ("daily quota db dir", cfg.daily_quota_db.parent),
     ]:
         try:
             path.mkdir(parents=True, exist_ok=True)
@@ -4350,6 +4540,20 @@ def print_config(cfg: Config) -> None:
     print(f"RATE_LIMIT_PUBLIC_SENDER_MESSAGES={cfg.rate_limit_public_sender_messages}")
     print(f"RATE_LIMIT_PUBLIC_GLOBAL_MESSAGES={cfg.rate_limit_public_global_messages}")
     print(f"RATE_LIMIT_ALLOWED_FROM={int(cfg.rate_limit_allowed_from)}")
+    print(f"ABUSE_LIMIT_ALLOWED_FROM={int(cfg.abuse_limit_allowed_from)}")
+    print(f"MAX_MESSAGE_BYTES={cfg.max_message_bytes}")
+    print(f"MAX_ATTACHMENT_COUNT={cfg.max_attachment_count}")
+    print(f"MAX_TOTAL_ATTACHMENT_BYTES={cfg.max_total_attachment_bytes}")
+    print(f"DAILY_QUOTA_ENABLED={int(cfg.daily_quota_enabled)}")
+    print(f"DAILY_QUOTA_DB={cfg.daily_quota_db}")
+    print(f"DAILY_QUOTA_SENDER_MESSAGES={cfg.daily_quota_sender_messages}")
+    print(f"DAILY_QUOTA_PUBLIC_SENDER_MESSAGES={cfg.daily_quota_public_sender_messages}")
+    print(f"DAILY_QUOTA_GLOBAL_MESSAGES={cfg.daily_quota_global_messages}")
+    print(f"MAX_SESSIONS_PER_SENDER={cfg.max_sessions_per_sender}")
+    print(f"API_COST_PROTECTION={int(cfg.api_cost_protection)}")
+    print(f"API_MAX_INPUT_CHARS={cfg.api_max_input_chars}")
+    print(f"API_MAX_ESTIMATED_TOKENS={cfg.api_max_estimated_tokens}")
+    print(f"API_MAX_ATTACHMENT_BYTES={cfg.api_max_attachment_bytes}")
 
 def set_password_command(cfg: Config, which: str, encrypted: bool) -> int:
     if encrypted and not gpg_available():

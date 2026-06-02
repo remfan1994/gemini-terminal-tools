@@ -1,3 +1,11 @@
+ttychatter.mailbot 0.6.1
+-------------------------
+- Add MAX_MESSAGE_BYTES, MAX_ATTACHMENT_COUNT, and MAX_TOTAL_ATTACHMENT_BYTES.
+- Add daily per-sender/public/global quota database.
+- Add MAX_SESSIONS_PER_SENDER for per-user session-count control.
+- Add API_COST_PROTECTION preflight caps before ttychatter subprocess calls.
+- Add ABUSE_LIMIT_ALLOWED_FROM admin/allowlist override switch.
+
 ttychatter.mailbot 0.6.0
 =========================
 

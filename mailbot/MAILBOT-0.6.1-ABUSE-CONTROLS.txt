@@ -1,0 +1,65 @@
+ttychatter.mailbot 0.6.1 abuse-control notes
+==============================================
+
+This point release keeps the 0.6.0 user registry design and adds the remaining
+mailbot abuse controls around the public mail-to-API boundary.
+
+Added controls
+--------------
+
+Existing 0.6.0 controls retained:
+- SPAM_PROTECTION rejects Auto-Submitted mail unless the header is "no".
+- SPAM_PROTECTION rejects List-Id/List-Unsubscribe/List-Post/Feedback-ID mail.
+- SPAM_PROTECTION rejects Precedence: bulk, list, and junk.
+- SPAM_MAX_RECIPIENTS caps visible To/Cc recipients.
+- RATE_LIMIT_ENABLED caps per-sender and global messages in a rolling window.
+
+New 0.6.1 controls:
+- MAX_MESSAGE_BYTES caps total raw email size.
+- MAX_ATTACHMENT_COUNT caps the number of inbound attachments.
+- MAX_TOTAL_ATTACHMENT_BYTES caps total inbound attachment bytes.
+- DAILY_QUOTA_ENABLED caps daily sender and global usage.
+- MAX_SESSIONS_PER_SENDER caps per-sender session log count.
+- API_COST_PROTECTION estimates input size before calling ttychatter.
+- API_MAX_INPUT_CHARS caps body plus saved attachment input size.
+- API_MAX_ESTIMATED_TOKENS applies a rough chars/4 preflight token estimate.
+- API_MAX_ATTACHMENT_BYTES caps saved attachment bytes handed to the API.
+- ABUSE_LIMIT_ALLOWED_FROM controls whether ALLOWED_FROM/admin senders obey the
+  new message/quota/session/API caps. Keep it enabled for normal operations.
+
+Default values
+--------------
+
+ABUSE_LIMIT_ALLOWED_FROM=1
+MAX_MESSAGE_BYTES=262144
+MAX_ATTACHMENT_COUNT=3
+MAX_TOTAL_ATTACHMENT_BYTES=2097152
+DAILY_QUOTA_ENABLED=1
+DAILY_QUOTA_DB=~/.local/state/ttychatter/mailbot/daily-quotas.json
+DAILY_QUOTA_SENDER_MESSAGES=50
+DAILY_QUOTA_PUBLIC_SENDER_MESSAGES=12
+DAILY_QUOTA_GLOBAL_MESSAGES=1000
+MAX_SESSIONS_PER_SENDER=25
+API_COST_PROTECTION=1
+API_MAX_INPUT_CHARS=100000
+API_MAX_ESTIMATED_TOKENS=25000
+API_MAX_ATTACHMENT_BYTES=2097152
+
+Operational order
+-----------------
+
+Incoming mail is screened before ttychatter is called:
+1. sender rejection / deny list / self-sender rejection
+2. automated, list, bulk, junk, and recipient-flood rejection
+3. allowed sender or public-mode gate
+4. message size and attachment count/total-size caps
+5. rolling rate limit
+6. daily sender/global quota
+7. per-user registry mapping
+8. session-count cap for new sessions
+9. saved-attachment API preflight
+10. ttychatter subprocess call
+
+MTA-side policy still belongs in OpenSMTPD/rspamd: SPF, DKIM, DMARC,
+greylisting, DNSBL/reputation, and attachment/MIME policy should be enforced
+before mail reaches this script whenever possible.

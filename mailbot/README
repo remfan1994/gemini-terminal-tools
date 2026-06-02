@@ -443,3 +443,19 @@ Plaintext IMAP_PASSWORD and SMTP_PASSWORD are redacted from config exports.
 Encrypted password file paths are not redacted. OpenBSD cron and daemon runs
 should either use a working gpg-agent setup, a protected plaintext local config,
 or a host-specific secret mechanism.
+
+0.6.1 abuse-control additions
+-----------------------------
+
+0.6.1 keeps the 0.6.0 user registry and adds the missing mail-to-API caps:
+MAX_MESSAGE_BYTES, MAX_ATTACHMENT_COUNT, MAX_TOTAL_ATTACHMENT_BYTES,
+DAILY_QUOTA_ENABLED, DAILY_QUOTA_DB, DAILY_QUOTA_SENDER_MESSAGES,
+DAILY_QUOTA_PUBLIC_SENDER_MESSAGES, DAILY_QUOTA_GLOBAL_MESSAGES,
+MAX_SESSIONS_PER_SENDER, API_COST_PROTECTION, API_MAX_INPUT_CHARS,
+API_MAX_ESTIMATED_TOKENS, API_MAX_ATTACHMENT_BYTES, and
+ABUSE_LIMIT_ALLOWED_FROM.
+
+Use ALLOWED_FROM as the admin/allowlist. By default ABUSE_LIMIT_ALLOWED_FROM=1,
+so admins are still capped. Set ABUSE_LIMIT_ALLOWED_FROM=0 only on a private
+maintenance mailbox where trusted admins need to bypass message/quota/session/API
+caps.
