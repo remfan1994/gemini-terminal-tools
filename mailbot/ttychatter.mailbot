@@ -1022,7 +1022,7 @@ def load_user_registry(cfg: Config) -> dict:
 def save_user_registry(cfg: Config, data: dict) -> None:
     write_json_file(cfg.user_registry_file, data)
 
-
+# PLACE OF PERSONAL INTEREST... DEFAULT MODEL DEFINITION DONE HERE
 def initial_user_config_text(profile: UserProfile) -> str:
     return textwrap.dedent(f"""\
         # ttychatter.mailbot per-user ttychatter.python config
