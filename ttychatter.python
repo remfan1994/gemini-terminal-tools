@@ -80,7 +80,12 @@
 # forked, repaired, and carried forward by people who were not present for the
 # original design conversations.
 # ==========================================================
+DEFAULT_KEY_FILE="/home/mailbot/.secrets/ttychatter/mailbot/openrouter-default.key"
 
+if [ -z "$OPENROUTER_API_KEY" ] && [ -r "$DEFAULT_KEY_FILE" ]; then
+    OPENROUTER_API_KEY="$(tr -d '\n' < "$DEFAULT_KEY_FILE")"
+    export OPENROUTER_API_KEY
+fi
 set -o pipefail
 
 PROGRAM="ttychatter.python"
