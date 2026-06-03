@@ -30,6 +30,12 @@ check: $(TARGET)
 	$(CC) $(CPPFLAGS) -fsyntax-only $(CFLAGS) $(SRC)
 	./$(TARGET) --version
 	./$(TARGET) --help >/dev/null
+	./$(TARGET) --help | grep -q -- '--update-models'
+	./$(TARGET) --help | grep -q -- '--test-model MODEL'
+	./$(TARGET) --help | grep -q -- '--loopback-file FILE'
+	grep -q '^OPTIONS' ttychatter.1
+	grep -q -- '--update-models' ttychatter.1
+	grep -q -- '--loopback-file FILE' ttychatter.1
 
 install: $(TARGET)
 	install -d $(DESTDIR)$(BINDIR)

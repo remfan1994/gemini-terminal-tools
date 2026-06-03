@@ -6,14 +6,20 @@ NAME
 SYNOPSIS
     ttychatter [options] input.txt output.log
     ttychatter --interactive [SESSION|./output.log]
+    ttychatter --chat [SESSION|./output.log]
     ttychatter --resume SESSION
     ttychatter --demo [options] input.txt output.log
+    ttychatter --set-api-key [--gpg]
+    ttychatter --forget-api-key
+    ttychatter --update-models
     ttychatter --models [--search TEXT] [--model-type TYPE] [--sort KEY]
     ttychatter --routers
     ttychatter --select-model
     ttychatter --test-model MODEL [--save]
-    ttychatter --set-api-key [--gpg]
-    ttychatter --forget-api-key
+    ttychatter --favorites
+    ttychatter --favorite-model MODEL
+    ttychatter --unfavorite-model MODEL
+    ttychatter --unbookmark-model MODEL
     ttychatter --list
     ttychatter --rename-session OLD NEW
     ttychatter --show-memory SESSION
@@ -21,10 +27,12 @@ SYNOPSIS
     ttychatter --clear-memory SESSION
     ttychatter --editor-prompt [output.log]
     ttychatter --search TEXT [--all-sessions]
+    ttychatter --search-sessions TEXT
     ttychatter --config
     ttychatter --set KEY=VALUE
     ttychatter --unset KEY
     ttychatter --doctor
+    ttychatter --credits
     ttychatter --version
     ttychatter --help
 
@@ -43,6 +51,178 @@ DESCRIPTION
     The C client also has a line-oriented interactive mode with local colon
     commands.  Interactive mode is intentionally still plain line I/O, not a
     curses UI.
+
+OPTIONS
+    General options:
+
+        -h, --help
+            Show command-line help and exit.
+
+        -v, --version
+            Show version and exit.
+
+        --demo
+            Use local demo models and local demo responses.  This avoids network
+            calls and does not require an API key.
+
+        --doctor
+            Run local diagnostics for config, API-key discovery, gpg, libcurl,
+            model cache, sessions, and related paths.
+
+        --credits
+            Print the project notice.
+
+        --config
+            Print the current config summary without revealing the API key.
+
+    Chat and session options:
+
+        -m MODEL, --model MODEL
+            Use MODEL for this run instead of the configured default.
+
+        -a FILE, --attach FILE
+            Attach FILE to the next request.  This option may be repeated.
+
+        -l, --loopback
+            Also print the clean AI output to standard output.
+
+        --loopback-file FILE
+            Append the clean AI output to FILE.
+
+        -i, --interactive
+            Start the line-oriented interactive chat loop.
+
+        --chat
+            Alias for --interactive.
+
+        --resume SESSION
+            Resume SESSION in interactive mode.  Bare names resolve under
+            SESSION_DIR; names containing '/' are treated as explicit paths.
+
+        --list
+            List named session logs in SESSION_DIR.
+
+        --rename-session OLD NEW
+            Rename one named session log.
+
+        --show-memory SESSION
+            Print the reconstructed context buffer for SESSION.
+
+        --clear-memory SESSION
+            Append a memory-clear marker to SESSION.
+
+        --edit-memory SESSION
+            Open the reconstructed context for SESSION in an external editor and
+            append the edited snapshot.
+
+        --editor-prompt [output.log]
+            Compose one message in $VISUAL, $EDITOR, or vi, send it, and append
+            the turn to output.log.  Without output.log, the default editor
+            session log is used.
+
+        --search TEXT
+            With --models, filter cached model rows.  Without --models, search
+            session logs.
+
+        --search-sessions TEXT
+            Search all session logs under SESSION_DIR.
+
+        --all-sessions
+            With --search, search all sessions.
+
+        --yes
+            Confirm the live-send prompt when CONFIRM_LIVE_SEND=1.
+
+    Model and favorite options:
+
+        --update-models
+            Refresh the local OpenRouter model cache.
+
+        --models
+            List cached models.
+
+        --routers
+            Shorthand for --models --model-type routers.
+
+        --select-model
+            Open a numbered cached model selector and save the chosen MODEL.
+
+        --test-model MODEL
+            Send the configured test prompt to MODEL.
+
+        --save
+            With --test-model, save MODEL as the configured default when the
+            test succeeds.
+
+        --model-type TYPE
+            Filter model rows.  TYPE may be all, routers, fixed, free, or auto.
+
+        --sort KEY
+            Sort model rows.  KEY may be name, context, tokens, type, or
+            favorites.
+
+        --min-input-tokens N
+            Hide model rows with known input/context limits below N.
+
+        --min-output-tokens N
+            Hide model rows with known output-token limits below N.
+
+        --hide-preview
+            Hide preview- or experimental-looking model IDs.
+
+        --show-preview
+            Show preview- or experimental-looking model IDs.
+
+        --require-tokens
+            Hide model rows with unknown context/output token limits.
+
+        --allow-missing-tokens
+            Allow model rows with unknown context/output token limits.
+
+        --all
+            Disable model-list filters.
+
+        --favorites-only
+            With --models, show only favorite models.
+
+        --favorites
+            List favorite models.
+
+        --favorite-model MODEL
+            Add MODEL to the favorites file.
+
+        --unfavorite-model MODEL
+            Remove MODEL from the favorites file.
+
+        --unbookmark-model MODEL
+            Alias for --unfavorite-model.
+
+    API-key and config-write options:
+
+        --set-api-key
+            Prompt for an API key and save it in the config file.
+
+        --gpg
+            With --set-api-key, encrypt the API key using the external gpg
+            command.
+
+        --forget-api-key
+            Remove stored plaintext and encrypted API-key material.
+
+        --set KEY=VALUE
+            Write a config key.
+
+        --unset KEY
+            Remove a config key.
+
+        --send-input VALUE
+            Write the SEND_INPUT config compatibility key.
+
+        --theme VALUE
+            Write the THEME config compatibility key.
+
+        --code-attachment-min-lines N
+            Write CODE_ATTACHMENT_MIN_LINES.
 
 SESSION ADDRESSING
     ttychatter supports two address modes.
@@ -126,6 +306,10 @@ USAGE EXAMPLES
 
         ttychatter --loopback prompt.txt session.log | sed -n '1,20p'
 
+    Mirror the clean AI response to a file while keeping the session log:
+
+        ttychatter --loopback-file latest-answer.txt prompt.txt session.log
+
 RUNTIME COMMANDS
     In interactive mode, lines beginning with ':' are local ttychatter
     commands.  They are not sent to the AI model.
@@ -177,8 +361,14 @@ MODEL MANAGEMENT
         ttychatter --models
         ttychatter --models --search TEXT
         ttychatter --models --model-type routers
+        ttychatter --routers
+        ttychatter --select-model
+        ttychatter --test-model MODEL [--save]
         ttychatter --models --favorites-only
         ttychatter --models --sort context
+
+    The model table includes context and output-token columns when the catalog
+    exposes that metadata.
 
     Supported model type filters:
 
@@ -201,6 +391,7 @@ MODEL MANAGEMENT
         --min-input-tokens N
         --min-output-tokens N
         --hide-preview
+        --show-preview
         --require-tokens
         --allow-missing-tokens
         --all
@@ -208,9 +399,10 @@ MODEL MANAGEMENT
 FAVORITES
     Favorite models are stored as plain text, one model per line:
 
+        ttychatter --favorites
         ttychatter --favorite-model openrouter/auto
         ttychatter --unfavorite-model openrouter/auto
-        ttychatter --favorites
+        ttychatter --unbookmark-model openrouter/auto
 
 API KEY STORAGE
     ttychatter checks for API keys in this order:
@@ -243,6 +435,7 @@ CONFIGURATION
         TTYCHATTER_API_KEY
         API_KEY
         API_KEY_GPG_FILE
+        OPENROUTER_API_KEY_GPG_FILE
         MODEL
         MODEL_CACHE_FILE
         MODEL_FAVORITES_FILE
@@ -271,7 +464,9 @@ CONFIGURATION
 
     Some keys, such as SEND_INPUT and THEME, exist mostly for cross-client
     config parity.  The file-in/file-out C command does not have an input key
-    binding or terminal theme in the same sense as the ncurses client.
+    binding or terminal theme in the same sense as the ncurses client.  The
+    --send-input and --theme flags are command-line shortcuts for writing those
+    compatibility keys.
 
 SESSION FORMAT
     New logs start with this pre-chat line:

@@ -30,14 +30,34 @@ The default model cache is:
 
     ~/.cache/ttychatter/openrouter/models.json
 
-4. Browse/search/select models
-------------------------------
+4. Browse/search/select/test models
+-----------------------------------
 
     ./ttychatter --models
     ./ttychatter --models --search free
     ./ttychatter --models --model-type routers
     ./ttychatter --routers
     ./ttychatter --select-model
+    ./ttychatter --test-model openrouter/auto
+    ./ttychatter --test-model openrouter/auto --save
+
+Common model-list filters:
+
+    ./ttychatter --models --favorites-only
+    ./ttychatter --models --sort context
+    ./ttychatter --models --min-input-tokens 32000
+    ./ttychatter --models --require-tokens
+    ./ttychatter --models --allow-missing-tokens
+    ./ttychatter --models --hide-preview
+    ./ttychatter --models --show-preview
+    ./ttychatter --models --all
+
+Favorite model commands:
+
+    ./ttychatter --favorites
+    ./ttychatter --favorite-model openrouter/auto
+    ./ttychatter --unfavorite-model openrouter/auto
+    ./ttychatter --unbookmark-model openrouter/auto
 
 5. Create an input file
 -----------------------
@@ -90,6 +110,7 @@ Generated long fenced code blocks are saved under:
 -----------------------
 
     ./ttychatter --loopback prompt.txt session.log | less
+    ./ttychatter --loopback-file latest-answer.txt prompt.txt session.log
 
 11. Interactive mode with colon commands
 ----------------------------------------
@@ -102,7 +123,39 @@ Generated long fenced code blocks are saved under:
     ttychatter> :memory
     ttychatter> :quit
 
-12. Demo mode
+12. Check command-line help
+---------------------------
+
+    ./ttychatter --help
+    ./ttychatter --version
+    man ./ttychatter.1
+
+Useful non-walkthrough flags are listed here so this file stays aligned with
+--help and the man page:
+
+    ./ttychatter --chat notes
+    ./ttychatter --model openrouter/auto input.txt session.log
+    ./ttychatter --attach notes.txt input.txt session.log
+    ./ttychatter --yes input.txt session.log
+    ./ttychatter --forget-api-key
+    ./ttychatter --config
+    ./ttychatter --set MODEL=openrouter/auto
+    ./ttychatter --unset MODEL
+    ./ttychatter --list
+    ./ttychatter --rename-session notes archive-notes
+    ./ttychatter --edit-memory notes
+    ./ttychatter --clear-memory notes
+    ./ttychatter --editor-prompt session.log
+    ./ttychatter --search-sessions TEXT
+    ./ttychatter --search TEXT --all-sessions
+    ./ttychatter --models --min-output-tokens 4096
+    ./ttychatter --send-input enter
+    ./ttychatter --theme plain
+    ./ttychatter --code-attachment-min-lines 20
+    ./ttychatter --doctor
+    ./ttychatter --credits
+
+13. Demo mode
 -------------
 
 Demo mode avoids network/API use:
@@ -115,13 +168,38 @@ Interactive parity commands
 
 Inside the prompt, use colon commands for local control:
 
+    :help
     :list
     :rename research-notes
+    :models
+    :routers
+    :update-models
     :select-model
+    :test-model openrouter/auto
+    :model openrouter/auto
+    :model-save openrouter/auto
+    :favorites
+    :favorite openrouter/auto
+    :unfavorite openrouter/auto
+    :config
+    :set KEY VALUE
+    :unset KEY
+    :set-api-key
+    :set-api-key gpg
+    :forget-api-key
+    :memory
     :edit-memory
+    :clear-memory
+    :attach notes.txt
+    :attachments
     :pending
+    :clear-attachments
+    :editor
     :search TEXT
     :search-all TEXT
+    :credits
+    :doctor
     :quit
 
 These commands are handled by ttychatter itself and are not sent to the AI.
+Use ./ttychatter --help or man ttychatter for the full command-line option list.

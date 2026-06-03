@@ -25,12 +25,27 @@
 - Changed startup notice output so new logs begin with the exact pre-chat line
   requested by the project owner, and --interactive prints that line before the
   prompt.
+- Expanded --help so it documents --update-models and the other accepted
+  command-line flags that had fallen out of the help text.
+- Added a real OPTIONS section to ttychatter.1 and expanded README/WALKTHROUGH
+  command references for model, favorite, session, and config commands.
+- Fixed --show-preview so it can override MODEL_FILTER_HIDE_PREVIEW from config.
+- Implemented output-token metadata parsing for the model table so
+  --min-output-tokens now filters C model listings instead of being only a
+  compatibility setting.
+- Let --editor-prompt accept a space-separated optional output log path, matching
+  the documented command form.
+- Added make-check coverage for the updated help/man-page documentation.
 
 ### Documented
 - Clarified the two address modes: explicit file-in/file-out paths versus
   named sessions under SESSION_DIR.
 - Corrected FILES, CONFIGURATION, SESSION FORMAT, README, WALKTHROUGH, and
   changelog text to remove the old storage discrepancy.
+- Fixed command reference drift: --update-models now appears in --help and the
+  man-page synopsis/options, and the README/WALKTHROUGH/man page now document
+  the full active command-line option set including model filters, favorites,
+  loopback-file, editor-prompt, credits, and config-compatibility shortcuts.
 
 ## 0.6.0-c-cli
 

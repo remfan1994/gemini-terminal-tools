@@ -26,6 +26,113 @@ Check syntax/basic commands:
 
     make check
 
+Command reference
+-----------------
+
+The same command surface is available from:
+
+    ttychatter --help
+    man ./ttychatter.1
+
+Primary forms:
+
+    ttychatter [options] input.txt output.log
+    ttychatter -i|--interactive|--chat [SESSION|./session.log]
+    ttychatter --resume SESSION
+    ttychatter --set-api-key [--gpg]
+    ttychatter --forget-api-key
+    ttychatter --update-models
+    ttychatter --models [--search TEXT] [--model-type TYPE] [--sort KEY]
+    ttychatter --routers
+    ttychatter --select-model
+    ttychatter --test-model MODEL [--save]
+    ttychatter --favorites
+    ttychatter --favorite-model MODEL
+    ttychatter --unfavorite-model MODEL
+    ttychatter --unbookmark-model MODEL
+    ttychatter --list
+    ttychatter --rename-session OLD NEW
+    ttychatter --show-memory SESSION
+    ttychatter --edit-memory SESSION
+    ttychatter --clear-memory SESSION
+    ttychatter --editor-prompt [output.log]
+    ttychatter --search TEXT [--all-sessions]
+    ttychatter --search-sessions TEXT
+    ttychatter --config
+    ttychatter --set KEY=VALUE
+    ttychatter --unset KEY
+    ttychatter --doctor
+    ttychatter --credits
+    ttychatter --version
+    ttychatter --help
+
+General and chat/session options:
+
+    -h, --help
+    -v, --version
+    --demo
+    --yes
+    -m, --model MODEL
+    -a, --attach FILE
+    -l, --loopback
+    --loopback-file FILE
+    -i, --interactive
+    --chat
+    --resume SESSION
+    --list
+    --rename-session OLD NEW
+    --show-memory SESSION
+    --clear-memory SESSION
+    --edit-memory SESSION
+    --editor-prompt [output.log]
+    --search TEXT
+    --search-sessions TEXT
+    --all-sessions
+
+Model and favorite options:
+
+    --update-models
+    --models
+    --routers
+    --select-model
+    --test-model MODEL
+    --save
+    --model-type all|routers|fixed|free|auto
+    --sort name|context|tokens|type|favorites
+    --min-input-tokens N
+    --min-output-tokens N
+    --hide-preview
+    --show-preview
+    --require-tokens
+    --allow-missing-tokens
+    --all
+    --favorites-only
+    --favorites
+    --favorite-model MODEL
+    --unfavorite-model MODEL
+    --unbookmark-model MODEL
+
+The model table displays context and output-token limits when the cached catalog
+contains that metadata.
+
+API key, config, and maintenance options:
+
+    --set-api-key
+    --gpg
+    --forget-api-key
+    --config
+    --set KEY=VALUE
+    --unset KEY
+    --send-input VALUE
+    --theme VALUE
+    --code-attachment-min-lines N
+    --doctor
+    --credits
+
+The installed man page contains descriptions for these options.  The --chat
+flag is an alias for --interactive, and --unbookmark-model is an alias for
+--unfavorite-model.
+
 OpenRouter storage parity
 -------------------------
 
