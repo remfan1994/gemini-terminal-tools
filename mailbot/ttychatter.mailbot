@@ -52,6 +52,7 @@ from typing import Any, Iterable, List, Optional, Tuple
 
 PROGRAM = "ttychatter.mailbot"
 VERSION = "0.6.1"
+AUTOMATED_MAILBOT_NOTICE = "This is an automated email from THATIAM.VIP's OpenRouter artificial intelligence mailbot."
 
 DEFAULT_CONFIG_DIR = Path.home() / ".config" / "ttychatter" / "mailbot"
 DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config"
@@ -1022,14 +1023,13 @@ def load_user_registry(cfg: Config) -> dict:
 def save_user_registry(cfg: Config, data: dict) -> None:
     write_json_file(cfg.user_registry_file, data)
 
-# PLACE OF PERSONAL INTEREST... DEFAULT MODEL DEFINITION DONE HERE
+
 def initial_user_config_text(profile: UserProfile) -> str:
     return textwrap.dedent(f"""\
         # ttychatter.mailbot per-user ttychatter.python config
         # This file stores non-secret ttychatter preferences only.
         # API keys are stored as chmod 600 files outside .config and injected by mailbot.
         CONTEXT_TURNS=12
-        MODEL=openrouter/auto
         SESSION_DIR={profile.session_dir}
         ATTACHMENT_DIR={profile.attachment_dir}
         MODEL_CACHE_FILE={profile.model_cache_file}
@@ -1958,7 +1958,7 @@ def build_config_reply(cfg: Config, original: Message, body: str, attachment_tex
     if original.get('Message-ID'):
         msg['In-Reply-To'] = original.get('Message-ID')
         msg['References'] = original.get('Message-ID')
-    msg.set_content(body.rstrip() + '\n')
+    msg.set_content(mailbot_reply_body(cfg, body or "(empty response)", "success", command=cfg.config_subject_token))
     if attachment_text is not None:
         msg.add_attachment(attachment_text.encode('utf-8'), maintype='text', subtype='plain', filename='ttychatter-mailbot-config.txt')
     return msg
@@ -3133,15 +3133,10 @@ def build_reply(cfg: Config, original: Message, session: str, body: str, stderr_
         msg["References"] = original.get("Message-ID")
 
     status = "success" if ok else "error"
-    text = [
-        f"ttychatter.mailbot {status}",
-        f"session: {session}",
-        "",
-        body or "(empty response)",
-    ]
+    text = [body or "(empty response)"]
     if cfg.include_ttychatter_stderr and stderr_text:
         text.extend(["", "--- ttychatter stderr ---", stderr_text])
-    msg.set_content("\n".join(text).rstrip() + "\n")
+    msg.set_content(mailbot_reply_body(cfg, "\n".join(text), status, session=session))
     return msg
 
 
@@ -3178,6 +3173,63 @@ def redact_subject_for_reply(subject: str, cfg: Config) -> str:
     return redact_api_key_literals(raw)
 
 
+def footer_command_subject(cfg: Config) -> str:
+    preferred = (cfg.mailbot_subject_token or "MAILBOT").strip()
+    configured = [x.strip() for x in (cfg.body_command_subjects or []) if x.strip()]
+    configured_upper = {x.upper() for x in configured}
+    if preferred and (not configured_upper or preferred.upper() in configured_upper):
+        return preferred
+    if configured:
+        return configured[0]
+    return "MAILBOT"
+
+
+def mailbot_reply_footer(cfg: Config, status: str, session: str = "", command: str = "") -> str:
+    command_subject = footer_command_subject(cfg)
+    lines = [
+        "--",
+        f"{PROGRAM} {status}",
+    ]
+    if session:
+        lines.append(f"session: {session}")
+    if command:
+        lines.append(f"command: {redact_command_for_reply(command)}")
+    lines.extend([
+        "",
+        "MAILBOT COMMANDS",
+        "",
+        "To use a mailbot command, send a new email with:",
+        "",
+        f"Subject: {command_subject}",
+        "Body: COMMAND [ARGUMENTS]",
+        "",
+        "Common commands:",
+        "",
+        "COMMAND               FUNCTION",
+        "--------------------  --------------------------------------------",
+        "help                  Email the help response.",
+        "manpage | manual      Email the plain-text manual as an attachment.",
+        "sessions              List saved conversation sessions.",
+        "models [flags]        List available models using safe model-list flags.",
+        "model-cache           Email cached model data without refreshing it.",
+        "model-search TEXT     Search cached model data.",
+        "favorites             List favorite models.",
+        "ttyconfig | prefs     Show this sender's ttychatter configuration.",
+        "ttydoctor             Run ttychatter diagnostics.",
+        "api-key KEY           Save this sender's OpenRouter API key.",
+        "forget-api-key        Remove this sender's saved OpenRouter API key.",
+        "",
+        f"For the complete command list, send Subject: {command_subject} with Body: help.",
+    ])
+    return "\n".join(lines).rstrip()
+
+
+def mailbot_reply_body(cfg: Config, body: str, status: str, session: str = "", command: str = "") -> str:
+    main = (body or "(empty response)").rstrip()
+    footer = mailbot_reply_footer(cfg, status, session=session, command=command)
+    return f"{AUTOMATED_MAILBOT_NOTICE}\n\n{main}\n\n{footer}\n"
+
+
 def build_control_reply(
     cfg: Config,
     original: Message,
@@ -3201,13 +3253,7 @@ def build_control_reply(
         msg["References"] = original.get("Message-ID")
 
     status = "success" if ok else "error"
-    text = [
-        f"ttychatter.mailbot {status}",
-        f"command: {redact_command_for_reply(command)}",
-        "",
-        body or "(empty response)",
-    ]
-    msg.set_content("\n".join(text).rstrip() + "\n")
+    msg.set_content(mailbot_reply_body(cfg, body or "(empty response)", status, command=command))
     for attachment in attachments or []:
         msg.add_attachment(
             attachment.data,
@@ -3310,7 +3356,7 @@ Config/models/control:
   {marker}MODELS TEXT             Search existing model cache for TEXT; no refresh
   {marker}CMD                     Run the first nonempty body line as a command
   {marker}help                    Show this command list
-  {marker}manpage | manual        Return the mailbot manpage as an attachment
+  {marker}manpage | manual        Return the plain-text mailbot manual as an attachment
 
 Sessions:
   {marker}sessions                List session names with head/tail log previews
@@ -3470,7 +3516,7 @@ def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
     Return the email command summary.
     .TP
     .B manpage
-    Return this roff manpage. Aliases: manual, get-manpage, fetch-manpage.
+    Return the mailbot manual as a plain-text email attachment. Aliases: manual, get-manpage, fetch-manpage.
     .TP
     .B sessions
     List saved session names with short head and tail previews.
@@ -3678,6 +3724,165 @@ def mailbot_manpage(cfg: Optional[Config] = None) -> str:
     return external_mailbot_manpage(cfg) or embedded_mailbot_manpage(cfg)
 
 
+def roff_plain_unescape(text: str) -> str:
+    replacements = {
+        r"\-": "-",
+        r"\&": "",
+        r"\(bu": "*",
+        r"\(em": "--",
+        r"\(en": "-",
+        r"\fB": "",
+        r"\fI": "",
+        r"\fR": "",
+        r"\fP": "",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    text = re.sub(r"\\f\[[^\]]+\]", "", text)
+    text = re.sub(r"\\s[+-]?\d+", "", text)
+    text = text.replace(r"\ ", " ")
+    return text
+
+
+def split_roff_args(arg_text: str) -> List[str]:
+    arg_text = roff_plain_unescape(arg_text or "")
+    try:
+        return shlex.split(arg_text)
+    except ValueError:
+        return arg_text.split()
+
+
+def join_roff_args(args: List[str]) -> str:
+    text = " ".join(roff_plain_unescape(x) for x in args).strip()
+    text = re.sub(r"\s+([,.;:)\]])", r"\1", text)
+    text = re.sub(r"([(\[])\s+", r"\1", text)
+    return text
+
+
+def append_plain_blank(lines: List[str]) -> None:
+    if lines and lines[-1] != "":
+        lines.append("")
+
+
+def roff_to_plain_text(source: str) -> str:
+    """Render the small man(7) macro subset used by ttychatter.mailbot as plain text."""
+    output: List[str] = []
+    pending_tp = False
+    literal = False
+
+    for raw in (source or "").splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            append_plain_blank(output)
+            continue
+        if stripped.startswith('.\\"') or stripped.startswith('.\\\"'):
+            continue
+
+        if stripped.startswith('.'):
+            match = re.match(r"^\.([A-Za-z][A-Za-z0-9]*)\s*(.*)$", stripped)
+            if not match:
+                continue
+            macro = match.group(1)
+            arg_text = match.group(2)
+            args = split_roff_args(arg_text)
+
+            if macro == "TH":
+                append_plain_blank(output)
+                title = join_roff_args(args[:2]) if args else "TTYCHATTER.MAILBOT"
+                if len(args) >= 4:
+                    title = f"{title} - {join_roff_args(args[2:4])}"
+                output.append(title.upper())
+                output.append("=" * len(output[-1]))
+                append_plain_blank(output)
+                pending_tp = False
+                continue
+
+            if macro in {"SH", "SS"}:
+                append_plain_blank(output)
+                title = join_roff_args(args) or "SECTION"
+                if macro == "SH":
+                    title = title.upper()
+                    output.append(title)
+                    output.append("-" * len(title))
+                else:
+                    output.append(title)
+                append_plain_blank(output)
+                pending_tp = False
+                continue
+
+            if macro in {"PP", "P", "LP"}:
+                append_plain_blank(output)
+                pending_tp = False
+                continue
+
+            if macro == "TP":
+                append_plain_blank(output)
+                pending_tp = True
+                continue
+
+            if macro == "IP":
+                append_plain_blank(output)
+                label = join_roff_args(args[:1])
+                if label in {r"\(bu", "*", "bu"}:
+                    output.append("-")
+                elif label:
+                    output.append(label)
+                pending_tp = False
+                continue
+
+            if macro in {"B", "I", "BR", "BI", "RB", "RI", "IR", "IB", "SM"}:
+                rendered = join_roff_args(args)
+                if rendered:
+                    output.append(rendered)
+                pending_tp = False
+                continue
+
+            if macro in {"nf", "EX"}:
+                append_plain_blank(output)
+                literal = True
+                pending_tp = False
+                continue
+
+            if macro in {"fi", "EE"}:
+                append_plain_blank(output)
+                literal = False
+                pending_tp = False
+                continue
+
+            if macro in {"RS", "RE", "br"}:
+                if macro == "br":
+                    append_plain_blank(output)
+                continue
+
+            rendered = join_roff_args(args)
+            if rendered:
+                output.append(rendered)
+            pending_tp = False
+            continue
+
+        rendered = roff_plain_unescape(line if literal else stripped)
+        output.append(rendered)
+        pending_tp = False
+
+    cleaned: List[str] = []
+    blank = False
+    for line in output:
+        line = line.rstrip()
+        if not line:
+            if not blank:
+                cleaned.append("")
+            blank = True
+        else:
+            cleaned.append(line)
+            blank = False
+    return "\n".join(cleaned).strip() + "\n"
+
+
+def mailbot_manual_text(cfg: Optional[Config] = None) -> str:
+    return roff_to_plain_text(mailbot_manpage(cfg))
+
+
 
 def validate_model_list_args(args: List[str]) -> Tuple[bool, List[str], str]:
     no_value = {
@@ -3792,11 +3997,12 @@ def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = Fal
         return True, mailbot_command_help(cfg), []
 
     if command == "manpage":
-        data = mailbot_manpage(cfg).encode("utf-8")
+        manual = mailbot_manual_text(cfg)
+        data = manual.encode("utf-8")
         if len(data) > cfg.max_outgoing_attachment_bytes:
-            return False, f"manpage attachment too large: {len(data)} bytes > {cfg.max_outgoing_attachment_bytes}\n", []
-        body = "Attached: ttychatter.mailbot.1\nInstall it as ttychatter.mailbot.1 in a man1 directory or read it directly.\n"
-        return True, body, [ReplyAttachment("ttychatter.mailbot.1", data, "text", "plain")]
+            return False, f"manual attachment too large: {len(data)} bytes > {cfg.max_outgoing_attachment_bytes}\n", []
+        body = "Attached: ttychatter.mailbot-manual.txt\n"
+        return True, body, [ReplyAttachment("ttychatter.mailbot-manual.txt", data, "text", "plain")]
 
     if command == "config":
         body, attachments = deliver_text_output(

@@ -1,4 +1,4 @@
-.TH TTYCHATTER.MAILBOT 1 "May 2026" "ttychatter.mailbot 0.6.0" "User Commands"
+.TH TTYCHATTER.MAILBOT 1 "May 2026" "ttychatter.mailbot 0.6.1" "User Commands"
 .SH NAME
 ttychatter.mailbot \- email transport adapter and remote control surface for ttychatter
 .SH SYNOPSIS
@@ -86,7 +86,7 @@ sending fails; delete removes the local log anyway.
 Return the email command summary.
 .TP
 .B manpage
-Return this roff manpage. Aliases: manual, get-manpage, fetch-manpage.
+Return the mailbot manual as a plain-text email attachment. Aliases: manual, get-manpage, fetch-manpage.
 .TP
 .B sessions
 List saved session names with short head and tail previews.
@@ -172,7 +172,12 @@ USER_TTYCONFIG_ALLOWED_KEYS, SPAM_PROTECTION, SPAM_MAX_RECIPIENTS,
 RATE_LIMIT_ENABLED, RATE_LIMIT_DB, RATE_LIMIT_WINDOW_SECONDS,
 RATE_LIMIT_SENDER_MESSAGES, RATE_LIMIT_GLOBAL_MESSAGES,
 RATE_LIMIT_PUBLIC_SENDER_MESSAGES, RATE_LIMIT_PUBLIC_GLOBAL_MESSAGES,
-MODEL_CACHE_FILE,
+ABUSE_LIMIT_ALLOWED_FROM, MAX_MESSAGE_BYTES, MAX_ATTACHMENT_COUNT,
+MAX_TOTAL_ATTACHMENT_BYTES, DAILY_QUOTA_ENABLED, DAILY_QUOTA_DB,
+DAILY_QUOTA_SENDER_MESSAGES, DAILY_QUOTA_PUBLIC_SENDER_MESSAGES,
+DAILY_QUOTA_GLOBAL_MESSAGES, MAX_SESSIONS_PER_SENDER,
+API_COST_PROTECTION, API_MAX_INPUT_CHARS, API_MAX_ESTIMATED_TOKENS,
+API_MAX_ATTACHMENT_BYTES, MODEL_CACHE_FILE,
 SESSION_DIR, ATTACHMENT_DIR, WORK_DIR, PROCESSED_DB, COMMAND_OUTPUT_MODE,
 MODEL_CACHE_OUTPUT, MODEL_SEARCH_OUTPUT, MODEL_LIST_OUTPUT, SESSIONS_OUTPUT,
 CONFIG_OUTPUT, OUTPUT_INLINE_MAX_BYTES, MAX_COMMAND_OUTPUT_BYTES, and
@@ -190,8 +195,11 @@ The mailbot migrates legacy plaintext API-key lines out of the ttychatter
 config when MIGRATE_PLAINTEXT_OPENROUTER_API_KEY=1.
 .PP
 SPAM_PROTECTION rejects auto-submitted/list/bulk mail and recipient floods.
-RATE_LIMIT_ENABLED enforces sender and global work caps. Enforce SPF, DKIM,
-DMARC, greylisting, and reputation at the MTA.
+RATE_LIMIT_ENABLED enforces rolling sender/global work caps. DAILY_QUOTA_ENABLED
+enforces daily sender/global caps. MAX_MESSAGE_BYTES, MAX_ATTACHMENT_COUNT,
+MAX_TOTAL_ATTACHMENT_BYTES, MAX_SESSIONS_PER_SENDER, and API_COST_PROTECTION
+protect the mail-to-API boundary before ttychatter is called. Enforce SPF,
+DKIM, DMARC, greylisting, and reputation at the MTA.
 .SH FILES
 Default config: ~/.config/ttychatter/mailbot/config
 .PP
