@@ -1,0 +1,461 @@
+ttychatter.mailbot 0.6.0
+=========================
+
+ttychatter.mailbot is an IMAP/sendmail or IMAP/SMTP transport adapter for
+ttychatter. It watches unread mail, maps accepted messages to either a
+chat session or a mailbot control command, calls ttychatter.python when model
+work is needed, and replies by email.
+
+The mailbot is deliberately not an OpenRouter client. Model access, model-cache
+updates, model lists, memory, saved sessions, attachments, and chat behavior are
+still delegated to ttychatter.python.
+
+Main features
+-------------
+
+    - Private mode with ALLOWED_FROM sender gating.
+    - Public demo mode with --open-to-public or OPEN_TO_PUBLIC=1.
+    - Self-sender rejection and DENY_FROM/BANNED_LIST for public safety.
+    - Public senders can use ordinary email subjects as prompts; tc: is not
+      required in public mode.
+    - Public senders are isolated by PUBLIC_SESSION_MODE, default per-sender.
+    - Public replies advertise the actual session name; a normal reply with
+      Re: session-name can resume when RE_SESSION_SUBJECTS permits it.
+    - Public sessions are automatically cleaned up by age, idle time, count,
+      and optional transcript trimming.
+    - Expiring public session logs can be emailed to their owner before local
+      deletion. Public users can toggle this preference when enabled.
+    - Per-sender user registry with private ttychatter HOME directories.
+    - Subject-line sessions: ordinary subjects become session names, so Re:
+      resumes the same sender/session pair.
+    - Per-user ttychatter preferences such as MODEL and CONTEXT_TURNS by email.
+    - Per-user OpenRouter API keys stored in chmod 600 secret files, not config.
+    - Server fallback OpenRouter key loaded from a secret file.
+    - Spam protection for auto-submitted/list/bulk mail, recipient floods, and
+      sender/global rate limits.
+    - Configurable mail grammar for the subject prefix, separator, session
+      delimiters, body-command subjects, and subject/body command acceptance.
+    - Uniform private command syntax:
+
+          tc:CONFIG
+          tc:MODELS
+          tc:MODELS TEXT
+          tc:CMD
+          tc:command args
+          tc:{session-name}
+          tc:{new}
+
+    - Subject: MAILBOT can contain either a command or an ordinary AI prompt in
+      the message body. Known command lines run as commands; other body text is
+      treated as a new chat request.
+    - Config export/update by email through tc:CONFIG.
+    - Cache-only model cache retrieval through tc:MODELS or tc:model-cache.
+    - Cache-only model cache search through tc:MODELS TEXT or tc:model-search TEXT.
+    - Explicit model-cache refresh through tc:update-models.
+    - Configurable command output delivery: auto, body, or attachment.
+    - Session listing with head/tail previews from each .log file.
+    - Session search, rename, delete, and dry-run deletion.
+    - Remote retrieval of the mailbot manpage.
+    - Safe allowlisted ttychatter utility commands over email.
+
+Files
+-----
+
+Install or ship these files together:
+
+    ttychatter.mailbot
+    ttychatter.mailbot.1
+    README
+    MAILBOT-WALKTHROUGH
+    MAILBOT-0.6.0-UPGRADE-NOTES.txt
+    MAILBOT-0.6.0-VERIFICATION.txt
+    CHANGELOG
+
+Typical local commands
+----------------------
+
+    ttychatter.mailbot --doctor
+    ttychatter.mailbot --list-candidates
+    ttychatter.mailbot --sessions
+    ttychatter.mailbot --manpage
+    ttychatter.mailbot --model-cache
+    ttychatter.mailbot --model-search claude
+    ttychatter.mailbot --update-models --dry-run
+    ttychatter.mailbot --delete-session old-session --dry-run
+    ttychatter.mailbot --cleanup-public-sessions --dry-run
+    ttychatter.mailbot --config
+    ttychatter.mailbot --raw-config
+    ttychatter.mailbot --once --dry-run
+    ttychatter.mailbot --once
+
+Private mail subject grammar
+----------------------------
+
+Control subjects are bare. Chat-session subjects are braced.
+
+    tc:CONFIG                    Export or apply mailbot config
+    tc:MODELS                    Return existing models-cache.json; no refresh
+    tc:MODELS TEXT               Search existing model cache for TEXT; no refresh
+    tc:CMD                       Run first nonempty body line as a command
+    tc:command args              Run a mailbot command directly
+    tc:delete{session-name}      Delete a session log
+    tc:rm{session-name}          Alias for delete{session-name}
+    tc:user                      Show the sender registry/profile status
+    tc:prefs                     Show per-user ttychatter preferences
+    tc:set MODEL openrouter/free Set an allowed per-user ttychatter option
+    tc:set CONTEXT_TURNS 12      Set another allowed per-user option
+    tc:api-key KEY               Store this sender's OpenRouter key privately
+    tc:forget-api-key            Delete this sender's stored OpenRouter key
+    tc:{session-name}            Send body to a ttychatter session
+    tc:{new}                     Start a new chat using ttychatter's own default
+                                  session-YYYY-MM-DD-HH-MM-SS name
+
+Legacy forms remain accepted after ALLOWED_FROM passes:
+
+    tc:{CONFIG}
+    tc:{MAILBOT}
+    tc:{MAILBOT:command args}
+
+Body-command subjects
+---------------------
+
+BODY_COMMAND_SUBJECTS defaults to MAILBOT,CMD.
+
+Examples:
+
+    Subject: MAILBOT
+
+    sessions
+
+or:
+
+    Subject: MAILBOT
+
+    model-search claude
+
+or:
+
+    Subject: MAILBOT
+
+    session worklog
+    Explain this attachment.
+
+If the first nonempty body line is a known mailbot command, it runs as a
+command. If it is not a known command, the message body is treated as an AI
+prompt and routed to a new/default chat session. In public mode, that default
+session is still isolated by PUBLIC_SESSION_MODE.
+
+User registry, subject sessions, and API-key secrets
+-----------------------------------------------------
+
+USER_REGISTRY=1 is enabled by default. The mailbot maps each accepted sender to
+an internal user id and runs ttychatter.python with that sender's private HOME.
+This keeps ttychatter config, sessions, caches, and preferences separate between
+senders.
+
+SUBJECT_SESSIONS=1 is also enabled by default. After control subjects are
+checked, an ordinary subject becomes the session name. Reply prefixes such as
+Re: and Fwd: are stripped, so this pair uses the same private session:
+
+    Subject: OpenRouter test
+    Subject: Re: OpenRouter test
+
+Per-user preferences are stored in the sender's private ttychatter config. Email
+mutation is restricted to USER_TTYCONFIG_ALLOWED_KEYS. Typical commands:
+
+    tc:user
+    tc:prefs
+    tc:set MODEL openrouter/free
+    tc:set CONTEXT_TURNS 12
+    tc:unset MODEL
+
+Server fallback OpenRouter key setup:
+
+    install -d -m 700 ~/.secrets/ttychatter/mailbot
+    printf '%s\n' 'sk-or-v1-your-server-key' > ~/.secrets/ttychatter/mailbot/openrouter-default.key
+    chmod 600 ~/.secrets/ttychatter/mailbot/openrouter-default.key
+
+The mailbot reads that file through DEFAULT_OPENROUTER_API_KEY_FILE and injects
+OPENROUTER_API_KEY into the ttychatter subprocess environment. The key is not
+written to the normal ttychatter config file.
+
+Users who bring their own key can send:
+
+    tc:api-key sk-or-v1-user-key
+
+or:
+
+    tc:set OPENROUTER_API_KEY sk-or-v1-user-key
+
+The key is immediately written to USER_SECRET_DIR as a chmod 600 secret file.
+The user's config only references behavior preferences; the literal key is not
+kept there and mailbot replies redact API-key commands.
+
+By default, MIGRATE_PLAINTEXT_OPENROUTER_API_KEY=1 migrates legacy plaintext
+OPENROUTER_API_KEY, API_KEY, and TTYCHATTER_API_KEY lines from:
+
+    ~/.config/ttychatter/openrouter/config
+
+to:
+
+    ~/.secrets/ttychatter/mailbot/openrouter-default.key
+
+A timestamped backup of the old config is left beside the original.
+
+Configurable grammar
+--------------------
+
+The default private grammar is tc:{session-name} for sessions and tc:command
+for commands. These pieces are configurable:
+
+    SUBJECT_PREFIX=tc
+    SUBJECT_SEPARATOR=:
+    SESSION_OPEN_DELIM={
+    SESSION_CLOSE_DELIM=}
+    BODY_COMMAND_SUBJECTS=MAILBOT,CMD
+    ALLOW_COMMANDS_IN_SUBJECT=1
+    ALLOW_BODY_COMMAND_SUBJECTS=1
+    ALLOW_BARE_CONTROL_SUBJECTS=1
+    ALLOW_LEGACY_BRACED_CONTROL=1
+    RE_SESSION_SUBJECTS=public
+
+The internal command names remain conventional and stable. The grammar overlay
+is configurable so a local deployment can match its mail culture without turning
+the command parser into a second scripting language.
+
+Public demo mode
+----------------
+
+Enable public mode with either:
+
+    ttychatter.mailbot --open-to-public --once
+
+or:
+
+    OPEN_TO_PUBLIC=1
+
+In public mode:
+
+    - any sender may send an ordinary prompt;
+    - non-ALLOWED_FROM senders cannot edit config;
+    - non-ALLOWED_FROM senders cannot update model caches unless explicitly
+      allowed, and update-models should normally stay private;
+    - non-ALLOWED_FROM senders cannot delete or rename other sessions;
+    - public sessions are isolated by PUBLIC_SESSION_MODE;
+    - public replies use Subject: Re: public-session-name;
+    - replying to that subject resumes the session when RE_SESSION_SUBJECTS is
+      public or always.
+
+Recommended public config:
+
+    OPEN_TO_PUBLIC=1
+    USER_REGISTRY=1
+    SUBJECT_SESSIONS=1
+    REJECT_SELF_SENDER=1
+    DENY_FROM=mailbot@thatiam.vip
+    SPAM_PROTECTION=1
+    RATE_LIMIT_ENABLED=1
+    PUBLIC_SESSION_MODE=per-sender
+    PUBLIC_SESSION_PREFIX=public
+    PUBLIC_ALLOW_NAMED_SESSIONS=0
+    PUBLIC_ALLOWED_COMMANDS=help,manpage,model-cache,model-search,archive-session
+    PUBLIC_SESSION_CLEANUP=1
+    PUBLIC_SESSION_IDLE_HOURS=72
+    PUBLIC_SESSION_TTL_HOURS=168
+    PUBLIC_SESSION_MAX_COUNT=200
+    PUBLIC_SESSION_MAX_TURNS=12
+    PUBLIC_SESSION_ARCHIVE_ON_DELETE=1
+    PUBLIC_SESSION_ARCHIVE_USER_TOGGLE=1
+    PUBLIC_SESSION_ARCHIVE_FAILURE_POLICY=keep
+    PUBLIC_SESSION_ARCHIVE_MAX_BYTES=1048576
+
+Public session cleanup policy
+-----------------------------
+
+The default public cleanup policy is a hybrid:
+
+    PUBLIC_SESSION_IDLE_HOURS=72
+        Delete sessions that have been inactive for 72 hours.
+
+    PUBLIC_SESSION_TTL_HOURS=168
+        Delete sessions older than seven days even if they have occasional
+        activity.
+
+    PUBLIC_SESSION_MAX_COUNT=200
+        Keep no more than the newest 200 public session logs.
+
+    PUBLIC_SESSION_MAX_TURNS=12
+        Trim surviving public logs to the last 12 user/assistant cycles.
+        Set to 0 to disable transcript trimming.
+
+This policy favors predictable cleanup over perfect retention. Idle expiry is
+the primary rule. TTL and count caps are backstops. Transcript trimming keeps a
+demo useful without keeping an indefinitely growing public transcript.
+
+Public archive-on-expire
+------------------------
+
+When PUBLIC_SESSION_ARCHIVE_ON_DELETE=1, cleanup tries to email an expiring
+public log to the recorded sender before deleting the local copy.
+
+    PUBLIC_SESSION_INDEX_FILE=~/.local/state/ttychatter/mailbot/public-sessions.json
+
+stores the sender/session mapping needed for that archive mail. The index stores
+public sender addresses because the bot cannot email an expiring log without an
+address to send it to.
+
+Public users can manage their own preference when enabled:
+
+    tc:archive-session status
+    tc:archive-session on
+    tc:archive-session off
+    tc:archive-opt-in
+    tc:archive-opt-out
+
+If archiving is enabled and sending fails, the default is:
+
+    PUBLIC_SESSION_ARCHIVE_FAILURE_POLICY=keep
+
+That means the local log is not deleted unless the archive mail was sent. Set:
+
+    PUBLIC_SESSION_ARCHIVE_FAILURE_POLICY=delete
+
+when disk cleanup must win even if archive delivery fails.
+
+Model cache and model list commands
+-----------------------------------
+
+Cache-only commands never ping OpenRouter:
+
+    tc:MODELS
+    tc:model-cache
+    tc:MODELS claude
+    tc:model-search claude
+
+Refresh is explicit:
+
+    tc:update-models
+
+Model-list display through ttychatter.python is separate:
+
+    tc:model-list --all
+    tc:models --all
+    tc:routers --model-type chat
+
+Output delivery modes
+---------------------
+
+Command results can be delivered in the email body, as an attachment, or by an
+auto policy.
+
+Global default:
+
+    COMMAND_OUTPUT_MODE=auto
+
+Command-specific overrides:
+
+    MODEL_CACHE_OUTPUT=auto
+    MODEL_SEARCH_OUTPUT=body
+    MODEL_LIST_OUTPUT=auto
+    SESSIONS_OUTPUT=body
+    CONFIG_OUTPUT=attachment
+    OUTPUT_INLINE_MAX_BYTES=50000
+
+The default auto policy is body for short readable results and attachment for
+large or structured results. This means model-search usually returns in the
+body, while full config and large model-cache results normally become
+attachments.
+
+Session commands
+----------------
+
+    tc:sessions
+    tc:search TEXT
+    tc:search-session SESSION TEXT
+    tc:rename-session OLD NEW
+    tc:delete-session SESSION
+    tc:delete{SESSION}
+    tc:rm{SESSION}
+
+Destructive commands support dry-run locally:
+
+    ttychatter.mailbot --delete-session SESSION --dry-run
+
+A dry run shows the target path and does not delete anything. This is useful
+because email subject typos are easy and session logs are ordinary files.
+
+Security notes
+--------------
+
+User isolation and secret handling are defense layers, not a substitute for a
+conservative mail perimeter. Keep ALLOWED_FROM narrow for private deployments.
+For public deployments, keep PUBLIC_ALLOWED_COMMANDS small and do not expose
+config mutation, model refresh, deletion, rename, api-key, tty-set, or tty-unset
+unless the deployment is intentionally disposable.
+
+SPAM_PROTECTION=1 rejects common automated mail classes before any ttychatter
+work is attempted:
+
+    - Auto-Submitted headers unless spam_reject_auto_submitted is disabled.
+    - List/Bulk/Precedence junk unless spam_reject_list_mail is disabled.
+    - Messages with more than SPAM_MAX_RECIPIENTS visible recipients.
+
+RATE_LIMIT_ENABLED=1 maintains a small JSON counter database and enforces per
+sender and global hourly caps. Public unprivileged senders use stricter caps:
+
+    RATE_LIMIT_SENDER_MESSAGES=20
+    RATE_LIMIT_GLOBAL_MESSAGES=200
+    RATE_LIMIT_PUBLIC_SENDER_MESSAGES=6
+    RATE_LIMIT_PUBLIC_GLOBAL_MESSAGES=60
+
+The mailbot cannot prove SPF, DKIM, DMARC, greylisting, or reputation by itself.
+Enforce those at the MTA if public exposure matters.
+
+Self-sender and denylist safety
+---------------------------------
+
+Public mode may use:
+
+    ALLOWED_FROM=*
+
+but the bot should still reject itself.  The default is:
+
+    REJECT_SELF_SENDER=1
+
+This check runs before ALLOWED_FROM and before OPEN_TO_PUBLIC.  Therefore the
+bot refuses mail from its own MAIL_FROM identity even when ALLOWED_FROM=* is
+configured.
+
+A separate denylist is also supported:
+
+    DENY_FROM=mailbot@thatiam.vip,bad@example.org,@bad-domain.example
+
+The standardized key is DENY_FROM.  BANNED_FROM and BANNED_LIST are accepted
+as compatibility aliases.  Address entries match exact senders.  @domain and
+*@domain entries match all senders at that domain.
+
+Private mode should keep ALLOWED_FROM narrow. Public mode should normally use a
+separate mailbox and a small PUBLIC_ALLOWED_COMMANDS list. Do not expose config
+mutation, model refresh, session deletion, tty-set, or tty-unset to public
+senders unless the deployment is intentionally disposable.
+
+Plaintext IMAP_PASSWORD and SMTP_PASSWORD are redacted from config exports.
+Encrypted password file paths are not redacted. OpenBSD cron and daemon runs
+should either use a working gpg-agent setup, a protected plaintext local config,
+or a host-specific secret mechanism.
+
+0.6.1 abuse-control additions
+-----------------------------
+
+0.6.1 keeps the 0.6.0 user registry and adds the missing mail-to-API caps:
+MAX_MESSAGE_BYTES, MAX_ATTACHMENT_COUNT, MAX_TOTAL_ATTACHMENT_BYTES,
+DAILY_QUOTA_ENABLED, DAILY_QUOTA_DB, DAILY_QUOTA_SENDER_MESSAGES,
+DAILY_QUOTA_PUBLIC_SENDER_MESSAGES, DAILY_QUOTA_GLOBAL_MESSAGES,
+MAX_SESSIONS_PER_SENDER, API_COST_PROTECTION, API_MAX_INPUT_CHARS,
+API_MAX_ESTIMATED_TOKENS, API_MAX_ATTACHMENT_BYTES, and
+ABUSE_LIMIT_ALLOWED_FROM.
+
+Use ALLOWED_FROM as the admin/allowlist. By default ABUSE_LIMIT_ALLOWED_FROM=1,
+so admins are still capped. Set ABUSE_LIMIT_ALLOWED_FROM=0 only on a private
+maintenance mailbox where trusted admins need to bypass message/quota/session/API
+caps.
