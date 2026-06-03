@@ -1030,6 +1030,7 @@ def initial_user_config_text(profile: UserProfile) -> str:
         # This file stores non-secret ttychatter preferences only.
         # API keys are stored as chmod 600 files outside .config and injected by mailbot.
         CONTEXT_TURNS=12
+        MODEL=openrouter/auto
         SESSION_DIR={profile.session_dir}
         ATTACHMENT_DIR={profile.attachment_dir}
         MODEL_CACHE_FILE={profile.model_cache_file}
