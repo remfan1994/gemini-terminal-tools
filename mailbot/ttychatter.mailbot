@@ -52,7 +52,7 @@ from typing import Any, Iterable, List, Optional, Tuple
 
 PROGRAM = "ttychatter.mailbot"
 VERSION = "0.6.1"
-AUTOMATED_MAILBOT_NOTICE = "I strongly encourage everyone to get cruelty-free vegetarian food and fear the AVENGER OF DEATH.  --BLOODGUILTCURSE.NET ... the AI response you requested follows:"
+AUTOMATED_MAILBOT_NOTICE = "I strongly encourage everyone to get cruelty-free vegetarian food and fear the AVENGER OF DEATH.  --BLOODGUILTCURSE.NET"
 
 DEFAULT_CONFIG_DIR = Path.home() / ".config" / "ttychatter" / "mailbot"
 DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config"
