@@ -150,6 +150,7 @@ typedef struct TCArgs {
     bool require_tokens;
     bool allow_missing_tokens;
     bool hide_preview;
+    bool show_preview;
     bool favorites_only;
     bool save;
     bool yes;
@@ -878,10 +879,10 @@ static TCHttpResponse http_request(const char *url, const char *method, const ch
  */
 static const char *TC_DEMO_MODELS_JSON =
     "{\"data\":["
-    "{\"id\":\"openrouter/auto\",\"name\":\"Demo Auto Router\",\"context_length\":128000},"
-    "{\"id\":\"openrouter/free\",\"name\":\"Demo Free Router\",\"context_length\":64000},"
-    "{\"id\":\"demo/fixed-small\",\"name\":\"Demo Fixed Small\",\"context_length\":16000},"
-    "{\"id\":\"demo/fixed-large\",\"name\":\"Demo Fixed Large\",\"context_length\":256000}"
+    "{\"id\":\"openrouter/auto\",\"name\":\"Demo Auto Router\",\"context_length\":128000,\"top_provider\":{\"max_completion_tokens\":8192}},"
+    "{\"id\":\"openrouter/free\",\"name\":\"Demo Free Router\",\"context_length\":64000,\"top_provider\":{\"max_completion_tokens\":4096}},"
+    "{\"id\":\"demo/fixed-small\",\"name\":\"Demo Fixed Small\",\"context_length\":16000,\"top_provider\":{\"max_completion_tokens\":2048}},"
+    "{\"id\":\"demo/fixed-large\",\"name\":\"Demo Fixed Large\",\"context_length\":256000,\"top_provider\":{\"max_completion_tokens\":16384}}"
     "]}";
 
 static char *demo_chat_response(const char *model, const char *user_text) {
@@ -921,6 +922,7 @@ typedef struct TCModelRow {
     char *id;
     char *name;
     long context;
+    long output;
     bool favorite;
 } TCModelRow;
 
@@ -963,6 +965,26 @@ static bool contains_casefold(const char *hay, const char *needle) {
     return false;
 }
 
+static long json_object_get_long_key(json_object *obj, const char *key) {
+    json_object *v = NULL;
+    if (!obj || !json_object_object_get_ex(obj, key, &v)) return 0;
+    if (json_object_is_type(v, json_type_int)) return json_object_get_int64(v);
+    if (json_object_is_type(v, json_type_double)) return (long)json_object_get_double(v);
+    if (json_object_is_type(v, json_type_string)) return atol(json_object_get_string(v));
+    return 0;
+}
+
+static long model_output_token_limit(json_object *model) {
+    long out = json_object_get_long_key(model, "max_completion_tokens");
+    if (out <= 0) out = json_object_get_long_key(model, "max_output_tokens");
+    json_object *top_provider = NULL;
+    if (out <= 0 && json_object_object_get_ex(model, "top_provider", &top_provider)) {
+        out = json_object_get_long_key(top_provider, "max_completion_tokens");
+        if (out <= 0) out = json_object_get_long_key(top_provider, "max_output_tokens");
+    }
+    return out > 0 ? out : 0;
+}
+
 static int update_models(const TCConfig *cfg, bool demo) {
     if (demo) {
         write_file_mode(cfg->model_cache_file, TC_DEMO_MODELS_JSON, 0600);
@@ -981,7 +1003,7 @@ static int update_models(const TCConfig *cfg, bool demo) {
     return 0;
 }
 
-static void modelrows_add(TCModelRows *rows, const char *id, const char *name, long context, bool favorite) {
+static void modelrows_add(TCModelRows *rows, const char *id, const char *name, long context, long output, bool favorite) {
     if (rows->count == rows->cap) {
         rows->cap = rows->cap ? rows->cap * 2 : 32;
         rows->items = realloc(rows->items, rows->cap * sizeof(rows->items[0]));
@@ -990,6 +1012,7 @@ static void modelrows_add(TCModelRows *rows, const char *id, const char *name, l
     rows->items[rows->count].id = xstrdup(id ? id : "");
     rows->items[rows->count].name = xstrdup(name ? name : "");
     rows->items[rows->count].context = context;
+    rows->items[rows->count].output = output;
     rows->items[rows->count].favorite = favorite;
     rows->count++;
 }
@@ -1010,6 +1033,8 @@ static int modelrow_cmp(const void *a, const void *b) {
     if (strcmp(g_model_sort_key, "context") == 0 || strcmp(g_model_sort_key, "tokens") == 0) {
         if (ra->context < rb->context) return 1;
         if (ra->context > rb->context) return -1;
+        if (ra->output < rb->output) return 1;
+        if (ra->output > rb->output) return -1;
         return strcasecmp(ra->id, rb->id);
     }
     if (strcmp(g_model_sort_key, "type") == 0) {
@@ -1065,11 +1090,13 @@ static int select_model_command(const TCConfig *cfg, bool demo) {
         const char *id = jid ? json_object_get_string(jid) : "";
         const char *name = jname ? json_object_get_string(jname) : "";
         long ctx = jctx ? json_object_get_int64(jctx) : 0;
+        long out = model_output_token_limit(m);
         if (!model_type_matches(id, cfg->model_type_filter)) continue;
-        if (cfg->model_filter_require_tokens && ctx <= 0) continue;
+        if (cfg->model_filter_require_tokens && (ctx <= 0 || out <= 0)) continue;
         if (cfg->model_min_input_tokens > 0 && ctx < cfg->model_min_input_tokens) continue;
+        if (cfg->model_min_output_tokens > 0 && out < cfg->model_min_output_tokens) continue;
         if (cfg->model_filter_hide_preview && (contains_casefold(id, "preview") || contains_casefold(name, "preview") || contains_casefold(id, "experimental") || contains_casefold(name, "experimental"))) continue;
-        modelrows_add(&rows, id, name, ctx, favorite_contains(cfg, id));
+        modelrows_add(&rows, id, name, ctx, out, favorite_contains(cfg, id));
     }
     json_object_put(root);
     g_model_sort_key = cfg->model_sort_order;
@@ -1079,7 +1106,7 @@ static int select_model_command(const TCConfig *cfg, bool demo) {
         modelrows_free(&rows);
         return 1;
     }
-    for (size_t i = 0; i < rows.count; i++) printf("%3zu) %-42.42s %-14s %ld\n", i + 1, rows.items[i].id, model_type_of(rows.items[i].id), rows.items[i].context);
+    for (size_t i = 0; i < rows.count; i++) printf("%3zu) %-42.42s %-14s ctx=%ld out=%ld\n", i + 1, rows.items[i].id, model_type_of(rows.items[i].id), rows.items[i].context, rows.items[i].output);
     fprintf(stderr, "Select model number: ");
     char line[64];
     if (!fgets(line, sizeof(line), stdin)) { modelrows_free(&rows); return 1; }
@@ -1134,29 +1161,32 @@ static int list_models(const TCConfig *cfg, const char *search, const char *type
         const char *id = jid ? json_object_get_string(jid) : "";
         const char *name = jname ? json_object_get_string(jname) : "";
         long ctx = jctx ? json_object_get_int64(jctx) : 0;
+        long out = model_output_token_limit(m);
         bool fav = favorite_contains(cfg, id);
         const char *effective_type = (type_filter && *type_filter) ? type_filter : cfg->model_type_filter;
         if (!model_type_matches(id, effective_type)) continue;
         if (favorites_only && !fav) continue;
-        if (cfg->model_filter_require_tokens && ctx <= 0) continue;
+        if (cfg->model_filter_require_tokens && (ctx <= 0 || out <= 0)) continue;
         if (cfg->model_min_input_tokens > 0 && ctx < cfg->model_min_input_tokens) continue;
+        if (cfg->model_min_output_tokens > 0 && out < cfg->model_min_output_tokens) continue;
         if (cfg->model_filter_hide_preview && (contains_casefold(id, "preview") || contains_casefold(name, "preview") || contains_casefold(id, "experimental") || contains_casefold(name, "experimental"))) continue;
         if (search && *search && !contains_casefold(id, search) && !contains_casefold(name, search)) continue;
-        modelrows_add(&rows, id, name, ctx, fav);
+        modelrows_add(&rows, id, name, ctx, out, fav);
     }
     json_object_put(root);
 
     g_model_sort_key = sort_key && *sort_key ? sort_key : cfg->model_sort_order;
     qsort(rows.items, rows.count, sizeof(rows.items[0]), modelrow_cmp);
 
-    printf("%-2s %-42s %-14s %-10s %s\n", "F", "MODEL", "TYPE", "CONTEXT", "NAME");
-    printf("%-2s %-42s %-14s %-10s %s\n", "-", "-----", "----", "-------", "----");
+    printf("%-2s %-42s %-14s %-10s %-10s %s\n", "F", "MODEL", "TYPE", "CONTEXT", "OUTPUT", "NAME");
+    printf("%-2s %-42s %-14s %-10s %-10s %s\n", "-", "-----", "----", "-------", "------", "----");
     for (size_t i = 0; i < rows.count; i++) {
-        printf("%-2s %-42.42s %-14s %-10ld %s\n",
+        printf("%-2s %-42.42s %-14s %-10ld %-10ld %s\n",
                rows.items[i].favorite ? "*" : "",
                rows.items[i].id,
                model_type_of(rows.items[i].id),
                rows.items[i].context,
+               rows.items[i].output,
                rows.items[i].name);
     }
     modelrows_free(&rows);
@@ -1922,46 +1952,77 @@ static void print_help(void) {
     printf("\n");
     printf("Usage:\n");
     printf("  ttychatter [options] input.txt output.log\n");
-    printf("  ttychatter --interactive [SESSION|./session.log]\n");
+    printf("  ttychatter -i|--interactive|--chat [SESSION|./session.log]\n");
     printf("  ttychatter --resume SESSION\n");
     printf("  ttychatter --set-api-key [--gpg]\n");
-    printf("  ttychatter --models [--search TEXT] [--model-type TYPE] [--sort KEY]\n");
+    printf("  ttychatter --forget-api-key\n");
+    printf("  ttychatter --models [filters]\n");
+    printf("  ttychatter --update-models\n");
     printf("  ttychatter --routers\n");
     printf("  ttychatter --select-model\n");
+    printf("  ttychatter --test-model MODEL [--save]\n");
+    printf("  ttychatter --favorites | --favorite-model MODEL | --unfavorite-model MODEL\n");
     printf("  ttychatter --list | --rename-session OLD NEW\n");
     printf("  ttychatter --show-memory SESSION | --clear-memory SESSION | --edit-memory SESSION\n");
     printf("  ttychatter --editor-prompt [output.log]\n");
     printf("  ttychatter --search TEXT [--all-sessions]\n");
-    printf("\nOptions:\n");
-    printf("  -m, --model MODEL        model/router to use (default from config)\n");
-    printf("  -a, --attach FILE        attach file; repeatable\n");
-    printf("  -l, --loopback           also print AI output to stdout\n");
-    printf("      --loopback-file FILE mirror clean AI output to FILE\n");
-    printf("      --demo               use local demo models/responses; no network/API key\n");
-    printf("  -i, --interactive        line-oriented chat loop with colon commands\n");
-    printf("      --list               list session logs in SESSION_DIR\n");
+    printf("  ttychatter --config | --set KEY=VALUE | --unset KEY\n");
+    printf("  ttychatter --doctor | --credits | --version | --help\n");
+    printf("\nGeneral:\n");
+    printf("  -h, --help                   show this help\n");
+    printf("  -v, --version                show version\n");
+    printf("      --demo                   use local demo models/responses; no network/API key\n");
+    printf("      --doctor                 run local diagnostics\n");
+    printf("      --credits                show project notice\n");
+    printf("      --config                 print config summary\n");
+    printf("\nChat and sessions:\n");
+    printf("  -m, --model MODEL            model/router to use (default from config)\n");
+    printf("  -a, --attach FILE            attach file; repeatable\n");
+    printf("  -l, --loopback               also print AI output to stdout\n");
+    printf("      --loopback-file FILE     mirror clean AI output to FILE\n");
+    printf("  -i, --interactive            line-oriented chat loop with colon commands\n");
+    printf("      --chat                   alias for --interactive\n");
+    printf("      --resume SESSION         resume named or explicit interactive session\n");
+    printf("      --list                   list session logs in SESSION_DIR\n");
     printf("      --rename-session OLD NEW rename a session log\n");
-    printf("      --search TEXT        filter model list with --models, otherwise search sessions\n");
-    printf("      --search-sessions TEXT search all session logs\n");
-    printf("      --model-type TYPE    all, routers, fixed, free, auto\n");
-    printf("      --routers            shorthand for --models --model-type routers\n");
-    printf("      --sort KEY           name, context, tokens, type, favorites\n");
-    printf("      --min-input-tokens N filter model rows by context length\n");
-    printf("      --hide-preview       hide preview/experimental-looking model IDs\n");
-    printf("      --allow-missing-tokens allow rows with unknown context limits\n");
-    printf("      --favorites-only     show only favorite models in --models\n");
-    printf("      --yes                confirm live send when CONFIRM_LIVE_SEND=1\n");
-    printf("      --save               save successful --test-model result as MODEL\n");
-    printf("      --select-model       numbered cached model selector\n");
-    printf("      --set-api-key        save API key\n");
-    printf("      --gpg                encrypt API key with gpg when used with --set-api-key\n");
-    printf("      --forget-api-key     remove stored plaintext/encrypted API key\n");
-    printf("      --config             print config summary\n");
-    printf("      --set KEY=VALUE      write a config key\n");
-    printf("      --unset KEY          remove a config key\n");
-    printf("      --doctor             local diagnostics\n");
-    printf("  -h, --help               show help\n");
-    printf("  -v, --version            show version\n");
+    printf("      --show-memory SESSION    print reconstructed context/memory\n");
+    printf("      --clear-memory SESSION   append a memory-clear marker\n");
+    printf("      --edit-memory SESSION    edit reconstructed context in editor\n");
+    printf("      --editor-prompt [LOG]    compose one message in editor and send it\n");
+    printf("      --search TEXT            filter --models, otherwise search session logs\n");
+    printf("      --search-sessions TEXT   search all session logs\n");
+    printf("      --all-sessions           with --search, search all sessions\n");
+    printf("      --yes                    confirm live send when CONFIRM_LIVE_SEND=1\n");
+    printf("\nModels:\n");
+    printf("      --update-models          refresh model cache from OpenRouter\n");
+    printf("      --models                 list cached models\n");
+    printf("      --routers                shorthand for --models --model-type routers\n");
+    printf("      --select-model           numbered cached model selector\n");
+    printf("      --test-model MODEL       send a test prompt to MODEL\n");
+    printf("      --save                   save successful --test-model result as MODEL\n");
+    printf("      --model-type TYPE        all, routers, fixed, free, auto\n");
+    printf("      --sort KEY               name, context, tokens, type, favorites\n");
+    printf("      --min-input-tokens N     filter by input/context limit\n");
+    printf("      --min-output-tokens N    filter by output-token limit\n");
+    printf("      --hide-preview           hide preview/experimental-looking model IDs\n");
+    printf("      --show-preview           allow preview/experimental-looking model IDs\n");
+    printf("      --require-tokens         require known context/output token limits\n");
+    printf("      --allow-missing-tokens   allow rows with unknown token limits\n");
+    printf("      --all                    disable model-list filters\n");
+    printf("      --favorites-only         show only favorite models in --models\n");
+    printf("      --favorites              list favorite models\n");
+    printf("      --favorite-model MODEL   add favorite model\n");
+    printf("      --unfavorite-model MODEL remove favorite model\n");
+    printf("      --unbookmark-model MODEL alias for --unfavorite-model\n");
+    printf("\nAPI key and config writes:\n");
+    printf("      --set-api-key            save API key\n");
+    printf("      --gpg                    encrypt API key with gpg when used with --set-api-key\n");
+    printf("      --forget-api-key         remove stored plaintext/encrypted API key\n");
+    printf("      --set KEY=VALUE          write a config key\n");
+    printf("      --unset KEY              remove a config key\n");
+    printf("      --send-input VALUE       write SEND_INPUT config compatibility key\n");
+    printf("      --theme VALUE            write THEME config compatibility key\n");
+    printf("      --code-attachment-min-lines N write CODE_ATTACHMENT_MIN_LINES\n");
     printf("\nSession addressing:\n");
     printf("  input.txt output.log uses output.log exactly.\n");
     printf("  Bare SESSION names resolve to SESSION_DIR/SESSION.log.\n");
@@ -2117,7 +2178,11 @@ static int parse_args(int argc, char **argv, TCArgs *args) {
             case 1022: args->show_memory_cmd = true; args->memory_path = xstrdup(optarg); break;
             case 1023: args->clear_memory_cmd = true; args->memory_path = xstrdup(optarg); break;
             case 1024: args->edit_memory_cmd = true; args->memory_path = xstrdup(optarg); break;
-            case 1025: args->editor_prompt_cmd = true; if (optarg) args->output_path = xstrdup(optarg); break;
+            case 1025:
+                args->editor_prompt_cmd = true;
+                if (optarg) args->output_path = xstrdup(optarg);
+                else if (optind < argc && argv[optind][0] != '-') args->output_path = xstrdup(argv[optind++]);
+                break;
             case 1026: args->credits_cmd = true; break;
             case 1027: args->show_all_models = true; break;
             case 1028: args->search_sessions_cmd = true; break;
@@ -2125,7 +2190,7 @@ static int parse_args(int argc, char **argv, TCArgs *args) {
             case 1030: args->min_input_tokens = atol(optarg); break;
             case 1031: args->min_output_tokens = atol(optarg); break;
             case 1032: args->hide_preview = true; break;
-            case 1033: args->hide_preview = false; break;
+            case 1033: args->show_preview = true; break;
             case 1041: args->allow_missing_tokens = true; break;
             case 1034: args->require_tokens = true; break;
             case 1035: args->config_set_cmd = true; args->config_key = xstrdup("SEND_INPUT"); args->config_value = xstrdup(optarg); break;
@@ -2748,6 +2813,7 @@ int main(int argc, char **argv) {
         if (args.require_tokens) cfg.model_filter_require_tokens = true;
         if (args.allow_missing_tokens) cfg.model_filter_require_tokens = false;
         if (args.hide_preview) cfg.model_filter_hide_preview = true;
+        if (args.show_preview) cfg.model_filter_hide_preview = false;
         if (args.min_input_tokens > 0) cfg.model_min_input_tokens = args.min_input_tokens;
         if (args.min_output_tokens > 0) cfg.model_min_output_tokens = args.min_output_tokens;
         return list_models(&cfg, args.search, args.model_type, args.model_sort, args.favorites_only, args.demo);
