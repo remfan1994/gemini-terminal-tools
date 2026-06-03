@@ -22,6 +22,9 @@
   --resume, --show-memory, and --rename-session.
 - Fixed `make check` so it builds the ttychatter binary before running
   version/help smoke checks.
+- Changed startup notice output so new logs begin with the exact pre-chat line
+  requested by the project owner, and --interactive prints that line before the
+  prompt.
 
 ### Documented
 - Clarified the two address modes: explicit file-in/file-out paths versus
