@@ -1030,7 +1030,7 @@ def initial_user_config_text(profile: UserProfile) -> str:
         # This file stores non-secret ttychatter preferences only.
         # API keys are stored as chmod 600 files outside .config and injected by mailbot.
         CONTEXT_TURNS=12
-        MODEL=openrouter/auto
+        MODEL=openrouter/free
         SESSION_DIR={profile.session_dir}
         ATTACHMENT_DIR={profile.attachment_dir}
         MODEL_CACHE_FILE={profile.model_cache_file}
@@ -2105,14 +2105,30 @@ def sender_reject_reason(sender: str, cfg: Config) -> Optional[str]:
 def allowed_sender(sender: str, cfg: Config) -> bool:
     """Return true when an incoming sender is allowed to produce work.
 
-    In ordinary mode this is exactly ALLOWED_FROM. In public demo mode any
-    sender may chat, but only ALLOWED_FROM senders remain privileged enough for
-    mutating mailbot controls such as config, update-models, delete-session, and
-    tty-set.
+    ALLOWED_FROM is the private/admin allowlist. In public mode, any non-rejected
+    sender may produce work. When USER_REGISTRY=1, each accepted public sender is
+    mapped to a per-sender ttychatter HOME and secret/config state, so ordinary
+    user commands operate on that user's own registry profile rather than on
+    global mailbot state.
     """
     if sender_reject_reason(sender, cfg):
         return False
     return private_allowed_sender(sender, cfg) or bool(cfg.open_to_public)
+
+
+def registry_user_commands_available(sender: str, cfg: Config) -> bool:
+    """Return true when a non-ALLOWED_FROM sender should get user commands.
+
+    With USER_REGISTRY=1, public senders have private per-user state under
+    USER_HOME_ROOT / USER_SECRET_DIR. Commands such as sessions, models,
+    ttyconfig, api-key, tty-set, and tty-unset therefore apply to that sender's
+    own profile and should not be restricted to PUBLIC_ALLOWED_COMMANDS.
+
+    ALLOWED_FROM remains the admin/private allowlist for global mailbot controls
+    such as tc:CONFIG export/update. DENY_FROM/BANNED_LIST and self-sender
+    rejection still apply before this function can return true.
+    """
+    return bool(cfg.open_to_public and cfg.user_registry and sender_address(sender) and not sender_reject_reason(sender, cfg))
 
 
 def public_sender_is_privileged(sender: str, cfg: Config) -> bool:
@@ -3336,10 +3352,11 @@ Address private-mode mail to the bot from an ALLOWED_FROM sender. Preferred subj
 Public mode:
   open_to_public: {public_note}
   In --open-to-public mode, non-control subjects are accepted as prompts.
-  With USER_REGISTRY=1 and SUBJECT_SESSIONS=1, public senders also get per-sender homes and subject-named private logs.
-  Without registry subject sessions, non-ALLOWED_FROM public senders are isolated according to PUBLIC_SESSION_MODE.
+  With USER_REGISTRY=1 and SUBJECT_SESSIONS=1, public senders get per-sender homes, per-user configuration, per-user API-key storage, and subject-named private logs.
+  Registry users may use the normal user command set; commands operate inside that sender's private registry profile.
+  Without USER_REGISTRY=1, non-ALLOWED_FROM public senders may use only: {', '.join(cfg.public_allowed_commands)}
+  ALLOWED_FROM remains the private/admin allowlist for global mailbot controls such as {marker}CONFIG export/update.
   Replies advertise the session name; replying with "Re: session-name" resumes it.
-  Public senders may use only: {', '.join(cfg.public_allowed_commands)}
   Expiring public logs are archived before deletion when PUBLIC_SESSION_ARCHIVE_ON_DELETE=1.
   Public users may send {marker}archive-session on/off when PUBLIC_SESSION_ARCHIVE_USER_TOGGLE=1.
 
@@ -3452,14 +3469,21 @@ def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
     chat session or an allowlisted control command, calls ttychatter.python when
     chat or ttychatter utility work is needed, and replies by sendmail or SMTP.
     .PP
-    Private mode requires ALLOWED_FROM. Public demo mode, enabled by
+    Private mode requires ALLOWED_FROM. Public mode, enabled by
     .B --open-to-public
-    or OPEN_TO_PUBLIC=1, accepts mail from any sender but restricts non-ALLOWED_FROM
-    senders to public chat and the PUBLIC_ALLOWED_COMMANDS set.
+    or OPEN_TO_PUBLIC=1, accepts mail from any non-rejected sender.
     .PP
-    USER_REGISTRY=1 maps each accepted sender to a private ttychatter HOME.
+    USER_REGISTRY=1 maps each accepted sender to a private ttychatter HOME,
+    per-user configuration, per-user API-key storage, session directory,
+    attachment directory, and model cache. Registry users may use the normal
+    user command set; those commands operate on the sender's own registry
+    profile. When USER_REGISTRY=0, non-ALLOWED_FROM public senders remain
+    limited to PUBLIC_ALLOWED_COMMANDS.
+    .PP
     SUBJECT_SESSIONS=1 lets ordinary email subjects become per-sender session
-    names; Re: replies resume the same sender/session pair.
+    names; Re: replies resume the same sender/session pair. ALLOWED_FROM remains
+    the private/admin allowlist for global mailbot controls such as config
+    export/update.
     .SH PRIVATE SUBJECT GRAMMAR
     .TP
     .B ordinary email subject
@@ -3614,11 +3638,13 @@ def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
     CONFIG_OUTPUT, OUTPUT_INLINE_MAX_BYTES, MAX_COMMAND_OUTPUT_BYTES, and
     MAX_OUTGOING_ATTACHMENT_BYTES.
     .SH SECURITY
-    Public mode is for demos. It should use a separate mailbox, conservative
-    attachment/body limits, per-sender registry homes, subject sessions, and a
-    small PUBLIC_ALLOWED_COMMANDS set. Do not expose config mutation, model
-    refresh, session deletion, api-key, tty-set, or tty-unset to non-ALLOWED_FROM
-    senders unless the deployment is intentionally disposable.
+    Public mode should use a separate mailbox, conservative attachment/body
+    limits, USER_REGISTRY=1, per-sender registry homes, and subject sessions.
+    With USER_REGISTRY=1, user commands such as sessions, model tools, api-key,
+    tty-set, and tty-unset operate inside the sender's private registry profile.
+    ALLOWED_FROM remains the private/admin allowlist for global mailbot config
+    export/update. With USER_REGISTRY=0, non-ALLOWED_FROM public senders are
+    limited to PUBLIC_ALLOWED_COMMANDS.
     .PP
     OpenRouter keys are loaded from DEFAULT_OPENROUTER_API_KEY_FILE or a
     per-user secret file and injected into the ttychatter subprocess environment.
@@ -4253,7 +4279,13 @@ def candidate_skip_reason(cfg: Config, msg: Message, uid: bytes, processed: set[
     quota_reason = daily_quota_check(cfg, sender, privileged, record=False)
     if quota_reason:
         return f"skip: {quota_reason}"
-    if cfg.open_to_public and not private_allowed_sender(sender, cfg) and request.kind == "command" and not public_command_allowed(cfg, request.value):
+    if (
+        cfg.open_to_public
+        and not private_allowed_sender(sender, cfg)
+        and not registry_user_commands_available(sender, cfg)
+        and request.kind == "command"
+        and not public_command_allowed(cfg, request.value)
+    ):
         return "match: public command refused"
     if cfg.open_to_public and not private_allowed_sender(sender, cfg) and request.kind == "config":
         return "match: public config command refused"
@@ -4395,14 +4427,14 @@ def process_message(cfg: Config, conn: imaplib.IMAP4, uid: bytes, dry_run: bool 
             )
         return process_config_message(cfg, conn, uid, msg, dry_run=dry_run)
     if request.kind == "command":
-        if cfg.open_to_public and not privileged and not public_command_allowed(cfg, request.value):
+        if cfg.open_to_public and not privileged and not registry_user_commands_available(sender, cfg) and not public_command_allowed(cfg, request.value):
             return process_denied_control_message(
                 cfg,
                 conn,
                 uid,
                 msg,
                 request.value,
-                "public mode allows only: " + ", ".join(cfg.public_allowed_commands),
+                "public mode without USER_REGISTRY allows only: " + ", ".join(cfg.public_allowed_commands),
                 dry_run=dry_run,
             )
         return process_mailbot_command_message(runtime_cfg, conn, uid, msg, request.value, dry_run=dry_run)
@@ -4848,13 +4880,18 @@ USER REGISTRY AND PREFERENCES
 PUBLIC MODE
     --open-to-public accepts non-control subjects as prompts from any sender.
     With USER_REGISTRY=1 and SUBJECT_SESSIONS=1, senders are isolated by their
-    registry HOME and by subject-named sessions. Otherwise, non-ALLOWED_FROM
-    senders are isolated by PUBLIC_SESSION_MODE and may use only
-    PUBLIC_ALLOWED_COMMANDS. Public sessions are cleaned up by the
-    PUBLIC_SESSION_* policy; by default inactive public logs expire after
-    72 hours and are trimmed to the last 12 user/assistant cycles.
-    When enabled, expired logs are emailed to the public sender before local
-    deletion; users may toggle that with archive-session on/off.
+    registry HOME and by subject-named sessions. Registry users may use the
+    normal user command set; commands operate on that sender's private registry
+    profile. ALLOWED_FROM remains the private/admin allowlist for global mailbot
+    controls such as tc:CONFIG export/update.
+
+    With USER_REGISTRY=0, non-ALLOWED_FROM senders are isolated by
+    PUBLIC_SESSION_MODE and may use only PUBLIC_ALLOWED_COMMANDS. Public
+    sessions are cleaned up by the PUBLIC_SESSION_* policy; by default inactive
+    public logs expire after 72 hours and are trimmed to the last 12
+    user/assistant cycles. When enabled, expired logs are emailed to the public
+    sender before local deletion; users may toggle that with archive-session
+    on/off.
 
 OUTPUT MODES
     COMMAND_OUTPUT_MODE and command-specific MODEL_CACHE_OUTPUT,
