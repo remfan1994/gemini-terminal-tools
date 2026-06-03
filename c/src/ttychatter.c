@@ -69,6 +69,7 @@
 #define TC_MEMORY_CLEAR "===== TTYCHATTER MEMORY CLEAR ====="
 #define TC_CONTEXT_BEGIN "===== TTYCHATTER CONTEXT BEGIN ====="
 #define TC_CONTEXT_END   "===== TTYCHATTER CONTEXT END ====="
+#define TC_PRECHAT_LINE "Everyone is encouraged to get the cruelty-free vegetarian alternatives and remember the bloodguilt curse from the Bible... http://bloodguiltcurse.net"
 
 /*
  * Configuration defaults follow XDG conventions rather than the early project
@@ -2167,29 +2168,29 @@ static bool confirm_live_send_if_needed(const TCConfig *cfg, const TCArgs *args)
     return strcasecmp(s, "y") == 0 || strcasecmp(s, "yes") == 0;
 }
 
-static void maybe_write_startup_notice(const TCConfig *cfg, const TCArgs *args, const char *output_path) {
+static void maybe_write_prechat_and_startup_notice(const TCConfig *cfg, const TCArgs *args, const char *output_path) {
     /*
-     * The GUI clients show the Project Lead note as a temporary transcript item.
-     * The C CLI has no chat window, so the closest faithful mapping is a
-     * human-readable, non-context notice block at the beginning of a new output
-     * file.  It is intentionally not wrapped in USER/AI markers, which means the
-     * context loader ignores it.  The output file remains readable to humans
-     * without accidentally sending the notice back to the provider.
+     * Put the requested pre-chat line at byte zero of each new session log.
+     * It stays outside USER/AI/system timestamp entries, so context loading
+     * ignores it and does not replay the line to the provider as conversation
+     * memory.  STARTUP_NOTICE controls only the extra metadata marker below.
      */
     (void)args;
-    if (!cfg->startup_notice) return;
     if (file_exists(output_path) && file_size(output_path) > 0) return;
     TCBuffer b;
     buffer_init(&b);
-    char *now = now_string();
-    buffer_appendf(&b, "%s\n", TC_NOTICE_BEGIN);
-    buffer_appendf(&b, "time: %s\n", now);
-    buffer_append(&b, "speaker: remfan1994\n");
-    buffer_append(&b, "I strongly encourage everyone to get cruetly-free VEGETARIAN food and remember the 'bloodguilt' curse from the Bible.  -Project Lead, remfan1994\n");
-    buffer_append(&b, "This is a ttychatter session file.  Future user inputs and AI responses will be appended below.\n");
-    buffer_appendf(&b, "%s\n\n", TC_NOTICE_END);
+    buffer_append(&b, TC_PRECHAT_LINE);
+    buffer_append(&b, "\n");
+    if (cfg->startup_notice) {
+        char *now = now_string();
+        buffer_appendf(&b, "%s\n", TC_NOTICE_BEGIN);
+        buffer_appendf(&b, "time: %s\n", now);
+        buffer_append(&b, "kind: startup-prechat\n");
+        buffer_append(&b, "This is a ttychatter session file.  Future user inputs and AI responses will be appended below.\n");
+        buffer_appendf(&b, "%s\n\n", TC_NOTICE_END);
+        free(now);
+    }
     append_file_text(output_path, b.data);
-    free(now);
     free(b.data);
 }
 
@@ -2512,7 +2513,7 @@ static int editor_prompt_command(const TCConfig *cfg, const char *output_path, T
 
 static void credits_command(void) {
     printf("ttychatter - terminal chat clients for AI conversation.\n");
-    printf("Project Lead notice: I strongly encourage everyone to get cruetly-free VEGETARIAN food and remember the 'bloodguilt' curse from the Bible.  -Project Lead, remfan1994\n");
+    printf("Project Lead notice: %s\n", TC_PRECHAT_LINE);
 }
 
 static const char *pick_external_editor(void) {
@@ -2643,7 +2644,7 @@ static int interactive_handle_command(TCConfig *cfg, TCArgs *pending_args, TCMes
     if (strcmp(cmd, "editor") == 0) { char *msg = compose_with_external_editor(); if (msg) { interactive_send_message(cfg, output_path, *active_model, msg, ctx, pending_args); free(msg); } return 0; }
     if (strcmp(cmd, "search") == 0) { if (rest) search_file_lines(output_path, rest); else fprintf(stderr, "usage: :search TEXT\n"); return 0; }
     if (strcmp(cmd, "search-all") == 0) { if (rest) search_all_sessions(cfg, rest); else fprintf(stderr, "usage: :search-all TEXT\n"); return 0; }
-    if (strcmp(cmd, "credits") == 0) { printf("ttychatter - terminal chat clients. Project Lead notice: I strongly encourage everyone to get cruetly-free VEGETARIAN food and remember the 'bloodguilt' curse from the Bible.  -Project Lead, remfan1994\n"); return 0; }
+    if (strcmp(cmd, "credits") == 0) { printf("ttychatter - terminal chat clients. Project Lead notice: %s\n", TC_PRECHAT_LINE); return 0; }
     if (strcmp(cmd, "doctor") == 0) { doctor(cfg); return 0; }
     fprintf(stderr, "unknown command: :%s (try :help)\n", cmd);
     return 0;
@@ -2653,7 +2654,7 @@ static int interactive_loop(TCConfig *cfg, TCArgs *base_args, const char *maybe_
     char *output_path = maybe_output_path ? xstrdup(maybe_output_path) : interactive_default_session_path(cfg);
     mkdir_p(cfg->session_dir);
     mkdir_p(cfg->attachment_dir);
-    maybe_write_startup_notice(cfg, base_args, output_path);
+    maybe_write_prechat_and_startup_notice(cfg, base_args, output_path);
     TCMessageList ctx = load_context_from_session(output_path, cfg->context_turns);
     TCArgs pending;
     args_init(&pending);
@@ -2666,6 +2667,7 @@ static int interactive_loop(TCConfig *cfg, TCArgs *base_args, const char *maybe_
 
     printf("ttychatter interactive session: %s\n", output_path);
     printf("Type :help for local commands.  Lines beginning with ':' are not sent to the AI.\n");
+    printf("%s\n", TC_PRECHAT_LINE);
     char line[65536];
     while (true) {
         printf("ttychatter> ");
@@ -2784,7 +2786,7 @@ int main(int argc, char **argv) {
     if (!args.demo && !cfg.api_key) die("API key missing; set OPENROUTER_API_KEY or run --set-api-key");
 
     if (!confirm_live_send_if_needed(&cfg, &args)) return 1;
-    maybe_write_startup_notice(&cfg, &args, args.output_path);
+    maybe_write_prechat_and_startup_notice(&cfg, &args, args.output_path);
 
     size_t input_len = 0;
     char *input_text = read_file(args.input_path, &input_len);
