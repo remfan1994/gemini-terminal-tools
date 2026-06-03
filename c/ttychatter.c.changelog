@@ -1,5 +1,34 @@
 # ttychatter C changelog
 
+## 0.6.1-c-cli
+
+### Changed
+- Moved default C storage into the shared OpenRouter ttychatter namespace:
+  ~/.config/ttychatter/openrouter/config,
+  ~/.config/ttychatter/openrouter/api-key.gpg,
+  ~/.config/ttychatter/openrouter/model-favorites,
+  ~/.cache/ttychatter/openrouter/models.json,
+  ~/.local/share/ttychatter/openrouter/sessions, and
+  ~/.local/share/ttychatter/openrouter/attachments.
+- Preserved legacy C config/key compatibility by reading ~/.config/ttychatter/config
+  and ~/.config/ttychatter/api-key.gpg as fallbacks when the new OpenRouter
+  files are absent.
+- Added config aliases API_KEY, HISTORY_LIMIT, and MODEL_FILTER_CHAT_COMPLETIONS
+  for better cross-client config compatibility.
+- Changed new C session writes to the shared line-oriented transcript format
+  used by the OpenRouter ttychatter clients.
+- Kept the 0.6.0 C marker-block session format readable as a legacy format.
+- Resolved --interactive SESSION through the same named-session rules as
+  --resume, --show-memory, and --rename-session.
+- Fixed `make check` so it builds the ttychatter binary before running
+  version/help smoke checks.
+
+### Documented
+- Clarified the two address modes: explicit file-in/file-out paths versus
+  named sessions under SESSION_DIR.
+- Corrected FILES, CONFIGURATION, SESSION FORMAT, README, WALKTHROUGH, and
+  changelog text to remove the old storage discrepancy.
+
 ## 0.6.0-c-cli
 
 ### Added

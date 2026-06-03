@@ -17,10 +17,18 @@ Encrypted with gpg:
 
     ./ttychatter --set-api-key --gpg
 
+The default OpenRouter config path is:
+
+    ~/.config/ttychatter/openrouter/config
+
 3. Fetch model catalog
 ----------------------
 
     ./ttychatter --update-models
+
+The default model cache is:
+
+    ~/.cache/ttychatter/openrouter/models.json
 
 4. Browse/search/select models
 ------------------------------
@@ -28,6 +36,7 @@ Encrypted with gpg:
     ./ttychatter --models
     ./ttychatter --models --search free
     ./ttychatter --models --model-type routers
+    ./ttychatter --routers
     ./ttychatter --select-model
 
 5. Create an input file
@@ -37,13 +46,15 @@ Encrypted with gpg:
     Explain what a Unix pipeline is in one paragraph.
     Ctrl+D
 
-6. Send input and write output/session log
-------------------------------------------
+6. Send input and write an explicit output/session log
+------------------------------------------------------
 
     ./ttychatter input.txt session.log
 
-7. Resume the same session
---------------------------
+This uses ./session.log exactly.  It does not move the log into SESSION_DIR.
+
+7. Resume the same explicit session
+-----------------------------------
 
     cat > followup.txt
     Give me a tiny example.
@@ -51,20 +62,39 @@ Encrypted with gpg:
 
     ./ttychatter followup.txt session.log
 
-8. Attach files
+8. Use named sessions
+---------------------
+
+Bare session names resolve under the shared OpenRouter session directory:
+
+    ./ttychatter --interactive notes
+    ./ttychatter --resume notes
+    ./ttychatter --show-memory notes
+
+The default path for that named session is:
+
+    ~/.local/share/ttychatter/openrouter/sessions/notes.log
+
+Use ./notes.log when the intended file is in the current directory.
+
+9. Attach files
 ---------------
 
     ./ttychatter -a notes.txt -a image.png prompt.txt session.log
 
-9. Use loopback output
-----------------------
+Generated long fenced code blocks are saved under:
+
+    ~/.local/share/ttychatter/openrouter/attachments/
+
+10. Use loopback output
+-----------------------
 
     ./ttychatter --loopback prompt.txt session.log | less
 
-10. Interactive mode with colon commands
+11. Interactive mode with colon commands
 ----------------------------------------
 
-    ./ttychatter --interactive session.log
+    ./ttychatter --interactive notes
 
     ttychatter> hello
     ttychatter> :models
@@ -72,25 +102,16 @@ Encrypted with gpg:
     ttychatter> :memory
     ttychatter> :quit
 
-11. Demo mode
+12. Demo mode
 -------------
 
 Demo mode avoids network/API use:
 
     ./ttychatter --demo input.txt demo.log
-    ./ttychatter --demo --interactive demo.log
-
+    ./ttychatter --demo --interactive demo
 
 Interactive parity commands
 ---------------------------
-
-Start a line-oriented session:
-
-    ttychatter --interactive my-session.log
-
-Or resume by session name/path:
-
-    ttychatter --resume my-session.log
 
 Inside the prompt, use colon commands for local control:
 
@@ -99,6 +120,8 @@ Inside the prompt, use colon commands for local control:
     :select-model
     :edit-memory
     :pending
+    :search TEXT
+    :search-all TEXT
     :quit
 
 These commands are handled by ttychatter itself and are not sent to the AI.

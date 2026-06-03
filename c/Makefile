@@ -26,7 +26,7 @@ all: $(TARGET)
 $(TARGET): $(SRC)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(SRC) $(LDLIBS)
 
-check:
+check: $(TARGET)
 	$(CC) $(CPPFLAGS) -fsyntax-only $(CFLAGS) $(SRC)
 	./$(TARGET) --version
 	./$(TARGET) --help >/dev/null

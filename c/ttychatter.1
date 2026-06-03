@@ -5,13 +5,13 @@ NAME
 
 SYNOPSIS
     ttychatter [options] input.txt output.log
-    ttychatter --interactive [output.log]
+    ttychatter --interactive [SESSION|./output.log]
     ttychatter --resume SESSION
     ttychatter --demo [options] input.txt output.log
     ttychatter --models [--search TEXT] [--model-type TYPE] [--sort KEY]
     ttychatter --routers
     ttychatter --select-model
-    ttychatter --test-model MODEL
+    ttychatter --test-model MODEL [--save]
     ttychatter --set-api-key [--gpg]
     ttychatter --forget-api-key
     ttychatter --list
@@ -19,7 +19,7 @@ SYNOPSIS
     ttychatter --show-memory SESSION
     ttychatter --edit-memory SESSION
     ttychatter --clear-memory SESSION
-    ttychatter --editor-prompt [SESSION]
+    ttychatter --editor-prompt [output.log]
     ttychatter --search TEXT [--all-sessions]
     ttychatter --config
     ttychatter --set KEY=VALUE
@@ -30,18 +30,43 @@ SYNOPSIS
 
 DESCRIPTION
     ttychatter is the traditional Unix command-line C client in the
-    ttychatter project.  Unlike the ncurses client, it does not own the full
-    terminal screen.  The primary interface is file-in/file-out:
+    ttychatter project.  It is not an ncurses program and does not own the
+    full terminal screen.  Its primary interface is file-in/file-out:
 
         ttychatter input.txt output.log
 
     The user creates input.txt using any editor or shell tool.  ttychatter
-    sends that input to OpenRouter, appends the AI response to output.log,
-    and later uses the same output.log as the session history/context source.
+    sends that input to OpenRouter, appends the result to output.log, and
+    later uses the same output.log as session history/context when the same
+    path is reused.
 
-    This edition is intended to be a robust command-line companion to the
-    Bash and Python clients.  It keeps feature parity where the feature makes
-    sense without ncurses.
+    The C client also has a line-oriented interactive mode with local colon
+    commands.  Interactive mode is intentionally still plain line I/O, not a
+    curses UI.
+
+SESSION ADDRESSING
+    ttychatter supports two address modes.
+
+    Explicit-path mode is used by the traditional two-file command:
+
+        ttychatter input.txt output.log
+        ttychatter followup.txt output.log
+
+    In this form, output.log is used exactly as written.  It may be a
+    relative path, an absolute path, or a path under any project directory.
+    Reusing the same output path resumes that same conversation.
+
+    Named-session mode is used by --interactive, --resume, --list,
+    --rename-session, --show-memory, --edit-memory, --clear-memory, and
+    --search-sessions.  A bare SESSION name resolves under SESSION_DIR.  With
+    the default OpenRouter storage, these are equivalent:
+
+        ttychatter --resume notes
+        ttychatter --resume notes.log
+        ~/.local/share/ttychatter/openrouter/sessions/notes.log
+
+    A SESSION containing '/' is treated as an explicit path.  Use ./notes.log
+    when the intended file is in the current directory rather than SESSION_DIR.
 
 USAGE EXAMPLES
     Save an API key in plaintext config:
@@ -59,6 +84,7 @@ USAGE EXAMPLES
     List cached router models:
 
         ttychatter --models --model-type routers
+        ttychatter --routers
 
     Search cached models:
 
@@ -68,29 +94,37 @@ USAGE EXAMPLES
 
         ttychatter --select-model
 
-    Test one model without committing to it:
+    Test one model without saving it:
 
         ttychatter --test-model openrouter/auto
 
-    Send an input file and append to a session file:
+    Test one model and save it as MODEL on success:
+
+        ttychatter --test-model openrouter/auto --save
+
+    Send an input file and append to an explicit session file:
 
         ttychatter prompt.txt session.log
 
-    Resume a session by using the same output file:
+    Resume that explicit session file:
 
         ttychatter followup.txt session.log
+
+    Start a named interactive session in the shared session directory:
+
+        ttychatter --interactive notes
+
+    Resume a named interactive session:
+
+        ttychatter --resume notes
 
     Attach multiple files:
 
         ttychatter -a notes.txt -a diagram.png prompt.txt session.log
 
-    Print only the AI response to stdout for shell piping:
+    Print the AI response to stdout for shell piping:
 
         ttychatter --loopback prompt.txt session.log | sed -n '1,20p'
-
-    Start a line-oriented interactive loop:
-
-        ttychatter --interactive session.log
 
 RUNTIME COMMANDS
     In interactive mode, lines beginning with ':' are local ttychatter
@@ -135,18 +169,6 @@ RUNTIME COMMANDS
 
         \:this line is sent to the AI
 
-
-RESUME SHORTHAND
-    The C client is primarily file-in/file-out, but --resume SESSION is
-    provided as a convenience alias for interactive use.  It resolves SESSION
-    using the same session-name rules as --show-memory and --rename-session.
-
-    Examples:
-
-        ttychatter --resume research-notes
-        ttychatter --resume research-notes.log
-        ttychatter --resume /path/to/research-notes.log
-
 MODEL MANAGEMENT
     ttychatter uses OpenRouter's model catalog.  The model list is cached
     locally so ordinary browsing does not require network access.
@@ -174,51 +196,52 @@ MODEL MANAGEMENT
         type
         favorites
 
-    The C client accepts model filter options similar to the Bash/Python
-    clients:
+    Related filters:
 
         --min-input-tokens N
+        --min-output-tokens N
         --hide-preview
         --require-tokens
+        --allow-missing-tokens
         --all
 
 FAVORITES
-    Favorite models are stored as plain text, one model per line.
+    Favorite models are stored as plain text, one model per line:
 
         ttychatter --favorite-model openrouter/auto
         ttychatter --unfavorite-model openrouter/auto
         ttychatter --favorites
-
-SESSIONS
-    Session state is stored in the output log file.  The file remains human
-    readable.  Context is reconstructed from recent user/AI blocks in that
-    file unless an explicit edited memory snapshot exists.
-
-        ttychatter --list
-        ttychatter --rename-session old-name new-name
-        ttychatter --show-memory session.log
-        ttychatter --edit-memory session.log
-        ttychatter --clear-memory session.log
 
 API KEY STORAGE
     ttychatter checks for API keys in this order:
 
         OPENROUTER_API_KEY environment variable
         TTYCHATTER_API_KEY environment variable
-        plaintext config key
-        gpg-encrypted key file
+        OPENROUTER_API_KEY, TTYCHATTER_API_KEY, or API_KEY in config
+        API_KEY_GPG_FILE via external gpg decryption
+        legacy C default gpg file as a fallback
 
     GPG storage uses the external gpg program.  No cryptographic code is
-    embedded in ttychatter itself.
+    embedded in ttychatter itself.  The decrypted key is not printed by
+    --config or --doctor.
 
 CONFIGURATION
-    Default config file:
+    Default OpenRouter config file:
+
+        ~/.config/ttychatter/openrouter/config
+
+    If that file does not exist, ttychatter also reads the legacy C config:
 
         ~/.config/ttychatter/config
+
+    This is a read-only compatibility fallback.  New writes go to the
+    OpenRouter config path.
 
     Important keys include:
 
         OPENROUTER_API_KEY
+        TTYCHATTER_API_KEY
+        API_KEY
         API_KEY_GPG_FILE
         MODEL
         MODEL_CACHE_FILE
@@ -226,12 +249,14 @@ CONFIGURATION
         MODEL_TYPE_FILTER
         MODEL_SORT_ORDER
         MODEL_FILTER_GENERATE_CONTENT
+        MODEL_FILTER_CHAT_COMPLETIONS
         MODEL_FILTER_REQUIRE_TOKENS
         MODEL_FILTER_HIDE_PREVIEW
         MODEL_MIN_INPUT_TOKENS
         MODEL_MIN_OUTPUT_TOKENS
         MODEL_TEST_PROMPT
         CONTEXT_TURNS
+        HISTORY_LIMIT
         SESSION_DIR
         ATTACHMENT_DIR
         CODE_ATTACHMENT_MIN_LINES
@@ -248,6 +273,21 @@ CONFIGURATION
     config parity.  The file-in/file-out C command does not have an input key
     binding or terminal theme in the same sense as the ncurses client.
 
+SESSION FORMAT
+    New C logs use the shared OpenRouter ttychatter line-oriented transcript
+    format:
+
+        [HH:MM:SS] User: ...
+        [HH:MM:SS] AI: ...
+        [HH:MM:SS] system: CONTEXT_BEGIN
+        User: ...
+        Assistant: ...
+        [HH:MM:SS] system: CONTEXT_END
+
+    This keeps sessions readable and compatible with the other OpenRouter
+    ttychatter clients.  The C parser also reads the older 0.6.0 C marker
+    format so existing C session logs remain resumable.
+
 ATTACHMENTS
     Attach files with -a or --attach.  Text-like files are inserted as text
     parts.  Some media files may be sent as data URLs when model/provider
@@ -263,29 +303,37 @@ DEMO MODE
     testing logs, attachments, loopback, and the interactive command loop.
 
 FILES
+    ~/.config/ttychatter/openrouter/config
+        Shared OpenRouter ttychatter configuration file.
+
+    ~/.config/ttychatter/openrouter/api-key.gpg
+        Default encrypted OpenRouter API key file.
+
+    ~/.config/ttychatter/openrouter/model-favorites
+        Shared plain-text favorite model list.
+
+    ~/.cache/ttychatter/openrouter/models.json
+        Cached OpenRouter model catalog.
+
+    ~/.local/share/ttychatter/openrouter/sessions/
+        Default directory for named sessions.
+
+    ~/.local/share/ttychatter/openrouter/attachments/
+        Default attachment and extracted-code directory.
+
     ~/.config/ttychatter/config
-        Configuration file.
-
-    ~/.cache/ttychatter/models.json
-        Model cache by default.
-
-    ~/.local/share/ttychatter/sessions/
-        Default session directory.
-
-    ~/.local/share/ttychatter/attachments/
-        Default attachment directory.
+        Legacy C config fallback, read only when the OpenRouter config file is
+        absent.
 
 VERSION
-    ttychatter 0.6.0-c-cli
+    ttychatter 0.6.1-c-cli
 
 AUTHOR
     Part of the ttychatter terminal AI client project.
 
 PARITY NOTES
-    ttychatter is not an ncurses program.  Runtime features from the Bash and
-    Python clients are mapped to command-line flags and colon commands where
-    they make sense.  The C client deliberately does not implement visual
-    themes, mouse behavior, or full-screen menus.
-
-VERSION
-    ttychatter 0.6.0-c-cli
+    The C client keeps its Unix file-in/file-out interface, but its default
+    config, API-key, model-cache, favorites, attachment, and named-session
+    storage now live in the same OpenRouter namespace as the other OpenRouter
+    ttychatter clients.  Interface independence is preserved; storage
+    independence is not the default.

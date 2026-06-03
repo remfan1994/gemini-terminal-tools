@@ -2,12 +2,12 @@ ttychatter C command-line client
 ================================
 
 This directory contains the traditional Unix C edition of ttychatter.  It is
-not an ncurses program.  It is a file-in/file-out command-line tool:
+not an ncurses program.  Its primary interface is a file-in/file-out command:
 
     ttychatter input.txt output.log
 
 The output file is both transcript and session state.  Reusing the same output
-file resumes the session:
+file resumes that explicit session:
 
     ttychatter next-question.txt output.log
 
@@ -25,6 +25,66 @@ Build:
 Check syntax/basic commands:
 
     make check
+
+OpenRouter storage parity
+-------------------------
+
+The C client now uses the same default OpenRouter storage namespace as the
+other OpenRouter ttychatter clients:
+
+    config:      ~/.config/ttychatter/openrouter/config
+    api key gpg: ~/.config/ttychatter/openrouter/api-key.gpg
+    favorites:   ~/.config/ttychatter/openrouter/model-favorites
+    models:      ~/.cache/ttychatter/openrouter/models.json
+    sessions:    ~/.local/share/ttychatter/openrouter/sessions/
+    attachments: ~/.local/share/ttychatter/openrouter/attachments/
+
+For existing 0.6.0 C users, the program still reads the legacy C config file
+when the new OpenRouter config file is absent:
+
+    ~/.config/ttychatter/config
+
+New config writes go to the OpenRouter path.
+
+Session address modes
+---------------------
+
+Explicit-path mode is the traditional C interface:
+
+    ttychatter input.txt output.log
+    ttychatter followup.txt output.log
+
+In that form, output.log is used exactly as written.  It is not moved under the
+session directory.
+
+Named-session mode is used by interactive and session-management commands:
+
+    ttychatter --interactive notes
+    ttychatter --resume notes
+    ttychatter --show-memory notes
+    ttychatter --rename-session notes archive-notes
+
+Bare names resolve to:
+
+    ~/.local/share/ttychatter/openrouter/sessions/NAME.log
+
+Any SESSION containing '/' is treated as an explicit path.  Use ./notes.log for
+a log in the current directory.
+
+Session format
+--------------
+
+New C logs use the shared line-oriented ttychatter transcript format:
+
+    [HH:MM:SS] User: ...
+    [HH:MM:SS] AI: ...
+    [HH:MM:SS] system: CONTEXT_BEGIN
+    User: ...
+    Assistant: ...
+    [HH:MM:SS] system: CONTEXT_END
+
+The parser also reads the older 0.6.0 C marker blocks so existing C-only logs
+remain resumable.
 
 Design notes
 ------------
@@ -45,22 +105,3 @@ Some graphical/ncurses features intentionally map to command-line equivalents:
 The source is heavily commented to help future maintainers, porters, fork
 authors, packagers, and customizers understand the reason behind each major
 subsystem.
-
-
-0.6.0 parity notes
-------------------
-
-The C CLI now implements more of the Bash/Python runtime-command vocabulary:
-
-    :list
-    :rename NAME
-    :select-model
-    :edit-memory
-    :pending
-    :unbookmark MODEL
-
-It also accepts command-line compatibility flags such as `--routers`,
-`--allow-missing-tokens`, `--unbookmark-model`, `--resume`, and `--save` for
-successful model tests.  These are intentionally command-line equivalents of
-features present in the Bash/Python clients.  They do not attempt to imitate
-full-screen ncurses behavior.
