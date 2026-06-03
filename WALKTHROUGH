@@ -1,0 +1,262 @@
+ttychatter C walkthrough
+========================
+
+1. Build the program
+--------------------
+
+    make
+
+2. Store an API key
+-------------------
+
+Plaintext config:
+
+    ./ttychatter --set-api-key
+
+Encrypted with gpg:
+
+    ./ttychatter --set-api-key --gpg
+
+The default OpenRouter config path is:
+
+    ~/.config/ttychatter/openrouter/config
+
+3. Fetch model catalog
+----------------------
+
+    ./ttychatter --update-models
+
+The default model cache is:
+
+    ~/.cache/ttychatter/openrouter/models.json
+
+4. Browse/search/select/test models
+-----------------------------------
+
+    ./ttychatter --models
+    ./ttychatter --models --search free
+    ./ttychatter --models --model-type routers
+    ./ttychatter --routers
+    ./ttychatter --select-model
+    ./ttychatter --test-model openrouter/auto
+    ./ttychatter --test-model openrouter/auto --save
+
+Common model-list filters:
+
+    ./ttychatter --models --favorites-only
+    ./ttychatter --models --sort context
+    ./ttychatter --models --min-input-tokens 32000
+    ./ttychatter --models --min-output-tokens 4096
+    ./ttychatter --models --require-tokens
+    ./ttychatter --models --allow-missing-tokens
+    ./ttychatter --models --hide-preview
+    ./ttychatter --models --show-preview
+    ./ttychatter --models --all
+
+Favorite model commands:
+
+    ./ttychatter --favorites
+    ./ttychatter --favorite-model openrouter/auto
+    ./ttychatter --unfavorite-model openrouter/auto
+    ./ttychatter --unbookmark-model openrouter/auto
+
+5. Create an input file
+-----------------------
+
+    cat > input.txt
+    Explain what a Unix pipeline is in one paragraph.
+    Ctrl+D
+
+6. Send one input and auto-save a timestamped session
+-----------------------------------------------------
+
+    ./ttychatter input.txt
+
+This creates a new log under:
+
+    ~/.local/share/ttychatter/openrouter/sessions/
+
+The filename remains mechanical and timestamped, for example:
+
+    session-2026-06-03-14-22-33.log
+
+Equivalent one-shot forms:
+
+    ./ttychatter --input input.txt
+    ./ttychatter --prompt 'Explain what a Unix pipeline is.'
+    printf 'Explain what a Unix pipeline is.\n' | ./ttychatter
+
+7. Send input and write an explicit output/session log
+------------------------------------------------------
+
+    ./ttychatter input.txt session.log
+    ./ttychatter --input input.txt --output session.log
+    ./ttychatter --prompt 'Give me a tiny example.' --output session.log
+
+This uses ./session.log exactly.  It does not move the log into SESSION_DIR.
+
+8. Resume the same explicit session
+-----------------------------------
+
+    cat > followup.txt
+    Give me a tiny example.
+    Ctrl+D
+
+    ./ttychatter followup.txt session.log
+
+9. Use named sessions
+---------------------
+
+Bare session names resolve under the shared OpenRouter session directory:
+
+    ./ttychatter --interactive notes
+    ./ttychatter --resume notes
+    ./ttychatter --session notes --prompt 'Next question'
+    ./ttychatter --show-memory notes
+
+The default path for that named session is:
+
+    ~/.local/share/ttychatter/openrouter/sessions/notes.log
+
+Use ./notes.log when the intended file is in the current directory.
+
+10. List and retitle sessions
+-----------------------------
+
+    ./ttychatter --list
+    ./ttychatter --rename-session notes Friendly Notes
+
+The retitle operation writes session-title metadata into the log.  It does not
+rename the filename.  The --list table displays the title when present and uses
+the filename stem as fallback.
+
+Automatic AI-generated titles are optional and off by default:
+
+    ./ttychatter --set SESSION_AUTO_TITLE=1
+    ./ttychatter --set SESSION_TITLE_MODEL=openrouter/auto
+    ./ttychatter --set SESSION_TITLE_MAX_WORDS=8
+
+SESSION_TITLE_MODEL is a secondary model used only for title metadata.  The
+main conversation still uses MODEL.
+
+11. Start interactive mode
+--------------------------
+
+No arguments on a terminal start a new auto-saved interactive session:
+
+    ./ttychatter
+    ./ttychatter --new
+
+Resume or name a specific interactive session:
+
+    ./ttychatter --interactive notes
+    ./ttychatter --chat notes
+    ./ttychatter --session notes --interactive
+
+12. Attach files
+----------------
+
+    ./ttychatter -a notes.txt -a image.png prompt.txt session.log
+
+Generated long fenced code blocks are saved under:
+
+    ~/.local/share/ttychatter/openrouter/attachments/
+
+13. Use loopback output
+-----------------------
+
+    ./ttychatter --loopback prompt.txt session.log | less
+    ./ttychatter --loopback-file latest-answer.txt prompt.txt session.log
+
+14. Interactive mode with colon commands
+----------------------------------------
+
+    ./ttychatter --interactive notes
+
+    ttychatter> hello
+    ttychatter> :models
+    ttychatter> :attach notes.txt
+    ttychatter> :memory
+    ttychatter> :rename Friendly Notes
+    ttychatter> :quit
+
+15. Check command-line help
+---------------------------
+
+    ./ttychatter --help
+    ./ttychatter --version
+    man ./ttychatter.1
+
+Useful non-walkthrough flags are listed here so this file stays aligned with
+--help and the man page:
+
+    ./ttychatter --model openrouter/auto input.txt session.log
+    ./ttychatter --attach notes.txt input.txt session.log
+    ./ttychatter --yes input.txt session.log
+    ./ttychatter --forget-api-key
+    ./ttychatter --config
+    ./ttychatter --set MODEL=openrouter/auto
+    ./ttychatter --unset MODEL
+    ./ttychatter --list
+    ./ttychatter --edit-memory notes
+    ./ttychatter --clear-memory notes
+    ./ttychatter --editor-prompt
+    ./ttychatter --editor-prompt session.log
+    ./ttychatter --search-sessions TEXT
+    ./ttychatter --search TEXT --all-sessions
+    ./ttychatter --send-input enter
+    ./ttychatter --theme plain
+    ./ttychatter --code-attachment-min-lines 20
+    ./ttychatter --doctor
+    ./ttychatter --credits
+
+16. Demo mode
+-------------
+
+Demo mode avoids network/API use:
+
+    ./ttychatter --demo input.txt
+    ./ttychatter --demo input.txt demo.log
+    ./ttychatter --demo --prompt 'demo prompt'
+    ./ttychatter --demo --interactive demo
+
+Interactive parity commands
+---------------------------
+
+Inside the prompt, use colon commands for local control:
+
+    :help
+    :list
+    :rename Friendly Notes
+    :models
+    :routers
+    :update-models
+    :select-model
+    :test-model openrouter/auto
+    :model openrouter/auto
+    :model-save openrouter/auto
+    :favorites
+    :favorite openrouter/auto
+    :unfavorite openrouter/auto
+    :config
+    :set KEY VALUE
+    :unset KEY
+    :set-api-key
+    :set-api-key gpg
+    :forget-api-key
+    :memory
+    :edit-memory
+    :clear-memory
+    :attach notes.txt
+    :attachments
+    :pending
+    :clear-attachments
+    :editor
+    :search TEXT
+    :search-all TEXT
+    :credits
+    :doctor
+    :quit
+
+These commands are handled by ttychatter itself and are not sent to the AI.
+Use ./ttychatter --help or man ttychatter for the full command-line option list.
