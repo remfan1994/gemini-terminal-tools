@@ -3,14 +3,18 @@
  *
  * This C edition is deliberately NOT an ncurses program.  The Python ncurses
  * edition is the full terminal application.  This file is the traditional Unix
- * command-line client: the user prepares an input file, runs ttychatter with an
- * input path and an output/session path, and ttychatter appends the AI response
- * to the output/session file.
+ * command-line client: the user may start a plain interactive session, send an
+ * input file into an automatically saved timestamped session, or use the classic
+ * input-file/output-log form when an explicit path is desired.
  *
- * The design target is the classic shell workflow:
+ * The design target is the classic shell workflow plus complete terminal prompt
+ * coverage:
  *
+ *     ttychatter
  *     $EDITOR prompt.txt
+ *     ttychatter prompt.txt
  *     ttychatter -a notes.txt prompt.txt session.log
+ *     ttychatter --prompt "summarize this" --session notes
  *     less session.log
  *
  * The output file is more than a transcript.  It is also the session state. On
@@ -81,11 +85,13 @@ typedef struct TCConfig {
     char *api_key;
     char *api_key_gpg_file;
     char *model;
+    char *session_title_model;
     char *model_cache_file;
     char *model_favorites_file;
     char *session_dir;
     char *attachment_dir;
     long context_turns;
+    long session_title_max_words;
     long code_attachment_min_lines;
     long max_attachment_bytes;
     char *theme;
@@ -101,6 +107,7 @@ typedef struct TCConfig {
     long model_min_output_tokens;
     bool confirm_live_send;
     bool startup_notice;
+    bool session_auto_title;
     bool demo_mode_default;
     bool loopback_default;
 } TCConfig;
@@ -133,9 +140,12 @@ typedef struct TCArgs {
     bool credits_cmd;
     bool search_sessions_cmd;
     bool select_model_cmd;
+    bool new_session_cmd;
     bool show_all_models;
     char *loopback_file;
     char *interactive_session_path;
+    char *session_arg;
+    char *prompt_text;
     char *config_key;
     char *config_value;
     char *rename_old;
@@ -274,6 +284,12 @@ static bool starts_with(const char *s, const char *prefix) {
     return strncmp(s, prefix, strlen(prefix)) == 0;
 }
 
+static bool starts_with_casefold(const char *s, const char *prefix) {
+    if (!s || !prefix) return false;
+    size_t n = strlen(prefix);
+    return strncasecmp(s, prefix, n) == 0;
+}
+
 static bool parse_bool_string(const char *value, bool fallback) {
     /*
      * Boolean config values are deliberately permissive because real users tend
@@ -354,6 +370,24 @@ static char *read_file(const char *path, size_t *out_len) {
     data[got] = '\0';
     if (out_len) *out_len = got;
     return data;
+}
+
+static char *read_stream(FILE *f, size_t *out_len) {
+    TCBuffer b;
+    buffer_init(&b);
+    char chunk[8192];
+    while (!feof(f)) {
+        size_t n = fread(chunk, 1, sizeof(chunk), f);
+        if (n > 0) buffer_append_n(&b, chunk, n);
+        if (ferror(f)) die("could not read input stream");
+    }
+    if (out_len) *out_len = b.len;
+    return buffer_take(&b);
+}
+
+static char *read_input_source(const char *path, size_t *out_len) {
+    if (!path || strcmp(path, "-") == 0) return read_stream(stdin, out_len);
+    return read_file(path, out_len);
 }
 
 static void write_file_mode(const char *path, const char *data, mode_t mode) {
@@ -616,11 +650,13 @@ static void config_init_defaults(TCConfig *cfg) {
     cfg->config_file = xdg_config_file();
     cfg->api_key_gpg_file = xdg_api_key_gpg_file();
     cfg->model = xstrdup("openrouter/auto");
+    cfg->session_title_model = xstrdup("openrouter/auto");
     cfg->model_cache_file = xdg_cache_file();
     cfg->model_favorites_file = xdg_config_provider_file("model-favorites");
     cfg->session_dir = xdg_data_dir("sessions");
     cfg->attachment_dir = xdg_data_dir("attachments");
     cfg->context_turns = 12;
+    cfg->session_title_max_words = 8;
     cfg->code_attachment_min_lines = 5;
     cfg->max_attachment_bytes = 1024 * 1024;
     cfg->theme = xstrdup("default");
@@ -636,6 +672,7 @@ static void config_init_defaults(TCConfig *cfg) {
     cfg->model_min_output_tokens = 0;
     cfg->confirm_live_send = false;
     cfg->startup_notice = true;
+    cfg->session_auto_title = false;
     cfg->demo_mode_default = false;
     cfg->loopback_default = false;
 }
@@ -650,6 +687,9 @@ static void config_set(TCConfig *cfg, const char *key, const char *value) {
     } else if (strcmp(key, "MODEL") == 0) {
         free(cfg->model);
         cfg->model = xstrdup(value);
+    } else if (strcmp(key, "SESSION_TITLE_MODEL") == 0) {
+        free(cfg->session_title_model);
+        cfg->session_title_model = xstrdup(value);
     } else if (strcmp(key, "MODEL_CACHE_FILE") == 0) {
         free(cfg->model_cache_file);
         cfg->model_cache_file = expand_tilde(value);
@@ -664,6 +704,8 @@ static void config_set(TCConfig *cfg, const char *key, const char *value) {
         cfg->attachment_dir = expand_tilde(value);
     } else if (strcmp(key, "CONTEXT_TURNS") == 0 || strcmp(key, "HISTORY_LIMIT") == 0) {
         cfg->context_turns = atol(value) > 0 ? atol(value) : cfg->context_turns;
+    } else if (strcmp(key, "SESSION_TITLE_MAX_WORDS") == 0) {
+        cfg->session_title_max_words = atol(value) > 0 ? atol(value) : cfg->session_title_max_words;
     } else if (strcmp(key, "CODE_ATTACHMENT_MIN_LINES") == 0) {
         cfg->code_attachment_min_lines = atol(value) > 0 ? atol(value) : cfg->code_attachment_min_lines;
     } else if (strcmp(key, "MAX_ATTACHMENT_BYTES") == 0) {
@@ -700,6 +742,8 @@ static void config_set(TCConfig *cfg, const char *key, const char *value) {
         cfg->confirm_live_send = parse_bool_string(value, cfg->confirm_live_send);
     } else if (strcmp(key, "STARTUP_NOTICE") == 0) {
         cfg->startup_notice = parse_bool_string(value, cfg->startup_notice);
+    } else if (strcmp(key, "SESSION_AUTO_TITLE") == 0) {
+        cfg->session_auto_title = parse_bool_string(value, cfg->session_auto_title);
     } else if (strcmp(key, "DEMO_MODE") == 0) {
         cfg->demo_mode_default = parse_bool_string(value, cfg->demo_mode_default);
     } else if (strcmp(key, "LOOPBACK") == 0) {
@@ -1774,6 +1818,182 @@ static void append_turn(const char *output_path, const char *model, const char *
 }
 
 
+static char *session_title_clean(const char *raw, long max_words) {
+    if (!raw) return NULL;
+
+    TCBuffer b;
+    buffer_init(&b);
+    bool prev_space = false;
+    for (const char *p = raw; *p; p++) {
+        unsigned char uc = (unsigned char)*p;
+        char c = *p;
+        if (c == '\r' || c == '\n' || c == '\t') c = ' ';
+        if (iscntrl(uc)) continue;
+        if (isspace((unsigned char)c)) {
+            if (!prev_space && b.len > 0) buffer_append(&b, " ");
+            prev_space = true;
+        } else {
+            buffer_append_n(&b, &c, 1);
+            prev_space = false;
+        }
+    }
+
+    char *out = buffer_take(&b);
+    char *t = trim_in_place(out);
+    if (starts_with_casefold(t, "session title:")) t = trim_in_place(t + strlen("session title:"));
+    else if (starts_with_casefold(t, "title:")) t = trim_in_place(t + strlen("title:"));
+
+    while (*t == '"' || *t == '\'' || *t == '`' || *t == '*' || *t == '-') t++;
+    char *end = t + strlen(t);
+    while (end > t && (isspace((unsigned char)end[-1]) || end[-1] == '"' || end[-1] == '\'' || end[-1] == '`' || end[-1] == '*' || end[-1] == '.' || end[-1] == '-')) end--;
+    *end = '\0';
+
+    if (max_words <= 0) max_words = 8;
+    long words = 0;
+    bool in_word = false;
+    for (char *p = t; *p; p++) {
+        if (isspace((unsigned char)*p)) {
+            in_word = false;
+            continue;
+        }
+        if (!in_word) {
+            words++;
+            if (words > max_words) {
+                char *cut = p;
+                while (cut > t && !isspace((unsigned char)cut[-1])) cut--;
+                *cut = '\0';
+                break;
+            }
+            in_word = true;
+        }
+    }
+
+    size_t max_chars = 96;
+    if (strlen(t) > max_chars) {
+        char *cut = t + max_chars;
+        while (cut > t && !isspace((unsigned char)*cut)) cut--;
+        if (cut == t) cut = t + max_chars;
+        *cut = '\0';
+    }
+    t = trim_in_place(t);
+    if (!*t) {
+        free(out);
+        return NULL;
+    }
+    if (t != out) memmove(out, t, strlen(t) + 1);
+    return out;
+}
+
+static char *session_title_from_file(const char *path) {
+    if (!path || !file_exists(path)) return NULL;
+    FILE *f = fopen(path, "r");
+    if (!f) return NULL;
+    char line[8192];
+    char *title = NULL;
+    while (fgets(line, sizeof(line), f)) {
+        char copy[8192];
+        snprintf(copy, sizeof(copy), "%s", line);
+        char speaker[256];
+        const char *content = NULL;
+        if (parse_shared_log_header(copy, speaker, sizeof(speaker), &content) && strcasecmp(speaker, "system") == 0) {
+            if (starts_with_casefold(content, "session-title:")) {
+                char *clean = session_title_clean(content + strlen("session-title:"), 64);
+                if (clean) {
+                    free(title);
+                    title = clean;
+                }
+            }
+            continue;
+        }
+        char *t = trim_in_place(copy);
+        if (starts_with_casefold(t, "session-title:")) {
+            char *clean = session_title_clean(t + strlen("session-title:"), 64);
+            if (clean) {
+                free(title);
+                title = clean;
+            }
+        }
+    }
+    fclose(f);
+    return title;
+}
+
+static bool session_has_title(const char *path) {
+    char *title = session_title_from_file(path);
+    bool ok = title && *title;
+    free(title);
+    return ok;
+}
+
+static void write_session_title_metadata(const char *path, const char *title) {
+    char *clean = session_title_clean(title, 64);
+    if (!path || !clean || !*clean) {
+        free(clean);
+        return;
+    }
+    TCBuffer b;
+    buffer_init(&b);
+    char *ts = now_hms();
+    buffer_appendf(&b, "[%s] system: session-title: %s\n", ts, clean);
+    append_file_text(path, b.data);
+    free(ts);
+    free(clean);
+    free(b.data);
+}
+
+static void append_title_excerpt(TCBuffer *b, const char *label, const char *text, size_t max_chars) {
+    char *safe = snapshot_safe_line(text ? text : "");
+    if (strlen(safe) > max_chars) safe[max_chars] = '\0';
+    buffer_appendf(b, "%s: %s\n", label, safe);
+    free(safe);
+}
+
+static char *demo_session_title(const char *user_text, long max_words) {
+    char *clean = session_title_clean(user_text, max_words);
+    if (clean) return clean;
+    return xstrdup("Demo Session");
+}
+
+static char *generate_session_title(const TCConfig *cfg, const char *user_text, const char *ai_text, bool demo) {
+    if (!cfg->session_auto_title) return NULL;
+    if (demo) return demo_session_title(user_text, cfg->session_title_max_words);
+    if (!cfg->api_key || !cfg->session_title_model || !*cfg->session_title_model) return NULL;
+
+    TCBuffer prompt;
+    buffer_init(&prompt);
+    buffer_appendf(&prompt, "Generate a concise topical title for this ttychatter session. Reply with only the title, no quotes, no punctuation-only decoration, no explanation, maximum %ld words.\n\n", cfg->session_title_max_words > 0 ? cfg->session_title_max_words : 8);
+    append_title_excerpt(&prompt, "User", user_text, 2000);
+    append_title_excerpt(&prompt, "Assistant", ai_text, 2000);
+
+    TCMessageList ctx = {0};
+    TCArgs title_args;
+    memset(&title_args, 0, sizeof(title_args));
+    title_args.model_type = xstrdup("all");
+    char *reply = openrouter_chat(cfg, cfg->session_title_model, prompt.data, &ctx, &title_args);
+    free(prompt.data);
+    free(title_args.model_type);
+    msglist_free(&ctx);
+
+    if (!reply) return NULL;
+    if (starts_with(reply, "OpenRouter HTTP") || starts_with(reply, "[No ")) {
+        free(reply);
+        return NULL;
+    }
+    char *title = session_title_clean(reply, cfg->session_title_max_words);
+    free(reply);
+    return title;
+}
+
+static void maybe_generate_session_title(const TCConfig *cfg, const TCArgs *args, const char *output_path,
+                                         const char *user_text, const char *ai_text) {
+    if (!cfg->session_auto_title || !output_path || !*output_path) return;
+    if (session_has_title(output_path)) return;
+    char *title = generate_session_title(cfg, user_text, ai_text, args && args->demo);
+    if (title && *title) write_session_title_metadata(output_path, title);
+    free(title);
+}
+
+
 /* ------------------------------------------------------------------------- */
 /* Config inspection and model favorites                                     */
 /* ------------------------------------------------------------------------- */
@@ -1790,6 +2010,9 @@ static void append_turn(const char *output_path, const char *model, const char *
 static void print_config_summary(const TCConfig *cfg) {
     printf("config_file=%s\n", cfg->config_file);
     printf("model=%s\n", cfg->model);
+    printf("session_auto_title=%s\n", cfg->session_auto_title ? "1" : "0");
+    printf("session_title_model=%s\n", cfg->session_title_model);
+    printf("session_title_max_words=%ld\n", cfg->session_title_max_words);
     printf("model_cache_file=%s\n", cfg->model_cache_file);
     printf("model_favorites_file=%s\n", cfg->model_favorites_file);
     printf("session_dir=%s\n", cfg->session_dir);
@@ -1951,7 +2174,10 @@ static void print_help(void) {
     printf("%s %s\n", TC_PROGRAM, TC_VERSION);
     printf("\n");
     printf("Usage:\n");
-    printf("  ttychatter [options] input.txt output.log\n");
+    printf("  ttychatter\n");
+    printf("  ttychatter [options] input.txt [output.log]\n");
+    printf("  ttychatter --prompt TEXT [--session SESSION|--output output.log]\n");
+    printf("  ttychatter --input input.txt [--session SESSION|--output output.log]\n");
     printf("  ttychatter -i|--interactive|--chat [SESSION|./session.log]\n");
     printf("  ttychatter --resume SESSION\n");
     printf("  ttychatter --set-api-key [--gpg]\n");
@@ -1962,7 +2188,7 @@ static void print_help(void) {
     printf("  ttychatter --select-model\n");
     printf("  ttychatter --test-model MODEL [--save]\n");
     printf("  ttychatter --favorites | --favorite-model MODEL | --unfavorite-model MODEL\n");
-    printf("  ttychatter --list | --rename-session OLD NEW\n");
+    printf("  ttychatter --list | --rename-session SESSION TITLE\n");
     printf("  ttychatter --show-memory SESSION | --clear-memory SESSION | --edit-memory SESSION\n");
     printf("  ttychatter --editor-prompt [output.log]\n");
     printf("  ttychatter --search TEXT [--all-sessions]\n");
@@ -1980,11 +2206,16 @@ static void print_help(void) {
     printf("  -a, --attach FILE            attach file; repeatable\n");
     printf("  -l, --loopback               also print AI output to stdout\n");
     printf("      --loopback-file FILE     mirror clean AI output to FILE\n");
+    printf("  -o, --output FILE            explicit output/session log for batch mode\n");
+    printf("  -s, --session SESSION        named session under SESSION_DIR\n");
+    printf("  -p, --prompt TEXT            send TEXT instead of reading an input file\n");
+    printf("      --input FILE             input file; use - for stdin\n");
+    printf("  -n, --new                    start a new interactive timestamped session\n");
     printf("  -i, --interactive            line-oriented chat loop with colon commands\n");
     printf("      --chat                   alias for --interactive\n");
     printf("      --resume SESSION         resume named or explicit interactive session\n");
-    printf("      --list                   list session logs in SESSION_DIR\n");
-    printf("      --rename-session OLD NEW rename a session log\n");
+    printf("      --list                   list session logs with friendly titles\n");
+    printf("      --rename-session SESSION TITLE set session title metadata\n");
     printf("      --show-memory SESSION    print reconstructed context/memory\n");
     printf("      --clear-memory SESSION   append a memory-clear marker\n");
     printf("      --edit-memory SESSION    edit reconstructed context in editor\n");
@@ -2024,9 +2255,13 @@ static void print_help(void) {
     printf("      --theme VALUE            write THEME config compatibility key\n");
     printf("      --code-attachment-min-lines N write CODE_ATTACHMENT_MIN_LINES\n");
     printf("\nSession addressing:\n");
+    printf("  With no arguments on a terminal, ttychatter starts interactive mode.\n");
     printf("  input.txt output.log uses output.log exactly.\n");
+    printf("  input.txt alone auto-saves to a timestamped log in SESSION_DIR.\n");
+    printf("  --prompt TEXT and stdin input also auto-save unless --output/--session is used.\n");
     printf("  Bare SESSION names resolve to SESSION_DIR/SESSION.log.\n");
     printf("  SESSION values containing '/' are explicit paths. Use ./name.log for cwd.\n");
+    printf("  SESSION_AUTO_TITLE=1 enables optional AI-generated titles for --list.\n");
 }
 
 static void print_version(void) {
@@ -2042,6 +2277,7 @@ static int doctor(const TCConfig *cfg) {
     printf("model:       %s\n", cfg->model);
     printf("cache:       %s%s\n", cfg->model_cache_file, file_exists(cfg->model_cache_file) ? " (present)" : "");
     printf("sessions:    %s\n", cfg->session_dir);
+    printf("title-gen:   %s (%s)\n", cfg->session_auto_title ? "enabled" : "disabled", cfg->session_title_model);
     printf("attachments: %s\n", cfg->attachment_dir);
     printf("libcurl:     %s\n", curl_version());
     printf("theme:       %s\n", cfg->theme);
@@ -2075,6 +2311,11 @@ static int parse_args(int argc, char **argv, TCArgs *args) {
         {"model", required_argument, 0, 'm'},
         {"attach", required_argument, 0, 'a'},
         {"loopback", no_argument, 0, 'l'},
+        {"output", required_argument, 0, 'o'},
+        {"session", required_argument, 0, 's'},
+        {"prompt", required_argument, 0, 'p'},
+        {"new", no_argument, 0, 'n'},
+        {"input", required_argument, 0, 1044},
         {"set-api-key", no_argument, 0, 1000},
         {"gpg", no_argument, 0, 1001},
         {"forget-api-key", no_argument, 0, 1002},
@@ -2125,7 +2366,7 @@ static int parse_args(int argc, char **argv, TCArgs *args) {
         {0,0,0,0}
     };
     int c;
-    while ((c = getopt_long(argc, argv, "hvim:a:l", longopts, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "hvim:a:lo:s:p:n", longopts, NULL)) != -1) {
         switch (c) {
             case 'h': args->show_help = true; break;
             case 'v': args->show_version = true; break;
@@ -2133,6 +2374,11 @@ static int parse_args(int argc, char **argv, TCArgs *args) {
             case 'm': args->model_override = xstrdup(optarg); break;
             case 'a': args_add_attachment(args, optarg); break;
             case 'l': args->loopback = true; break;
+            case 'o': args->output_path = xstrdup(optarg); break;
+            case 's': args->session_arg = xstrdup(optarg); break;
+            case 'p': args->prompt_text = xstrdup(optarg); break;
+            case 'n': args->new_session_cmd = true; args->interactive = true; break;
+            case 1044: args->input_path = xstrdup(optarg); break;
             case 1000: args->set_api_key = true; break;
             case 1001: args->set_api_key_gpg = true; break;
             case 1002: args->forget_api_key = true; break;
@@ -2172,7 +2418,13 @@ static int parse_args(int argc, char **argv, TCArgs *args) {
                 args->rename_session_cmd = true;
                 args->rename_old = xstrdup(optarg);
                 if (optind < argc && argv[optind][0] != '-') {
-                    args->rename_new = xstrdup(argv[optind++]);
+                    TCBuffer title;
+                    buffer_init(&title);
+                    while (optind < argc && argv[optind][0] != '-') {
+                        if (title.len > 0) buffer_append(&title, " ");
+                        buffer_append(&title, argv[optind++]);
+                    }
+                    args->rename_new = buffer_take(&title);
                 }
                 break;
             case 1022: args->show_memory_cmd = true; args->memory_path = xstrdup(optarg); break;
@@ -2202,8 +2454,13 @@ static int parse_args(int argc, char **argv, TCArgs *args) {
             default: return 1;
         }
     }
-    if (optind < argc) args->input_path = xstrdup(argv[optind++]);
-    if (optind < argc) args->output_path = xstrdup(argv[optind++]);
+    if (optind < argc) {
+        if (!args->input_path && !args->prompt_text) args->input_path = xstrdup(argv[optind++]);
+        else if (!args->output_path) args->output_path = xstrdup(argv[optind++]);
+    }
+    if (optind < argc) {
+        if (!args->output_path) args->output_path = xstrdup(argv[optind++]);
+    }
     if (optind < argc) {
         fprintf(stderr, "unexpected extra argument: %s\n", argv[optind]);
         return 1;
@@ -2305,12 +2562,22 @@ static int test_model_command(const TCConfig *cfg, const char *model, bool demo)
  * feature-equivalent local commands.
  */
 
-static char *interactive_default_session_path(const TCConfig *cfg) {
+static char *default_session_path(const TCConfig *cfg) {
     time_t t = time(NULL);
     struct tm tmv;
     localtime_r(&t, &tmv);
-    char name[128];
-    strftime(name, sizeof(name), "session-%Y-%m-%d-%H-%M-%S.log", &tmv);
+    char stem[128];
+    strftime(stem, sizeof(stem), "session-%Y-%m-%d-%H-%M-%S", &tmv);
+    for (int i = 0; i < 1000; i++) {
+        char name[160];
+        if (i == 0) snprintf(name, sizeof(name), "%s.log", stem);
+        else snprintf(name, sizeof(name), "%s-%03d.log", stem, i);
+        char *path = path_join2(cfg->session_dir, name);
+        if (!file_exists(path)) return path;
+        free(path);
+    }
+    char name[192];
+    snprintf(name, sizeof(name), "%s-%ld.log", stem, (long)getpid());
     return path_join2(cfg->session_dir, name);
 }
 
@@ -2318,7 +2585,7 @@ static void runtime_command_help(void) {
     printf("Runtime colon commands:\n");
     printf("  :help                         show this command list\n");
     printf("  :list                         list saved sessions\n");
-    printf("  :rename NAME                  rename current interactive session\n");
+    printf("  :rename TITLE                 set current session title metadata\n");
     printf("  :models                       list cached models\n");
     printf("  :routers                      list router models\n");
     printf("  :update-models                refresh model cache from OpenRouter\n");
@@ -2450,45 +2717,109 @@ static char *session_path_from_arg(const TCConfig *cfg, const char *arg) {
     return out;
 }
 
+typedef struct TCSessionRow {
+    char *name;
+    char *path;
+    char *title;
+    time_t mtime;
+    long size;
+} TCSessionRow;
+
+typedef struct TCSessionRows {
+    TCSessionRow *items;
+    size_t count;
+    size_t cap;
+} TCSessionRows;
+
+static void sessionrows_add(TCSessionRows *rows, const char *name, const char *path, const char *title, time_t mtime, long size) {
+    if (rows->count == rows->cap) {
+        rows->cap = rows->cap ? rows->cap * 2 : 32;
+        rows->items = realloc(rows->items, rows->cap * sizeof(rows->items[0]));
+        if (!rows->items) die("out of memory");
+    }
+    rows->items[rows->count].name = xstrdup(name);
+    rows->items[rows->count].path = xstrdup(path);
+    rows->items[rows->count].title = xstrdup(title && *title ? title : "(untitled)");
+    rows->items[rows->count].mtime = mtime;
+    rows->items[rows->count].size = size;
+    rows->count++;
+}
+
+static void sessionrows_free(TCSessionRows *rows) {
+    for (size_t i = 0; i < rows->count; i++) {
+        free(rows->items[i].name);
+        free(rows->items[i].path);
+        free(rows->items[i].title);
+    }
+    free(rows->items);
+    rows->items = NULL;
+    rows->count = rows->cap = 0;
+}
+
+static int sessionrow_cmp(const void *a, const void *b) {
+    const TCSessionRow *ra = a;
+    const TCSessionRow *rb = b;
+    if (ra->mtime < rb->mtime) return 1;
+    if (ra->mtime > rb->mtime) return -1;
+    return strcasecmp(ra->name, rb->name);
+}
+
+static char *session_time_display(time_t t) {
+    struct tm tmv;
+    localtime_r(&t, &tmv);
+    char buf[64];
+    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", &tmv);
+    return xstrdup(buf);
+}
+
 static int list_sessions_command(const TCConfig *cfg) {
     DIR *d = opendir(cfg->session_dir);
     if (!d) {
         fprintf(stderr, "could not open session dir %s: %s\n", cfg->session_dir, strerror(errno));
         return 1;
     }
+    TCSessionRows rows = {0};
     struct dirent *de;
     while ((de = readdir(d))) {
         if (de->d_name[0] == '.') continue;
-        printf("%s\n", de->d_name);
+        char *path = path_join2(cfg->session_dir, de->d_name);
+        struct stat st;
+        if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) {
+            char *title = session_title_from_file(path);
+            if (!title) title = basename_no_ext(de->d_name);
+            sessionrows_add(&rows, de->d_name, path, title, st.st_mtime, (long)st.st_size);
+            free(title);
+        }
+        free(path);
     }
     closedir(d);
+
+    qsort(rows.items, rows.count, sizeof(rows.items[0]), sessionrow_cmp);
+    printf("%-42s %-16s %-10s %s\n", "TITLE", "UPDATED", "BYTES", "FILE");
+    printf("%-42s %-16s %-10s %s\n", "-----", "-------", "-----", "----");
+    for (size_t i = 0; i < rows.count; i++) {
+        char *when = session_time_display(rows.items[i].mtime);
+        printf("%-42.42s %-16s %-10ld %s\n", rows.items[i].title, when, rows.items[i].size, rows.items[i].name);
+        free(when);
+    }
+    sessionrows_free(&rows);
     return 0;
 }
 
-static int rename_session_command(const TCConfig *cfg, const char *old_name, const char *new_name) {
-    if (!old_name || !new_name || !*old_name || !*new_name) {
-        fprintf(stderr, "usage: --rename-session OLD NEW\n");
+static int rename_session_command(const TCConfig *cfg, const char *session_name, const char *new_title) {
+    if (!session_name || !new_title || !*session_name || !*new_title) {
+        fprintf(stderr, "usage: --rename-session SESSION TITLE\n");
         return 2;
     }
-    char *oldp = session_path_from_arg(cfg, old_name);
-    char *newp = session_path_from_arg(cfg, new_name);
-    if (!file_exists(oldp)) {
-        fprintf(stderr, "session not found: %s\n", oldp);
-        free(oldp); free(newp);
+    char *path = session_path_from_arg(cfg, session_name);
+    if (!file_exists(path)) {
+        fprintf(stderr, "session not found: %s\n", path);
+        free(path);
         return 1;
     }
-    if (file_exists(newp)) {
-        fprintf(stderr, "target already exists: %s\n", newp);
-        free(oldp); free(newp);
-        return 1;
-    }
-    if (rename(oldp, newp) != 0) {
-        fprintf(stderr, "rename failed: %s\n", strerror(errno));
-        free(oldp); free(newp);
-        return 1;
-    }
-    fprintf(stderr, "renamed session to %s\n", newp);
-    free(oldp); free(newp);
+    write_session_title_metadata(path, new_title);
+    fprintf(stderr, "session title set for %s\n", path);
+    free(path);
     return 0;
 }
 
@@ -2565,14 +2896,18 @@ static int edit_memory_command(const TCConfig *cfg, const char *path) {
 static int editor_prompt_command(const TCConfig *cfg, const char *output_path, TCArgs *base_args) {
     char *msg = compose_with_external_editor();
     if (!msg || !*msg) { free(msg); fprintf(stderr, "editor returned empty prompt\n"); return 1; }
-    const char *session = output_path && *output_path ? output_path : "ttychatter-editor-session.log";
+    char *owned_session = NULL;
+    const char *session = output_path && *output_path ? output_path : (owned_session = default_session_path(cfg));
+    maybe_write_prechat_and_startup_notice(cfg, base_args, session);
     TCMessageList ctx = load_context_from_session(session, cfg->context_turns);
     char *raw = openrouter_chat(cfg, base_args->model_override ? base_args->model_override : cfg->model, msg, &ctx, base_args);
     char *base = basename_no_ext(session);
     char *cleaned = extract_code_blocks(cfg, base, raw);
     append_turn(session, base_args->model_override ? base_args->model_override : cfg->model, "editor", base_args, msg, cleaned, &ctx, cfg->context_turns);
+    maybe_generate_session_title(cfg, base_args, session, msg, cleaned);
     printf("%s\n", cleaned);
-    free(msg); free(raw); free(base); free(cleaned); msglist_free(&ctx);
+    fprintf(stderr, "appended response to %s\n", session);
+    free(msg); free(raw); free(base); free(cleaned); msglist_free(&ctx); free(owned_session);
     return 0;
 }
 
@@ -2638,6 +2973,7 @@ static int interactive_send_message(TCConfig *cfg, const char *output_path, cons
     char *session_base = basename_no_ext(output_path);
     char *cleaned = extract_code_blocks(cfg, session_base, raw);
     append_turn(output_path, model, "interactive", pending_args, text, cleaned, ctx, cfg->context_turns);
+    maybe_generate_session_title(cfg, pending_args, output_path, text, cleaned);
     interactive_context_add(ctx, "user", text, cfg->context_turns);
     interactive_context_add(ctx, "assistant", cleaned, cfg->context_turns);
     printf("%s\n", cleaned);
@@ -2659,14 +2995,9 @@ static int interactive_handle_command(TCConfig *cfg, TCArgs *pending_args, TCMes
     if (strcmp(cmd, "quit") == 0 || strcmp(cmd, "q") == 0) return 1;
     if (strcmp(cmd, "list") == 0) { list_sessions_command(cfg); return 0; }
     if (strcmp(cmd, "rename") == 0) {
-        if (!rest || !*rest) { fprintf(stderr, "usage: :rename NAME\n"); return 0; }
-        char *newp = session_path_from_arg(cfg, rest);
-        if (file_exists(newp)) { fprintf(stderr, "target already exists: %s\n", newp); free(newp); return 0; }
-        if (file_exists(*output_pathp) && rename(*output_pathp, newp) != 0) { fprintf(stderr, "rename failed: %s\n", strerror(errno)); free(newp); return 0; }
-        free(*output_pathp);
-        *output_pathp = newp;
-        output_path = *output_pathp;
-        fprintf(stderr, "current session renamed to %s\n", output_path);
+        if (!rest || !*rest) { fprintf(stderr, "usage: :rename TITLE\n"); return 0; }
+        write_session_title_metadata(*output_pathp, rest);
+        fprintf(stderr, "current session title set: %s\n", rest);
         return 0;
     }
     if (strcmp(cmd, "models") == 0) { list_models(cfg, NULL, pending_args->model_type, pending_args->model_sort, false, pending_args->demo); return 0; }
@@ -2716,7 +3047,7 @@ static int interactive_handle_command(TCConfig *cfg, TCArgs *pending_args, TCMes
 }
 
 static int interactive_loop(TCConfig *cfg, TCArgs *base_args, const char *maybe_output_path) {
-    char *output_path = maybe_output_path ? xstrdup(maybe_output_path) : interactive_default_session_path(cfg);
+    char *output_path = maybe_output_path ? xstrdup(maybe_output_path) : default_session_path(cfg);
     mkdir_p(cfg->session_dir);
     mkdir_p(cfg->attachment_dir);
     maybe_write_prechat_and_startup_notice(cfg, base_args, output_path);
@@ -2783,7 +3114,14 @@ int main(int argc, char **argv) {
     if (args.clear_memory_cmd) { char *p = session_path_from_arg(&cfg, args.memory_path); int rc = clear_memory_command(p); free(p); return rc; }
     if (args.edit_memory_cmd) { char *p = session_path_from_arg(&cfg, args.memory_path); int rc = edit_memory_command(&cfg, p); free(p); return rc; }
     if (args.search_sessions_cmd || (args.search && !args.list_models)) { search_all_sessions(&cfg, args.search ? args.search : ""); return 0; }
-    if (args.editor_prompt_cmd) { if (!args.demo && !cfg.api_key) die("API key missing; set OPENROUTER_API_KEY or run --set-api-key"); return editor_prompt_command(&cfg, args.output_path, &args); }
+    if (args.editor_prompt_cmd) {
+        if (args.session_arg && args.output_path) die("use either --session SESSION or an explicit output log, not both");
+        if (!args.demo && !cfg.api_key) die("API key missing; set OPENROUTER_API_KEY or run --set-api-key");
+        char *editor_session_path = args.session_arg ? session_path_from_arg(&cfg, args.session_arg) : NULL;
+        int rc = editor_prompt_command(&cfg, editor_session_path ? editor_session_path : args.output_path, &args);
+        free(editor_session_path);
+        return rc;
+    }
     if (args.show_config) { print_config_summary(&cfg); return 0; }
     if (args.config_set_cmd) {
         if (!args.config_key || !args.config_value) die("--set requires KEY=VALUE");
@@ -2828,26 +3166,52 @@ int main(int argc, char **argv) {
         return rc;
     }
 
+    if (args.prompt_text && args.input_path) {
+        fprintf(stderr, "use either --prompt TEXT or an input file, not both\n");
+        return 2;
+    }
+    if (args.session_arg && args.output_path) {
+        fprintf(stderr, "use either --session SESSION or an explicit output log, not both\n");
+        return 2;
+    }
+    if (!args.interactive && !args.prompt_text && !args.input_path && isatty(STDIN_FILENO)) {
+        args.interactive = true;
+    }
+
     if (args.interactive) {
-        if (args.resume_session && args.output_path) {
-            fprintf(stderr, "interactive --resume accepts only one session name/path\n");
+        if (args.prompt_text) {
+            fprintf(stderr, "interactive mode does not accept --prompt; omit -i for one-shot sends\n");
             return 2;
         }
-        if (!args.resume_session && args.output_path) {
-            fprintf(stderr, "interactive mode accepts at most one session name/path\n");
+        if (args.output_path) {
+            fprintf(stderr, "interactive mode accepts --session SESSION, --resume SESSION, or one positional session name/path, not an output log\n");
+            return 2;
+        }
+        int session_sources = 0;
+        if (args.resume_session) session_sources++;
+        if (args.session_arg) session_sources++;
+        if (args.input_path) session_sources++;
+        if (args.new_session_cmd && session_sources > 0) {
+            fprintf(stderr, "--new starts a fresh timestamped interactive session and does not accept a session name/path\n");
+            return 2;
+        }
+        if (session_sources > 1) {
+            fprintf(stderr, "interactive mode accepts only one session name/path\n");
             return 2;
         }
         char *session_path = NULL;
-        if (args.resume_session) session_path = session_path_from_arg(&cfg, args.resume_session);
-        else if (args.input_path) session_path = session_path_from_arg(&cfg, args.input_path);
+        if (!args.new_session_cmd && args.resume_session) session_path = session_path_from_arg(&cfg, args.resume_session);
+        else if (!args.new_session_cmd && args.session_arg) session_path = session_path_from_arg(&cfg, args.session_arg);
+        else if (!args.new_session_cmd && args.input_path) session_path = session_path_from_arg(&cfg, args.input_path);
         int rc = interactive_loop(&cfg, &args, session_path);
         free(session_path);
         return rc;
     }
 
-    if (!args.input_path || !args.output_path) {
-        print_help();
-        return 2;
+    if (!args.prompt_text && !args.input_path) args.input_path = xstrdup("-");
+    if (!args.output_path) {
+        if (args.session_arg) args.output_path = session_path_from_arg(&cfg, args.session_arg);
+        else args.output_path = default_session_path(&cfg);
     }
     if (!args.demo && !cfg.api_key) die("API key missing; set OPENROUTER_API_KEY or run --set-api-key");
 
@@ -2855,7 +3219,8 @@ int main(int argc, char **argv) {
     maybe_write_prechat_and_startup_notice(&cfg, &args, args.output_path);
 
     size_t input_len = 0;
-    char *input_text = read_file(args.input_path, &input_len);
+    char *input_text = args.prompt_text ? xstrdup(args.prompt_text) : read_input_source(args.input_path, &input_len);
+    const char *input_label = args.prompt_text ? "prompt" : (args.input_path ? args.input_path : "stdin");
     TCMessageList context = load_context_from_session(args.output_path, cfg.context_turns);
     const char *model = args.model_override ? args.model_override : cfg.model;
 
@@ -2863,7 +3228,8 @@ int main(int argc, char **argv) {
     char *session_base = basename_no_ext(args.output_path);
     char *cleaned = extract_code_blocks(&cfg, session_base, raw);
 
-    append_turn(args.output_path, model, args.input_path, &args, input_text, cleaned, &context, cfg.context_turns);
+    append_turn(args.output_path, model, input_label, &args, input_text, cleaned, &context, cfg.context_turns);
+    maybe_generate_session_title(&cfg, &args, args.output_path, input_text, cleaned);
     fprintf(stderr, "appended response to %s\n", args.output_path);
     if (args.loopback) printf("%s\n", cleaned);
     if (args.loopback_file) {
