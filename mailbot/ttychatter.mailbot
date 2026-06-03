@@ -52,7 +52,7 @@ from typing import Any, Iterable, List, Optional, Tuple
 
 PROGRAM = "ttychatter.mailbot"
 VERSION = "0.6.1"
-AUTOMATED_MAILBOT_NOTICE = "This is an automated email from THATIAM.VIP's OpenRouter artificial intelligence mailbot."
+AUTOMATED_MAILBOT_NOTICE = "This is an automated email, the AI response you requested follows... --BLOODGUILTCURSE.NET"
 
 DEFAULT_CONFIG_DIR = Path.home() / ".config" / "ttychatter" / "mailbot"
 DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config"
