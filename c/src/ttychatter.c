@@ -49,16 +49,14 @@
 #include <unistd.h>
 
 #define TC_PROGRAM "ttychatter"
-#define TC_VERSION "0.6.0-c-cli"
+#define TC_VERSION "0.6.1-c-cli"
 #define TC_OPENROUTER_CHAT_URL "https://openrouter.ai/api/v1/chat/completions"
 #define TC_OPENROUTER_MODELS_URL "https://openrouter.ai/api/v1/models"
 
 /*
- * The log markers are intentionally loud and simple.  They are not pretty prose;
- * they are parse anchors.  A future awk/sed/perl/C/Rust implementation should be
- * able to recover user and AI turns without understanding a binary database or a
- * private serialization format.  That is why the output file is both readable
- * and deliberately structured.
+ * New 0.6.1 logs use ttychatter's shared line-oriented OpenRouter transcript
+ * format.  The older C marker strings remain defined so the parser can resume
+ * 0.6.0-era C logs without forcing users to migrate old session files.
  */
 #define TC_TURN_BEGIN "===== TTYCHATTER TURN BEGIN ====="
 #define TC_TURN_END   "===== TTYCHATTER TURN END ====="
@@ -394,6 +392,15 @@ static char *now_string(void) {
     return xstrdup(buf);
 }
 
+static char *now_hms(void) {
+    time_t t = time(NULL);
+    struct tm tmv;
+    localtime_r(&t, &tmv);
+    char buf[32];
+    strftime(buf, sizeof(buf), "%H:%M:%S", &tmv);
+    return xstrdup(buf);
+}
+
 static char *basename_no_ext(const char *path) {
     const char *base = strrchr(path, '/');
     base = base ? base + 1 : path;
@@ -535,7 +542,24 @@ static bool gpg_encrypt_text_to_file(const char *text, const char *path) {
 /* Config file handling                                                      */
 /* ------------------------------------------------------------------------- */
 
+static char *xdg_config_provider_file(const char *leaf) {
+    const char *xdg = getenv("XDG_CONFIG_HOME");
+    if (xdg && *xdg) {
+        char *dir = path_join2(xdg, "ttychatter/openrouter");
+        char *file = path_join2(dir, leaf);
+        free(dir);
+        return file;
+    }
+    char tmp[PATH_MAX];
+    snprintf(tmp, sizeof(tmp), ".config/ttychatter/openrouter/%s", leaf);
+    return home_path(tmp);
+}
+
 static char *xdg_config_file(void) {
+    return xdg_config_provider_file("config");
+}
+
+static char *legacy_xdg_config_file(void) {
     const char *xdg = getenv("XDG_CONFIG_HOME");
     if (xdg && *xdg) {
         char *dir = path_join2(xdg, "ttychatter");
@@ -546,37 +570,52 @@ static char *xdg_config_file(void) {
     return home_path(".config/ttychatter/config");
 }
 
+static char *xdg_api_key_gpg_file(void) {
+    return xdg_config_provider_file("api-key.gpg");
+}
+
+static char *legacy_xdg_api_key_gpg_file(void) {
+    const char *xdg = getenv("XDG_CONFIG_HOME");
+    if (xdg && *xdg) {
+        char *dir = path_join2(xdg, "ttychatter");
+        char *file = path_join2(dir, "api-key.gpg");
+        free(dir);
+        return file;
+    }
+    return home_path(".config/ttychatter/api-key.gpg");
+}
+
 static char *xdg_cache_file(void) {
     const char *xdg = getenv("XDG_CACHE_HOME");
     if (xdg && *xdg) {
-        char *dir = path_join2(xdg, "ttychatter");
+        char *dir = path_join2(xdg, "ttychatter/openrouter");
         char *file = path_join2(dir, "models.json");
         free(dir);
         return file;
     }
-    return home_path(".cache/ttychatter/models.json");
+    return home_path(".cache/ttychatter/openrouter/models.json");
 }
 
 static char *xdg_data_dir(const char *leaf) {
     const char *xdg = getenv("XDG_DATA_HOME");
     if (xdg && *xdg) {
-        char *dir = path_join2(xdg, "ttychatter");
+        char *dir = path_join2(xdg, "ttychatter/openrouter");
         char *out = path_join2(dir, leaf);
         free(dir);
         return out;
     }
-    char tmp[256];
-    snprintf(tmp, sizeof(tmp), ".local/share/ttychatter/%s", leaf);
+    char tmp[PATH_MAX];
+    snprintf(tmp, sizeof(tmp), ".local/share/ttychatter/openrouter/%s", leaf);
     return home_path(tmp);
 }
 
 static void config_init_defaults(TCConfig *cfg) {
     memset(cfg, 0, sizeof(*cfg));
     cfg->config_file = xdg_config_file();
-    cfg->api_key_gpg_file = home_path(".config/ttychatter/api-key.gpg");
+    cfg->api_key_gpg_file = xdg_api_key_gpg_file();
     cfg->model = xstrdup("openrouter/auto");
     cfg->model_cache_file = xdg_cache_file();
-    cfg->model_favorites_file = home_path(".config/ttychatter/model-favorites");
+    cfg->model_favorites_file = xdg_config_provider_file("model-favorites");
     cfg->session_dir = xdg_data_dir("sessions");
     cfg->attachment_dir = xdg_data_dir("attachments");
     cfg->context_turns = 12;
@@ -600,7 +639,7 @@ static void config_init_defaults(TCConfig *cfg) {
 }
 
 static void config_set(TCConfig *cfg, const char *key, const char *value) {
-    if (strcmp(key, "OPENROUTER_API_KEY") == 0 || strcmp(key, "TTYCHATTER_API_KEY") == 0) {
+    if (strcmp(key, "OPENROUTER_API_KEY") == 0 || strcmp(key, "TTYCHATTER_API_KEY") == 0 || strcmp(key, "API_KEY") == 0) {
         free(cfg->api_key);
         cfg->api_key = xstrdup(value);
     } else if (strcmp(key, "API_KEY_GPG_FILE") == 0 || strcmp(key, "OPENROUTER_API_KEY_GPG_FILE") == 0) {
@@ -621,7 +660,7 @@ static void config_set(TCConfig *cfg, const char *key, const char *value) {
     } else if (strcmp(key, "ATTACHMENT_DIR") == 0) {
         free(cfg->attachment_dir);
         cfg->attachment_dir = expand_tilde(value);
-    } else if (strcmp(key, "CONTEXT_TURNS") == 0) {
+    } else if (strcmp(key, "CONTEXT_TURNS") == 0 || strcmp(key, "HISTORY_LIMIT") == 0) {
         cfg->context_turns = atol(value) > 0 ? atol(value) : cfg->context_turns;
     } else if (strcmp(key, "CODE_ATTACHMENT_MIN_LINES") == 0) {
         cfg->code_attachment_min_lines = atol(value) > 0 ? atol(value) : cfg->code_attachment_min_lines;
@@ -645,7 +684,7 @@ static void config_set(TCConfig *cfg, const char *key, const char *value) {
     } else if (strcmp(key, "MODEL_TYPE_FILTER") == 0) {
         free(cfg->model_type_filter);
         cfg->model_type_filter = xstrdup(value);
-    } else if (strcmp(key, "MODEL_FILTER_GENERATE_CONTENT") == 0) {
+    } else if (strcmp(key, "MODEL_FILTER_GENERATE_CONTENT") == 0 || strcmp(key, "MODEL_FILTER_CHAT_COMPLETIONS") == 0) {
         cfg->model_filter_generate_content = parse_bool_string(value, cfg->model_filter_generate_content);
     } else if (strcmp(key, "MODEL_FILTER_REQUIRE_TOKENS") == 0) {
         cfg->model_filter_require_tokens = parse_bool_string(value, cfg->model_filter_require_tokens);
@@ -666,13 +705,14 @@ static void config_set(TCConfig *cfg, const char *key, const char *value) {
     }
 }
 
-static void config_load(TCConfig *cfg) {
-    FILE *f = fopen(cfg->config_file, "r");
-    if (!f) goto env_keys;
+static bool config_load_file(TCConfig *cfg, const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
     char line[8192];
     while (fgets(line, sizeof(line), f)) {
         char *s = trim_in_place(line);
         if (!*s || *s == '#') continue;
+        if (starts_with(s, "export ")) s = trim_in_place(s + 7);
         char *eq = strchr(s, '=');
         if (!eq) continue;
         *eq = '\0';
@@ -681,8 +721,23 @@ static void config_load(TCConfig *cfg) {
         config_set(cfg, key, value);
     }
     fclose(f);
+    return true;
+}
 
-env_keys:
+static void config_load(TCConfig *cfg) {
+    bool loaded = config_load_file(cfg, cfg->config_file);
+
+    /*
+     * 0.6.1 moves the C client into the shared OpenRouter namespace used by
+     * the ncurses, Bash, and Bash+Python clients.  Existing C-only users may
+     * still have ~/.config/ttychatter/config, so read that file only as a
+     * compatibility fallback when the new provider-specific config is absent.
+     * Writes continue to go to cfg->config_file, which is the OpenRouter path.
+     */
+    char *legacy_config = legacy_xdg_config_file();
+    if (!loaded && file_exists(legacy_config)) config_load_file(cfg, legacy_config);
+    free(legacy_config);
+
     {
         const char *k = getenv("OPENROUTER_API_KEY");
         if (!k || !*k) k = getenv("TTYCHATTER_API_KEY");
@@ -694,6 +749,13 @@ env_keys:
 
     if (!cfg->api_key && cfg->api_key_gpg_file && file_exists(cfg->api_key_gpg_file)) {
         cfg->api_key = gpg_decrypt_file(cfg->api_key_gpg_file);
+    }
+    if (!cfg->api_key) {
+        char *legacy_gpg = legacy_xdg_api_key_gpg_file();
+        if (legacy_gpg && (!cfg->api_key_gpg_file || strcmp(legacy_gpg, cfg->api_key_gpg_file) != 0) && file_exists(legacy_gpg)) {
+            cfg->api_key = gpg_decrypt_file(legacy_gpg);
+        }
+        free(legacy_gpg);
     }
 }
 
@@ -779,7 +841,7 @@ static TCHttpResponse http_request(const char *url, const char *method, const ch
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &b);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "ttychatter-c-cli/0.1");
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "ttychatter-c-cli/0.6.1");
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
     if (strcmp(method, "POST") == 0) {
         curl_easy_setopt(curl, CURLOPT_POST, 1L);
@@ -1110,8 +1172,8 @@ static void msglist_add(TCMessageList *list, const char *role, const char *conte
         list->items = realloc(list->items, list->cap * sizeof(list->items[0]));
         if (!list->items) die("out of memory");
     }
-    list->items[list->count].role = xstrdup(role);
-    list->items[list->count].content = xstrdup(content);
+    list->items[list->count].role = xstrdup(role ? role : "user");
+    list->items[list->count].content = xstrdup(content ? content : "");
     list->count++;
 }
 
@@ -1121,6 +1183,186 @@ static void msglist_free(TCMessageList *list) {
         free(list->items[i].content);
     }
     free(list->items);
+    list->items = NULL;
+    list->count = 0;
+    list->cap = 0;
+}
+
+static TCMessageList msglist_clip_take(TCMessageList *all, long context_turns) {
+    long max_messages = context_turns * 2;
+    if (max_messages < 2) max_messages = 2;
+    if ((long)all->count <= max_messages) {
+        TCMessageList keep = *all;
+        all->items = NULL;
+        all->count = 0;
+        all->cap = 0;
+        return keep;
+    }
+
+    TCMessageList clipped = {0};
+    size_t start = all->count - (size_t)max_messages;
+    for (size_t i = start; i < all->count; i++) {
+        msglist_add(&clipped, all->items[i].role, all->items[i].content);
+    }
+    msglist_free(all);
+    return clipped;
+}
+
+static char *snapshot_safe_line(const char *s) {
+    TCBuffer b;
+    buffer_init(&b);
+    for (const char *p = s ? s : ""; *p; p++) {
+        char c = *p;
+        if (c == '\r' || c == '\n' || c == '\t') c = ' ';
+        buffer_append_n(&b, &c, 1);
+    }
+    return buffer_take(&b);
+}
+
+typedef struct TCLogEntry {
+    char *speaker;
+    TCBuffer text;
+} TCLogEntry;
+
+typedef struct TCLogEntryList {
+    TCLogEntry *items;
+    size_t count;
+    size_t cap;
+} TCLogEntryList;
+
+static void logentries_add(TCLogEntryList *list, const char *speaker, const char *text) {
+    if (list->count == list->cap) {
+        list->cap = list->cap ? list->cap * 2 : 32;
+        list->items = realloc(list->items, list->cap * sizeof(list->items[0]));
+        if (!list->items) die("out of memory");
+    }
+    list->items[list->count].speaker = xstrdup(speaker ? speaker : "");
+    buffer_init(&list->items[list->count].text);
+    buffer_append(&list->items[list->count].text, text ? text : "");
+    list->count++;
+}
+
+static void logentries_free(TCLogEntryList *list) {
+    for (size_t i = 0; i < list->count; i++) {
+        free(list->items[i].speaker);
+        free(list->items[i].text.data);
+    }
+    free(list->items);
+    list->items = NULL;
+    list->count = 0;
+    list->cap = 0;
+}
+
+static bool parse_shared_log_header(const char *line, char *speaker, size_t speaker_size, const char **content_out) {
+    size_t n = strlen(line);
+    if (n < 12) return false;
+    if (line[0] != '[' || line[3] != ':' || line[6] != ':' || line[9] != ']' || line[10] != ' ') return false;
+    if (!isdigit((unsigned char)line[1]) || !isdigit((unsigned char)line[2]) ||
+        !isdigit((unsigned char)line[4]) || !isdigit((unsigned char)line[5]) ||
+        !isdigit((unsigned char)line[7]) || !isdigit((unsigned char)line[8])) return false;
+    const char *sp = line + 11;
+    const char *colon = strchr(sp, ':');
+    if (!colon || colon == sp) return false;
+    size_t slen = (size_t)(colon - sp);
+    if (slen >= speaker_size) slen = speaker_size - 1;
+    memcpy(speaker, sp, slen);
+    speaker[slen] = '\0';
+    const char *content = colon + 1;
+    if (*content == ' ') content++;
+    *content_out = content;
+    return true;
+}
+
+static TCLogEntryList parse_shared_log_entries(const char *text) {
+    TCLogEntryList entries = {0};
+    const char *p = text ? text : "";
+    while (*p) {
+        const char *e = strchr(p, '\n');
+        size_t n = e ? (size_t)(e - p) : strlen(p);
+        char *line = xcalloc(n + 1, 1);
+        memcpy(line, p, n);
+        if (n > 0 && line[n - 1] == '\r') line[n - 1] = '\0';
+
+        char speaker[256];
+        const char *content = NULL;
+        if (parse_shared_log_header(line, speaker, sizeof(speaker), &content)) {
+            logentries_add(&entries, speaker, content);
+        } else if (entries.count > 0) {
+            buffer_append(&entries.items[entries.count - 1].text, "\n");
+            buffer_append(&entries.items[entries.count - 1].text, line);
+        }
+        free(line);
+        if (!e) break;
+        p = e + 1;
+    }
+    return entries;
+}
+
+static const char *role_from_shared_speaker(const char *speaker) {
+    if (!speaker || !*speaker) return NULL;
+    if (strcasecmp(speaker, "system") == 0) return NULL;
+    if (strcasecmp(speaker, "AI") == 0 || strcasecmp(speaker, "OpenRouter") == 0 || strcasecmp(speaker, "Assistant") == 0) return "assistant";
+    return "user";
+}
+
+static bool parse_context_snapshot_text(const char *text, TCMessageList *out) {
+    bool saw_begin = false;
+    const char *p = text ? text : "";
+    while (*p) {
+        const char *e = strchr(p, '\n');
+        size_t n = e ? (size_t)(e - p) : strlen(p);
+        char *line = xcalloc(n + 1, 1);
+        memcpy(line, p, n);
+        if (n > 0 && line[n - 1] == '\r') line[n - 1] = '\0';
+        char *t = trim_in_place(line);
+
+        if (!saw_begin) {
+            if (strcmp(t, "CONTEXT_BEGIN") == 0 || strcmp(t, TC_CONTEXT_BEGIN) == 0) {
+                saw_begin = true;
+                free(line);
+                if (!e) break;
+                p = e + 1;
+                continue;
+            }
+            free(line);
+            return false;
+        }
+
+        if (strcmp(t, "CONTEXT_END") == 0 || strcmp(t, TC_CONTEXT_END) == 0) {
+            free(line);
+            break;
+        }
+        if (starts_with(t, "User: ")) msglist_add(out, "user", t + 6);
+        else if (starts_with(t, "user: ")) msglist_add(out, "user", t + 6);
+        else if (starts_with(t, "Assistant: ")) msglist_add(out, "assistant", t + 11);
+        else if (starts_with(t, "assistant: ")) msglist_add(out, "assistant", t + 11);
+
+        free(line);
+        if (!e) break;
+        p = e + 1;
+    }
+    return saw_begin;
+}
+
+static TCMessageList load_context_from_shared_entries(TCLogEntryList *entries, long context_turns, bool *parsed_shared) {
+    *parsed_shared = entries->count > 0;
+
+    for (size_t rev = entries->count; rev > 0; rev--) {
+        TCLogEntry *entry = &entries->items[rev - 1];
+        if (strcasecmp(entry->speaker, "system") != 0) continue;
+        TCMessageList snap = {0};
+        if (parse_context_snapshot_text(entry->text.data, &snap)) {
+            return msglist_clip_take(&snap, context_turns);
+        }
+    }
+
+    TCMessageList all = {0};
+    for (size_t i = 0; i < entries->count; i++) {
+        const char *role = role_from_shared_speaker(entries->items[i].speaker);
+        if (!role) continue;
+        msglist_add(&all, role, entries->items[i].text.data);
+    }
+    return msglist_clip_take(&all, context_turns);
 }
 
 static char *extract_between(const char *start, const char *begin_marker, const char *end_marker, const char **after) {
@@ -1139,21 +1381,9 @@ static char *extract_between(const char *start, const char *begin_marker, const 
     return out;
 }
 
-static TCMessageList load_context_from_session(const char *output_path, long context_turns) {
+static TCMessageList load_context_from_legacy_c_log(const char *text, long context_turns) {
     TCMessageList all = {0};
-    if (!file_exists(output_path)) return all;
-    size_t len = 0;
-    char *text = read_file(output_path, &len);
 
-    /*
-     * Memory management in the C CLI is deliberately file-shaped.  The output
-     * log is the session, so commands such as --clear-memory and --edit-memory
-     * leave explicit markers in that same human-readable file rather than
-     * creating a hidden state database.  The parser first looks for the most
-     * recent explicit context snapshot; if one exists, it becomes the canonical
-     * resume context.  If no snapshot exists, the parser falls back to ordinary
-     * user/AI turns after the most recent memory-clear marker.
-     */
     const char *last_snapshot = NULL;
     const char *scan_snap = text;
     while ((scan_snap = strstr(scan_snap, TC_CONTEXT_BEGIN))) {
@@ -1176,8 +1406,7 @@ static TCMessageList load_context_from_session(const char *output_path, long con
                 else if (starts_with(t, "Assistant: ")) msglist_add(&snap, "assistant", t + 11);
             }
             free(chunk);
-            free(text);
-            return snap;
+            return msglist_clip_take(&snap, context_turns);
         }
     }
 
@@ -1202,17 +1431,40 @@ static TCMessageList load_context_from_session(const char *output_path, long con
         free(ai);
         p = turn_end + strlen(TC_TURN_END);
     }
+    return msglist_clip_take(&all, context_turns);
+}
+
+static TCMessageList load_context_from_session(const char *output_path, long context_turns) {
+    TCMessageList empty = {0};
+    if (!file_exists(output_path)) return empty;
+    size_t len = 0;
+    char *text = read_file(output_path, &len);
+    (void)len;
+
+    /*
+     * ttychatter's OpenRouter clients use a shared, line-oriented transcript:
+     *     [HH:MM:SS] User: ...
+     *     [HH:MM:SS] AI: ...
+     *     [HH:MM:SS] system: CONTEXT_BEGIN
+     *     User: ...
+     *     Assistant: ...
+     *     [HH:MM:SS] system: CONTEXT_END
+     * 0.6.1 makes the C client read that format first, then falls back to the
+     * earlier C marker blocks so existing C-only session logs remain resumable.
+     */
+    TCLogEntryList entries = parse_shared_log_entries(text);
+    bool parsed_shared = false;
+    TCMessageList shared = load_context_from_shared_entries(&entries, context_turns, &parsed_shared);
+    logentries_free(&entries);
+    if (parsed_shared) {
+        free(text);
+        return shared;
+    }
+    msglist_free(&shared);
+
+    TCMessageList legacy = load_context_from_legacy_c_log(text, context_turns);
     free(text);
-
-    long max_messages = context_turns * 2;
-    if (max_messages < 2) max_messages = 2;
-    if ((long)all.count <= max_messages) return all;
-
-    TCMessageList clipped = {0};
-    size_t start = all.count - (size_t)max_messages;
-    for (size_t i = start; i < all.count; i++) msglist_add(&clipped, all.items[i].role, all.items[i].content);
-    msglist_free(&all);
-    return clipped;
+    return legacy;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1440,20 +1692,53 @@ static char *openrouter_chat(const TCConfig *cfg, const char *model, const char 
 /* Session log append                                                        */
 /* ------------------------------------------------------------------------- */
 
-static void append_turn(const char *output_path, const char *model, const char *input_path, TCArgs *args, const char *user_text, const char *ai_text) {
+static void append_snapshot_message(TCBuffer *b, const char *role, const char *content) {
+    const char *label = (role && strcasecmp(role, "assistant") == 0) ? "Assistant" : "User";
+    char *safe = snapshot_safe_line(content);
+    buffer_appendf(b, "%s: %s\n", label, safe);
+    free(safe);
+}
+
+static void append_shared_context_snapshot(TCBuffer *b, const char *ts, const TCMessageList *previous_context,
+                                           long context_turns, const char *user_text, const char *ai_text) {
+    long max_messages = context_turns * 2;
+    if (max_messages < 2) max_messages = 2;
+    size_t prev_count = previous_context ? previous_context->count : 0;
+    size_t drop = 0;
+    if ((long)(prev_count + 2) > max_messages) drop = (prev_count + 2) - (size_t)max_messages;
+    if (drop > prev_count) drop = prev_count;
+
+    buffer_appendf(b, "[%s] system: CONTEXT_BEGIN\n", ts);
+    for (size_t i = drop; i < prev_count; i++) {
+        append_snapshot_message(b, previous_context->items[i].role, previous_context->items[i].content);
+    }
+    append_snapshot_message(b, "user", user_text);
+    append_snapshot_message(b, "assistant", ai_text);
+    buffer_appendf(b, "[%s] system: CONTEXT_END\n", ts);
+}
+
+static void append_turn(const char *output_path, const char *model, const char *input_path, TCArgs *args,
+                        const char *user_text, const char *ai_text, const TCMessageList *previous_context,
+                        long context_turns) {
     TCBuffer b;
     buffer_init(&b);
-    char *now = now_string();
-    buffer_appendf(&b, "%s\n", TC_TURN_BEGIN);
-    buffer_appendf(&b, "time: %s\n", now);
-    buffer_appendf(&b, "model: %s\n", model);
-    buffer_appendf(&b, "input-file: %s\n", input_path);
-    for (size_t i = 0; i < args->attachment_count; i++) buffer_appendf(&b, "attachment: %s\n", args->attachments[i]);
-    buffer_appendf(&b, "%s\n%s\n%s\n", TC_USER_BEGIN, user_text, TC_USER_END);
-    buffer_appendf(&b, "%s\n%s\n%s\n", TC_AI_BEGIN, ai_text, TC_AI_END);
-    buffer_appendf(&b, "%s\n\n", TC_TURN_END);
+    char *ts = now_hms();
+
+    if (model && *model) buffer_appendf(&b, "[%s] system: model: %s\n", ts, model);
+    if (input_path && *input_path) buffer_appendf(&b, "[%s] system: input-file: %s\n", ts, input_path);
+    if (args) {
+        for (size_t i = 0; i < args->attachment_count; i++) {
+            buffer_appendf(&b, "[%s] system: attachment: %s\n", ts, args->attachments[i]);
+        }
+    }
+
+    buffer_appendf(&b, "[%s] User: %s\n", ts, user_text ? user_text : "");
+    buffer_appendf(&b, "[%s] AI: %s\n", ts, ai_text ? ai_text : "");
+    append_shared_context_snapshot(&b, ts, previous_context, context_turns, user_text ? user_text : "", ai_text ? ai_text : "");
+    buffer_append(&b, "\n");
+
     append_file_text(output_path, b.data);
-    free(now);
+    free(ts);
     free(b.data);
 }
 
@@ -1607,6 +1892,7 @@ static int cmd_set_api_key(TCConfig *cfg, bool use_gpg) {
         config_write_key_value(cfg, "API_KEY_GPG_FILE", cfg->api_key_gpg_file);
         config_remove_key(cfg, "OPENROUTER_API_KEY");
         config_remove_key(cfg, "TTYCHATTER_API_KEY");
+        config_remove_key(cfg, "API_KEY");
         fprintf(stderr, "Encrypted API key saved to %s\n", cfg->api_key_gpg_file);
     } else {
         fprintf(stderr, "WARNING: saving API key in plaintext config.\n");
@@ -1620,6 +1906,7 @@ static int cmd_set_api_key(TCConfig *cfg, bool use_gpg) {
 static int cmd_forget_api_key(TCConfig *cfg) {
     config_remove_key(cfg, "OPENROUTER_API_KEY");
     config_remove_key(cfg, "TTYCHATTER_API_KEY");
+    config_remove_key(cfg, "API_KEY");
     if (cfg->api_key_gpg_file && file_exists(cfg->api_key_gpg_file)) unlink(cfg->api_key_gpg_file);
     fprintf(stderr, "Removed stored API key entries.\n");
     return 0;
@@ -1634,7 +1921,7 @@ static void print_help(void) {
     printf("\n");
     printf("Usage:\n");
     printf("  ttychatter [options] input.txt output.log\n");
-    printf("  ttychatter --interactive [session.log]\n");
+    printf("  ttychatter --interactive [SESSION|./session.log]\n");
     printf("  ttychatter --resume SESSION\n");
     printf("  ttychatter --set-api-key [--gpg]\n");
     printf("  ttychatter --models [--search TEXT] [--model-type TYPE] [--sort KEY]\n");
@@ -1642,7 +1929,7 @@ static void print_help(void) {
     printf("  ttychatter --select-model\n");
     printf("  ttychatter --list | --rename-session OLD NEW\n");
     printf("  ttychatter --show-memory SESSION | --clear-memory SESSION | --edit-memory SESSION\n");
-    printf("  ttychatter --editor-prompt [session.log]\n");
+    printf("  ttychatter --editor-prompt [output.log]\n");
     printf("  ttychatter --search TEXT [--all-sessions]\n");
     printf("\nOptions:\n");
     printf("  -m, --model MODEL        model/router to use (default from config)\n");
@@ -1674,6 +1961,10 @@ static void print_help(void) {
     printf("      --doctor             local diagnostics\n");
     printf("  -h, --help               show help\n");
     printf("  -v, --version            show version\n");
+    printf("\nSession addressing:\n");
+    printf("  input.txt output.log uses output.log exactly.\n");
+    printf("  Bare SESSION names resolve to SESSION_DIR/SESSION.log.\n");
+    printf("  SESSION values containing '/' are explicit paths. Use ./name.log for cwd.\n");
 }
 
 static void print_version(void) {
@@ -2141,26 +2432,26 @@ static void print_memory_for_file(const char *path, long context_turns) {
     msglist_free(&ctx);
 }
 
-static int clear_memory_command(const char *path) {
-    if (!path || !*path) return 2;
-    TCBuffer b;
-    buffer_init(&b);
-    buffer_appendf(&b, "%s\n", TC_MEMORY_CLEAR);
-    append_file_text(path, b.data);
-    free(b.data);
-    fprintf(stderr, "memory clear marker appended to %s\n", path);
-    return 0;
-}
-
 static void write_context_snapshot_file(const char *path, const char *context_text) {
     TCBuffer b;
     buffer_init(&b);
-    buffer_appendf(&b, "%s\n", TC_CONTEXT_BEGIN);
-    buffer_append(&b, context_text ? context_text : "");
-    if (b.len && b.data[b.len - 1] != '\n') buffer_append(&b, "\n");
-    buffer_appendf(&b, "%s\n", TC_CONTEXT_END);
+    char *ts = now_hms();
+    buffer_appendf(&b, "[%s] system: CONTEXT_BEGIN\n", ts);
+    if (context_text && *context_text) {
+        buffer_append(&b, context_text);
+        if (b.len && b.data[b.len - 1] != '\n') buffer_append(&b, "\n");
+    }
+    buffer_appendf(&b, "[%s] system: CONTEXT_END\n", ts);
     append_file_text(path, b.data);
+    free(ts);
     free(b.data);
+}
+
+static int clear_memory_command(const char *path) {
+    if (!path || !*path) return 2;
+    write_context_snapshot_file(path, "");
+    fprintf(stderr, "empty memory snapshot appended to %s\n", path);
+    return 0;
 }
 
 static int edit_memory_command(const TCConfig *cfg, const char *path) {
@@ -2169,7 +2460,12 @@ static int edit_memory_command(const TCConfig *cfg, const char *path) {
     TCMessageList ctx = load_context_from_session(path, 9999);
     TCBuffer initial;
     buffer_init(&initial);
-    for (size_t i = 0; i < ctx.count; i++) buffer_appendf(&initial, "%s: %s\n", ctx.items[i].role, ctx.items[i].content);
+    for (size_t i = 0; i < ctx.count; i++) {
+        const char *label = strcasecmp(ctx.items[i].role, "assistant") == 0 ? "Assistant" : "User";
+        char *safe = snapshot_safe_line(ctx.items[i].content);
+        buffer_appendf(&initial, "%s: %s\n", label, safe);
+        free(safe);
+    }
     msglist_free(&ctx);
 
     char tmpl[PATH_MAX];
@@ -2194,7 +2490,6 @@ static int edit_memory_command(const TCConfig *cfg, const char *path) {
     size_t len = 0;
     char *edited = read_file(tmpl, &len);
     unlink(tmpl);
-    clear_memory_command(path);
     write_context_snapshot_file(path, edited);
     free(edited);
     fprintf(stderr, "memory snapshot appended to %s\n", path);
@@ -2209,7 +2504,7 @@ static int editor_prompt_command(const TCConfig *cfg, const char *output_path, T
     char *raw = openrouter_chat(cfg, base_args->model_override ? base_args->model_override : cfg->model, msg, &ctx, base_args);
     char *base = basename_no_ext(session);
     char *cleaned = extract_code_blocks(cfg, base, raw);
-    append_turn(session, base_args->model_override ? base_args->model_override : cfg->model, "editor", base_args, msg, cleaned);
+    append_turn(session, base_args->model_override ? base_args->model_override : cfg->model, "editor", base_args, msg, cleaned, &ctx, cfg->context_turns);
     printf("%s\n", cleaned);
     free(msg); free(raw); free(base); free(cleaned); msglist_free(&ctx);
     return 0;
@@ -2276,7 +2571,7 @@ static int interactive_send_message(TCConfig *cfg, const char *output_path, cons
     char *raw = openrouter_chat(cfg, model, text, ctx, pending_args);
     char *session_base = basename_no_ext(output_path);
     char *cleaned = extract_code_blocks(cfg, session_base, raw);
-    append_turn(output_path, model, "interactive", pending_args, text, cleaned);
+    append_turn(output_path, model, "interactive", pending_args, text, cleaned, ctx, cfg->context_turns);
     interactive_context_add(ctx, "user", text, cfg->context_turns);
     interactive_context_add(ctx, "assistant", cleaned, cfg->context_turns);
     printf("%s\n", cleaned);
@@ -2465,17 +2760,21 @@ int main(int argc, char **argv) {
         return rc;
     }
 
-    if (args.interactive && args.resume_session) {
-        char *resume_path = session_path_from_arg(&cfg, args.resume_session);
-        return interactive_loop(&cfg, &args, resume_path);
-    }
-
     if (args.interactive) {
-        if (args.output_path) {
-            fprintf(stderr, "interactive mode accepts at most one session/output path\n");
+        if (args.resume_session && args.output_path) {
+            fprintf(stderr, "interactive --resume accepts only one session name/path\n");
             return 2;
         }
-        return interactive_loop(&cfg, &args, args.input_path);
+        if (!args.resume_session && args.output_path) {
+            fprintf(stderr, "interactive mode accepts at most one session name/path\n");
+            return 2;
+        }
+        char *session_path = NULL;
+        if (args.resume_session) session_path = session_path_from_arg(&cfg, args.resume_session);
+        else if (args.input_path) session_path = session_path_from_arg(&cfg, args.input_path);
+        int rc = interactive_loop(&cfg, &args, session_path);
+        free(session_path);
+        return rc;
     }
 
     if (!args.input_path || !args.output_path) {
@@ -2496,7 +2795,7 @@ int main(int argc, char **argv) {
     char *session_base = basename_no_ext(args.output_path);
     char *cleaned = extract_code_blocks(&cfg, session_base, raw);
 
-    append_turn(args.output_path, model, args.input_path, &args, input_text, cleaned);
+    append_turn(args.output_path, model, args.input_path, &args, input_text, cleaned, &context, cfg.context_turns);
     fprintf(stderr, "appended response to %s\n", args.output_path);
     if (args.loopback) printf("%s\n", cleaned);
     if (args.loopback_file) {
