@@ -501,6 +501,18 @@ def set_config_value(config_file: Path, key: str, value: str) -> None:
         pass
 
 
+
+
+def config_key_present(config_file: Path, key: str) -> bool:
+    wanted = key.strip().upper()
+    if not wanted or not config_file.exists():
+        return False
+    for line in config_file.read_text(encoding="utf-8", errors="replace").splitlines():
+        if config_line_key(line) == wanted:
+            return True
+    return False
+
+
 def unset_config_value(config_file: Path, key: str) -> None:
     if not config_file.exists():
         return
@@ -1052,6 +1064,8 @@ def ensure_user_profile(cfg: Config, profile: UserProfile) -> None:
         chmod_private_dir(path)
     if not profile.config_file.exists():
         write_private_text(profile.config_file, initial_user_config_text(profile), mode=0o600)
+    if not config_key_present(profile.config_file, "MODEL"):
+        set_config_value(profile.config_file, "MODEL", "openrouter/auto")
     # Enforce per-user paths while preserving user-editable preferences.
     set_config_value(profile.config_file, "SESSION_DIR", str(profile.session_dir))
     set_config_value(profile.config_file, "ATTACHMENT_DIR", str(profile.attachment_dir))
@@ -1510,6 +1524,8 @@ def canonical_mailbot_command_word(word: str) -> str:
     command = normalize_keyword(word)
     aliases = {
         "?": "help",
+        "admin-help": "help-admin",
+        "operator-help": "help-admin",
         "manual": "manpage",
         "get-manpage": "manpage",
         "fetch-manpage": "manpage",
@@ -1564,6 +1580,7 @@ def canonical_mailbot_command_word(word: str) -> str:
 def known_mailbot_command_words() -> set[str]:
     return {
         "help",
+        "help-admin",
         "manpage",
         "config",
         "sessions",
@@ -1621,6 +1638,63 @@ def looks_like_mailbot_command_line(line: str, cfg: Config) -> bool:
     return command in known_mailbot_command_words()
 
 
+def normalized_command_tokens_for_compare(line: str) -> List[str]:
+    """Canonicalize a command line enough to compare common aliases.
+
+    This helper is only used for the intuitive repeated-subject command case.
+    It must not broadly convert ordinary subjects into commands, because
+    SUBJECT_SESSIONS=1 deliberately lets normal email subjects name chats.
+    """
+    text = (line or "").strip()
+    if not text:
+        return []
+    try:
+        parts = shlex.split(text)
+    except ValueError:
+        parts = text.split()
+    if not parts:
+        return []
+    parts[0] = canonical_mailbot_command_word(parts[0])
+    return parts
+
+
+def repeated_bare_command_subject_request(subject: str, cfg: Config, body: str) -> Optional[SubjectRequest]:
+    """Catch obvious bare help/manual subjects without stealing prompts.
+
+    A plain subject is normally a session name when SUBJECT_SESSIONS=1. That
+    remains true for ordinary prompts. This special case is intentionally narrow:
+    it handles the common user mistake Subject: help / Body: help, plus manual
+    and help-admin, but it does not turn every command-looking subject into
+    command mail.
+    """
+    if not cfg.allow_commands_in_subject:
+        return None
+    stripped, _saw_reply = strip_reply_prefixes(subject or "")
+    stripped = stripped.splitlines()[0].strip() if stripped else ""
+    if not stripped:
+        return None
+    marker = subject_marker(cfg)
+    if marker and stripped.casefold().startswith(marker.casefold()):
+        return None
+    if stripped.casefold() in {x.casefold() for x in cfg.body_command_subjects}:
+        return None
+
+    subject_tokens = normalized_command_tokens_for_compare(stripped)
+    intuitive_bare_commands = {"help", "manpage", "help-admin"}
+    if not subject_tokens or subject_tokens[0] not in intuitive_bare_commands:
+        return None
+
+    first_line = first_command_line_from_body(body)
+    if not first_line:
+        return SubjectRequest("command", stripped, raw=stripped)
+
+    body_tokens = normalized_command_tokens_for_compare(first_line)
+    if body_tokens and body_tokens == subject_tokens:
+        return SubjectRequest("command", first_line, raw=stripped)
+
+    return None
+
+
 def body_subject_request(subject: str, cfg: Config, body: str) -> Optional[SubjectRequest]:
     if not cfg.allow_body_command_subjects:
         return None
@@ -1651,7 +1725,10 @@ def body_subject_request(subject: str, cfg: Config, body: str) -> Optional[Subje
                 return SubjectRequest("command", "model-search " + shlex.quote(rest), raw=first_line)
             return SubjectRequest("command", "model-cache", raw=first_line)
     if looks_like_mailbot_command_line(first_line, cfg):
-        return SubjectRequest("command", maybe_append_body_arguments(first_line, body), raw=first_line)
+        # For Subject: MAILBOT / CMD, the first body line is already the
+        # complete command line. Do not append it to itself for commands that
+        # accept arguments, such as models or api-key.
+        return SubjectRequest("command", first_line, raw=first_line)
     return SubjectRequest("session", "new", raw=first_line, body_override=body)
 
 
@@ -1743,6 +1820,10 @@ def parse_subject_request(subject: str, cfg: Config, body: str = "") -> Optional
     body_request = body_subject_request(subject, cfg, body)
     if body_request is not None:
         return body_request
+
+    repeated_bare_command = repeated_bare_command_subject_request(subject, cfg, body)
+    if repeated_bare_command is not None:
+        return repeated_bare_command
 
     braced = subject_braced_regex(
         cfg.subject_prefix,
@@ -2691,6 +2772,8 @@ def public_command_allowed(cfg: Config, command_line: str) -> bool:
     command = normalize_keyword(command)
     public_aliases = {
         "?": "help",
+        "admin-help": "help-admin",
+        "operator-help": "help-admin",
         "manual": "manpage",
         "get-manpage": "manpage",
         "fetch-manpage": "manpage",
@@ -3215,12 +3298,13 @@ def mailbot_reply_footer(cfg: Config, status: str, session: str = "", command: s
         "",
         "MAILBOT COMMANDS",
         "",
-        "To use a mailbot command, send a new email with:",
+        "To use a mailbot command, put the command subject in the subject line",
+        "and put the command itself in the message body:",
         "",
         f"Subject: {command_subject}",
-        "Body: COMMAND [ARGUMENTS]",
+        "Message body: COMMAND [ARGUMENTS]",
         "",
-        "Common commands:",
+        "Common user commands:",
         "",
         "COMMAND               FUNCTION",
         "--------------------  --------------------------------------------",
@@ -3236,7 +3320,7 @@ def mailbot_reply_footer(cfg: Config, status: str, session: str = "", command: s
         "api-key KEY           Save this sender's OpenRouter API key.",
         "forget-api-key        Remove this sender's saved OpenRouter API key.",
         "",
-        f"For the complete command list, send Subject: {command_subject} with Body: help.",
+        f"For user help, send Subject: {command_subject} with Message body: help.",
     ])
     return "\n".join(lines).rstrip()
 
@@ -3330,353 +3414,185 @@ def mailbot_command_line(session: str, body: str, cfg: Config) -> str:
 
 
 def mailbot_command_help(cfg: Config) -> str:
-    marker = subject_marker(cfg)
-    open_d = cfg.session_open_delim
-    close_d = cfg.session_close_delim
-    body_subjects = ", ".join(cfg.body_command_subjects)
-    public_note = "enabled" if cfg.open_to_public else "disabled"
-    return f"""ttychatter.mailbot email commands
+    command_subject = footer_command_subject(cfg)
+    allowed_keys = ", ".join(cfg.user_ttyconfig_allowed_keys) or "none configured"
+    allowed_keys = "\n  ".join(textwrap.wrap(allowed_keys, width=72))
+    return f"""ttychatter.mailbot help for regular users
 
-Address private-mode mail to the bot from an ALLOWED_FROM sender. Preferred subject forms:
+This help is for ordinary mailbot use. It does not list administrator-only
+configuration commands or old compatibility syntaxes.
 
-  ordinary email subject      Uses the subject as this sender's private session name when SUBJECT_SESSIONS=1
-  Re: ordinary email subject  Resumes that same private session
-  {marker}CONFIG
-  {marker}MODELS
-  {marker}CMD
-  {marker}command args
-  {marker}{open_d}session-name{close_d}
-  {marker}{open_d}new{close_d}
-  {body_subjects}        first nonempty body line is the command or session selector
+BASIC USE
 
-Public mode:
-  open_to_public: {public_note}
-  In --open-to-public mode, non-control subjects are accepted as prompts.
-  With USER_REGISTRY=1 and SUBJECT_SESSIONS=1, public senders get per-sender homes, per-user configuration, per-user API-key storage, and subject-named private logs.
-  Registry users may use the normal user command set; commands operate inside that sender's private registry profile.
-  Without USER_REGISTRY=1, non-ALLOWED_FROM public senders may use only: {', '.join(cfg.public_allowed_commands)}
-  ALLOWED_FROM remains the private/admin allowlist for global mailbot controls such as {marker}CONFIG export/update.
-  Replies advertise the session name; replying with "Re: session-name" resumes it.
-  Expiring public logs are archived before deletion when PUBLIC_SESSION_ARCHIVE_ON_DELETE=1.
-  Public users may send {marker}archive-session on/off when PUBLIC_SESSION_ARCHIVE_USER_TOGGLE=1.
+To ask the AI a question, send an ordinary email to the bot.
 
-Body-command subjects:
-  Subject: MAILBOT
-  Body: sessions
+  Subject: any topic or session name
+  Body: your question or prompt
 
-  Subject: MAILBOT
-  Body: session worklog
-        Explain this attachment.
+When subject sessions are enabled, the subject is also your conversation name.
+Replying normally continues that conversation.
 
-Config/models/control:
-  {marker}CONFIG                  Export/apply mailbot config attachment
-  {marker}MODELS                  Return existing models-cache.json; no refresh
-  {marker}MODELS TEXT             Search existing model cache for TEXT; no refresh
-  {marker}CMD                     Run the first nonempty body line as a command
-  {marker}help                    Show this command list
-  {marker}manpage | manual        Return the plain-text mailbot manual as an attachment
+COMMAND USE
 
-Sessions:
-  {marker}sessions                List session names with head/tail log previews
-  {marker}search TEXT             Search all session logs
-  {marker}search-session SESSION TEXT
-                                  Search one session log
-  {marker}rename-session OLD NEW  Rename a session log
-  {marker}delete{open_d}SESSION{close_d}         Delete a session log
-  {marker}rm{open_d}SESSION{close_d}             Alias for delete{open_d}SESSION{close_d}
-  {marker}archive-session on|off|status
-                                  Public-mode archive-on-expire preference
+To run a mailbot command, send a new email like this:
 
-Model cache and model list:
-  {marker}MODELS                  Existing cache only; no OpenRouter fetch
-  {marker}model-cache             Same cache-only result as {marker}MODELS
-  {marker}update-models           Refresh cache, then return models-cache.json
-  {marker}model-search TEXT       Search existing model cache only
-  {marker}model-list [flags]      Run ttychatter.python --models with safe filter flags
-  {marker}models [flags]          Alias for model-list
-  {marker}routers [flags]         Run ttychatter.python --routers with safe filter flags
+  Subject: {command_subject}
+  Body: COMMAND [ARGUMENTS]
 
-Output delivery:
-  COMMAND_OUTPUT_MODE={cfg.command_output_mode}
-  MODEL_CACHE_OUTPUT={cfg.model_cache_output}
-  MODEL_SEARCH_OUTPUT={cfg.model_search_output}
-  MODEL_LIST_OUTPUT={cfg.model_list_output}
-  SESSIONS_OUTPUT={cfg.sessions_output}
-  CONFIG_OUTPUT={cfg.config_output}
+Put only the command line in the body when you want command mode.
 
-Model favorites/tests:
-  {marker}favorites               Run ttychatter.python --favorites
-  {marker}favorite-model MODEL    Run ttychatter.python --favorite-model MODEL
-  {marker}unfavorite-model MODEL  Run ttychatter.python --unfavorite-model MODEL
-  {marker}test-model MODEL        Run ttychatter.python --test-model MODEL
+HELP AND DOCUMENTATION
 
-Ttychatter utilities and per-user preferences:
-  {marker}user                    Show this sender's registry mapping and API-key source
-  {marker}ttyconfig | prefs       Run ttychatter.python --config in this sender's private HOME
-  {marker}ttydoctor               Run ttychatter.python --doctor
-  {marker}credits                 Run ttychatter.python --credits
-  {marker}show-memory SESSION     Run ttychatter.python --show-memory SESSION
-  {marker}clear-memory SESSION    Run ttychatter.python --clear-memory SESSION
-  {marker}tty-set KEY VALUE       Save an allowed ttychatter preference for this sender
-  {marker}set KEY VALUE           Alias for tty-set
-  {marker}tty-unset KEY           Remove an allowed ttychatter preference for this sender
-  {marker}api-key KEY             Save this sender's OpenRouter API key to a chmod 600 secret file
-  {marker}forget-api-key          Remove this sender's OpenRouter API key and fall back to the server key
+COMMAND             FUNCTION
+------------------  -----------------------------------------------
+help                Show this regular-user help response.
+manpage, manual     Email the full plain-text manual as an attachment.
 
-Allowed tty-set keys:
-  {', '.join(cfg.user_ttyconfig_allowed_keys)}
+USER PROFILE AND SETTINGS
 
-Compatibility:
-  Legacy braced controls remain accepted when ALLOW_LEGACY_BRACED_CONTROL=1.
+COMMAND             FUNCTION
+------------------  -----------------------------------------------
+user                Show your mailbot user profile and API-key source.
+prefs               Show your current ttychatter configuration.
+ttyconfig           Same as prefs.
+tty-set KEY VALUE   Set an allowed ttychatter preference.
+set KEY VALUE       Same as tty-set.
+tty-unset KEY       Remove an allowed ttychatter preference.
+unset KEY           Same as tty-unset.
+api-key KEY         Save your OpenRouter API key for your mailbot user.
+forget-api-key      Remove your saved OpenRouter API key.
 
-Safe model-list flags:
-  --all --sort VALUE --modellist-sort-tokens --min-input-tokens N --min-output-tokens N
-  --hide-preview --show-preview --require-tokens --allow-missing-tokens --model-type VALUE
+New user profiles are initialized with:
+
+  CONTEXT_TURNS=12
+  MODEL=openrouter/auto
+
+Allowed tty-set keys on this bot:
+  {allowed_keys}
+
+CONVERSATIONS AND SESSIONS
+
+COMMAND                     FUNCTION
+--------------------------  -----------------------------------------
+sessions                    List your saved sessions.
+search TEXT                 Search all of your session logs.
+search-session SESSION TEXT Search one session log.
+rename-session OLD NEW      Rename a session log.
+delete-session SESSION      Delete a session log.
+archive-session             Show your archive-on-expire preference.
+archive-session on          Save expiring public sessions before deletion.
+archive-session off         Do not save expiring public sessions.
+archive-session status      Show the archive preference status.
+
+MODELS
+
+COMMAND             FUNCTION
+------------------  -----------------------------------------------
+model-search TEXT   Search cached model data.
+models [FLAGS]      List available models using safe model-list flags.
+model-cache         Email cached model data without refreshing it.
+update-models       Refresh your model cache, then email the cached data.
+tty-set MODEL ID    Set your default model.
+tty-set MODEL openrouter/auto
+                    Use OpenRouter automatic model selection.
+favorites           List favorite models.
+favorite-model ID   Add a model to favorites.
+unfavorite-model ID Remove a model from favorites.
+test-model ID       Test a model.
+routers [FLAGS]     List available routers using safe router-list flags.
+
+SAFE MODEL-LIST FLAGS
+
+--all --sort VALUE --modellist-sort-tokens --min-input-tokens N
+--min-output-tokens N --hide-preview --show-preview --require-tokens
+--allow-missing-tokens --model-type VALUE
+
+OTHER USER UTILITIES
+
+COMMAND             FUNCTION
+------------------  -----------------------------------------------
+ttydoctor           Run ttychatter diagnostics for your user profile.
+credits             Show credit/status information from ttychatter.
+show-memory SESSION Show memory for a session.
+clear-memory SESSION
+                    Clear memory for a session.
+
+For the full plain-text manual, send:
+
+  Subject: {command_subject}
+  Body: manpage
+
+Administrators can request operator-only help from an ALLOWED_FROM address:
+
+  Subject: {command_subject}
+  Body: help-admin
 """
 
 
-def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
-    subject_prefix = cfg.subject_prefix if cfg else "tc"
-    subject_separator = cfg.subject_separator if cfg else ":"
-    open_d = cfg.session_open_delim if cfg else "{"
-    close_d = cfg.session_close_delim if cfg else "}"
-    marker = subject_marker(cfg) if cfg else subject_marker_from_parts(subject_prefix, subject_separator)
-    config_token = cfg.config_subject_token if cfg else "CONFIG"
-    models_token = cfg.models_subject_token if cfg else "MODELS"
-    command_token = cfg.command_subject_token if cfg else "CMD"
-    body_subjects = ",".join(cfg.body_command_subjects) if cfg else "MAILBOT,CMD"
-    return textwrap.dedent(f"""\
-    .TH TTYCHATTER.MAILBOT 1 "May 2026" "ttychatter.mailbot {VERSION}" "User Commands"
-    .SH NAME
-    ttychatter.mailbot \\- email transport adapter and remote control surface for ttychatter
-    .SH SYNOPSIS
-    .B ttychatter.mailbot
-    [--config-file PATH] [--once|--daemon] [--dry-run] [--open-to-public]
-    .PP
-    .B ttychatter.mailbot
-    [--doctor] [--list-candidates] [--cleanup-public-sessions]
-    .PP
-    .B ttychatter.mailbot
-    [--config|--raw-config] [--sessions|--list-sessions] [--manpage]
-    [--model-cache] [--model-search TEXT] [--update-models]
-    [--delete-session SESSION]
-    .PP
-    .B ttychatter.mailbot
-    [--set KEY VALUE] [--unset KEY] [--set-imap-password [--gpg]]
-    [--set-smtp-password [--gpg]]
-    .SH DESCRIPTION
-    ttychatter.mailbot reads unread IMAP mail, maps each accepted message to a
-    chat session or an allowlisted control command, calls ttychatter.python when
-    chat or ttychatter utility work is needed, and replies by sendmail or SMTP.
-    .PP
-    Private mode requires ALLOWED_FROM. Public mode, enabled by
-    .B --open-to-public
-    or OPEN_TO_PUBLIC=1, accepts mail from any non-rejected sender.
-    .PP
-    USER_REGISTRY=1 maps each accepted sender to a private ttychatter HOME,
-    per-user configuration, per-user API-key storage, session directory,
-    attachment directory, and model cache. Registry users may use the normal
-    user command set; those commands operate on the sender's own registry
-    profile. When USER_REGISTRY=0, non-ALLOWED_FROM public senders remain
-    limited to PUBLIC_ALLOWED_COMMANDS.
-    .PP
-    SUBJECT_SESSIONS=1 lets ordinary email subjects become per-sender session
-    names; Re: replies resume the same sender/session pair. ALLOWED_FROM remains
-    the private/admin allowlist for global mailbot controls such as config
-    export/update.
-    .SH PRIVATE SUBJECT GRAMMAR
-    .TP
-    .B ordinary email subject
-    Send the message body to this sender's private subject-named session when
-    SUBJECT_SESSIONS=1. Reply prefixes such as Re: and Fwd: are stripped.
-    .TP
-    .B {marker}{open_d}session-name{close_d}
-    Send the message body to the named ttychatter session.
-    .TP
-    .B {marker}{open_d}new{close_d}
-    Start a new unnamed chat. The mailbot passes no session argument, so
-    ttychatter.python creates its normal timestamped session name.
-    .TP
-    .B {marker}{config_token}
-    Export or apply the mailbot config attachment.
-    .TP
-    .B {marker}{models_token}
-    Return the existing MODEL_CACHE_FILE as models-cache.json. This is cache-only;
-    it does not call ttychatter.python --update-models.
-    .TP
-    .B {marker}{models_token} TEXT
-    Search the existing model cache for TEXT. This is also cache-only.
-    .TP
-    .B {marker}{command_token}
-    Run the first nonempty message-body line as a mailbot command.
-    .TP
-    .B {marker}command args
-    Run a mailbot command directly from the subject.
-    .TP
-    .B MAILBOT
-    When included in BODY_COMMAND_SUBJECTS, use the first nonempty body line as
-    the command or session selector. "session NAME" and "chat NAME" route the
-    remaining body to that chat session.
-    .SH PUBLIC DEMO MODE
-    In public mode, a message without a recognized control subject is treated as
-    an AI prompt. PUBLIC_SESSION_MODE controls isolation: per-sender, per-message,
-    or shared. The default is per-sender. Replies to public users use
-    "Re: public-session-name" so the user can resume by replying with that subject.
-    .PP
-    Public sessions use PUBLIC_SESSION_PREFIX and are cleaned up automatically
-    when PUBLIC_SESSION_CLEANUP=1. PUBLIC_SESSION_IDLE_HOURS,
-    PUBLIC_SESSION_TTL_HOURS, and PUBLIC_SESSION_MAX_COUNT control deletion.
-    PUBLIC_SESSION_MAX_TURNS trims surviving public logs to the most recent
-    input/output cycles. Cleanup matches PUBLIC_SESSION_PREFIX-*.log logs and
-    the configured shared public log when PUBLIC_SESSION_MODE=shared.
-    .PP
-    When PUBLIC_SESSION_ARCHIVE_ON_DELETE=1, an expiring public log is emailed
-    to the recorded sender before local deletion. PUBLIC_SESSION_ARCHIVE_USER_TOGGLE=1
-    lets public users change their own preference with archive-session on/off.
-    PUBLIC_SESSION_ARCHIVE_FAILURE_POLICY=keep refuses deletion when archive
-    sending fails; delete removes the local log anyway.
-    .SH COMMANDS
-    .TP
-    .B help
-    Return the email command summary.
-    .TP
-    .B manpage
-    Return the mailbot manual as a plain-text email attachment. Aliases: manual, get-manpage, fetch-manpage.
-    .TP
-    .B sessions
-    List saved session names with short head and tail previews.
-    .TP
-    .B search TEXT
-    Search all session logs for TEXT.
-    .TP
-    .B search-session SESSION TEXT
-    Search one session log.
-    .TP
-    .B rename-session OLD NEW
-    Rename a session log.
-    .TP
-    .B delete-session SESSION
-    Delete a session log. Aliases: delete, rm, remove-session, rm-session.
-    The target must resolve inside SESSION_DIR and the supplied name must already
-    be the exact sanitized session name. Use --dry-run locally to show the path
-    that would be deleted without deleting it.
-    .TP
-    .B archive-session [on|off|status]
-    Show or change the sender's public-mode archive-on-expire preference. Aliases:
-    archive-opt-in and archive-opt-out.
-    .TP
-    .B user
-    Show this sender's registry id, private HOME, per-user config path, and
-    API-key source.
-    .TP
-    .B prefs
-    Show this sender's ttychatter configuration. Alias for ttyconfig.
-    .TP
-    .B tty-set KEY VALUE
-    Set an allowlisted per-user ttychatter preference. The allowed list is
-    USER_TTYCONFIG_ALLOWED_KEYS. Alias: set.
-    .TP
-    .B tty-unset KEY
-    Remove an allowlisted per-user ttychatter preference. Alias: unset.
-    .TP
-    .B api-key KEY
-    Store this sender's OpenRouter API key in USER_SECRET_DIR as a chmod 600
-    secret file. The key is not written to .config. Alias: set-api-key.
-    .TP
-    .B forget-api-key
-    Remove this sender's stored OpenRouter API key and fall back to the server
-    default key file.
-    .TP
-    .B model-cache
-    Return the existing MODEL_CACHE_FILE only. Never refreshes the cache.
-    .TP
-    .B model-search TEXT
-    Search the existing model cache only. Never refreshes the cache.
-    .TP
-    .B update-models
-    Explicitly run ttychatter.python --update-models, then return models-cache.json.
-    .TP
-    .B model-list [FLAGS]
-    Run ttychatter.python --models. Aliases include models and list-models.
-    .TP
-    .B routers [FLAGS]
-    Run ttychatter.python --routers.
-    .SH OUTPUT MODES
-    COMMAND_OUTPUT_MODE, MODEL_CACHE_OUTPUT, MODEL_SEARCH_OUTPUT,
-    MODEL_LIST_OUTPUT, SESSIONS_OUTPUT, and CONFIG_OUTPUT accept auto, body, or
-    attachment. The default is auto globally, with short search/session results
-    in the body and large cache/config results as attachments.
-    .SH CONFIGURATION KEYS
-    Important keys include IMAP_HOST, IMAP_PORT, IMAP_SSL, IMAP_USER,
-    IMAP_PASSWORD, IMAP_PASSWORD_GPG_FILE, SEND_METHOD, SENDMAIL_PATH,
-    MAIL_FROM, MAIL_TO, ALLOWED_FROM, DENY_FROM, BANNED_FROM, BANNED_LIST, REJECT_SELF_SENDER, SUBJECT_PREFIX, SUBJECT_SEPARATOR,
-    SESSION_OPEN_DELIM, SESSION_CLOSE_DELIM, BODY_COMMAND_SUBJECTS,
-    ALLOW_COMMANDS_IN_SUBJECT, ALLOW_BODY_COMMAND_SUBJECTS,
-    ALLOW_BARE_CONTROL_SUBJECTS, ALLOW_LEGACY_BRACED_CONTROL,
-    RE_SESSION_SUBJECTS, OPEN_TO_PUBLIC, PUBLIC_SESSION_MODE,
-    PUBLIC_SESSION_PREFIX, PUBLIC_SHARED_SESSION, PUBLIC_ALLOW_NAMED_SESSIONS,
-    PUBLIC_ALLOWED_COMMANDS, PUBLIC_SESSION_CLEANUP, PUBLIC_SESSION_TTL_HOURS,
-    PUBLIC_SESSION_IDLE_HOURS, PUBLIC_SESSION_MAX_COUNT,
-    PUBLIC_SESSION_MAX_TURNS, PUBLIC_SESSION_INDEX_FILE,
-    PUBLIC_SESSION_ARCHIVE_ON_DELETE, PUBLIC_SESSION_ARCHIVE_USER_TOGGLE,
-    PUBLIC_SESSION_ARCHIVE_FAILURE_POLICY, PUBLIC_SESSION_ARCHIVE_MAX_BYTES,
-    USER_REGISTRY, SUBJECT_SESSIONS, USER_REGISTRY_FILE, USER_HOME_ROOT,
-    USER_SECRET_DIR, DEFAULT_OPENROUTER_API_KEY_FILE,
-    MIGRATE_PLAINTEXT_OPENROUTER_API_KEY, ALLOW_USER_API_KEYS,
-    USER_TTYCONFIG_ALLOWED_KEYS, SPAM_PROTECTION, SPAM_MAX_RECIPIENTS,
-    RATE_LIMIT_ENABLED, RATE_LIMIT_DB, RATE_LIMIT_WINDOW_SECONDS,
-    RATE_LIMIT_SENDER_MESSAGES, RATE_LIMIT_GLOBAL_MESSAGES,
-    RATE_LIMIT_PUBLIC_SENDER_MESSAGES, RATE_LIMIT_PUBLIC_GLOBAL_MESSAGES,
-    ABUSE_LIMIT_ALLOWED_FROM, MAX_MESSAGE_BYTES, MAX_ATTACHMENT_COUNT,
-    MAX_TOTAL_ATTACHMENT_BYTES, DAILY_QUOTA_ENABLED, DAILY_QUOTA_DB,
-    DAILY_QUOTA_SENDER_MESSAGES, DAILY_QUOTA_PUBLIC_SENDER_MESSAGES,
-    DAILY_QUOTA_GLOBAL_MESSAGES, MAX_SESSIONS_PER_SENDER,
-    API_COST_PROTECTION, API_MAX_INPUT_CHARS, API_MAX_ESTIMATED_TOKENS,
-    API_MAX_ATTACHMENT_BYTES, MODEL_CACHE_FILE,
-    SESSION_DIR, ATTACHMENT_DIR, WORK_DIR, PROCESSED_DB, COMMAND_OUTPUT_MODE,
-    MODEL_CACHE_OUTPUT, MODEL_SEARCH_OUTPUT, MODEL_LIST_OUTPUT, SESSIONS_OUTPUT,
-    CONFIG_OUTPUT, OUTPUT_INLINE_MAX_BYTES, MAX_COMMAND_OUTPUT_BYTES, and
-    MAX_OUTGOING_ATTACHMENT_BYTES.
-    .SH SECURITY
-    Public mode should use a separate mailbox, conservative attachment/body
-    limits, USER_REGISTRY=1, per-sender registry homes, and subject sessions.
-    With USER_REGISTRY=1, user commands such as sessions, model tools, api-key,
-    tty-set, and tty-unset operate inside the sender's private registry profile.
-    ALLOWED_FROM remains the private/admin allowlist for global mailbot config
-    export/update. With USER_REGISTRY=0, non-ALLOWED_FROM public senders are
-    limited to PUBLIC_ALLOWED_COMMANDS.
-    .PP
-    OpenRouter keys are loaded from DEFAULT_OPENROUTER_API_KEY_FILE or a
-    per-user secret file and injected into the ttychatter subprocess environment.
-    The mailbot migrates legacy plaintext API-key lines out of the ttychatter
-    config when MIGRATE_PLAINTEXT_OPENROUTER_API_KEY=1.
-    .PP
-    SPAM_PROTECTION rejects auto-submitted/list/bulk mail and recipient floods.
-    RATE_LIMIT_ENABLED enforces rolling sender/global work caps. DAILY_QUOTA_ENABLED
-    enforces daily sender/global caps. MAX_MESSAGE_BYTES, MAX_ATTACHMENT_COUNT,
-    MAX_TOTAL_ATTACHMENT_BYTES, MAX_SESSIONS_PER_SENDER, and API_COST_PROTECTION
-    protect the mail-to-API boundary before ttychatter is called. Enforce SPF,
-    DKIM, DMARC, greylisting, and reputation at the MTA.
-    .SH FILES
-    Default config: ~/.config/ttychatter/mailbot/config
-    .PP
-    Default processed-message database: ~/.local/state/ttychatter/mailbot/processed-ids.txt
-    .PP
-    Default user registry: ~/.local/state/ttychatter/mailbot/users.json
-    .PP
-    Default per-user homes: ~/.local/state/ttychatter/mailbot/users/
-    .PP
-    Default server OpenRouter key: ~/.secrets/ttychatter/mailbot/openrouter-default.key
-    .PP
-    Default per-user OpenRouter keys: ~/.secrets/ttychatter/mailbot/openrouter-users/
-    .PP
-    Default session directory without USER_REGISTRY: ~/.local/share/ttychatter/openrouter/sessions
-    .PP
-    Default model cache without USER_REGISTRY: ~/.config/ttychatter/openrouter/models-cache.json
-    .SH EXIT STATUS
-    0 indicates success. Nonzero status indicates configuration, IMAP, SMTP,
-    sendmail, or ttychatter subprocess failure.
-    """).strip() + "\n"
+def mailbot_admin_help(cfg: Config) -> str:
+    marker = subject_marker(cfg)
+    command_subject = footer_command_subject(cfg)
+    models_token = cfg.models_subject_token or "MODELS"
+    config_token = cfg.config_subject_token or "CONFIG"
+    body_subjects = ", ".join(cfg.body_command_subjects) or "none configured"
+    public_note = "enabled" if cfg.open_to_public else "disabled"
+    return f"""ttychatter.mailbot administrator help
+
+This help is for ALLOWED_FROM senders. Regular users should use:
+
+  Subject: {command_subject}
+  Body: help
+
+ADMIN IDENTITY AND ACCESS
+
+ALLOWED_FROM is the private/operator allowlist. In public mode, registered
+users get their own per-user state under USER_HOME_ROOT and may use normal user
+commands inside that profile. ALLOWED_FROM remains required for global mailbot
+configuration export/update.
+
+Public mode: {public_note}
+Body-command subjects: {body_subjects}
+
+GLOBAL MAILBOT CONFIGURATION
+
+COMMAND/SUBJECT                  FUNCTION
+-------------------------------  --------------------------------------
+{marker}{config_token:<28} Export global mailbot config.
+{marker}{config_token:<28} with attachment
+                                 Apply edited global mailbot config.
+
+MODEL CACHE SHORTHANDS
+
+COMMAND/SUBJECT                  FUNCTION
+-------------------------------  --------------------------------------
+{marker}{models_token:<28} Return existing model cache only.
+{marker}{models_token} TEXT{max(1, 25 - len(models_token)) * ' '} Search existing model cache for TEXT.
+{marker}model-cache{17 * ' '} Same cache-only model response.
+{marker}update-models{16 * ' '} Refresh model cache.
+
+COMMAND ROUTING FOR OPERATORS
+
+Preferred command mail:
+
+  Subject: {command_subject}
+  Body: COMMAND [ARGUMENTS]
+
+Compatibility control subjects remain accepted when enabled:
+
+  {marker}CMD
+  {marker}command args
+  {marker}{cfg.session_open_delim}session-name{cfg.session_close_delim}
+  {marker}{cfg.session_open_delim}new{cfg.session_close_delim}
+
+ADMIN NOTES
+
+- Use help for the regular-user command list.
+- Use manpage for the full plain-text manual.
+- Use ttydoctor for runtime diagnostics.
+- Non-ALLOWED_FROM users cannot export or apply the global mailbot config.
+- Without USER_REGISTRY=1, public command mail falls back to PUBLIC_ALLOWED_COMMANDS:
+  {', '.join(cfg.public_allowed_commands)}
+"""
 
 
 def mailbot_manpage_candidates(cfg: Optional[Config] = None) -> List[Path]:
@@ -3965,6 +3881,8 @@ def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = Fal
     args = tokens[1:]
     aliases = {
         "?": "help",
+        "admin-help": "help-admin",
+        "operator-help": "help-admin",
         "manual": "manpage",
         "get-manpage": "manpage",
         "fetch-manpage": "manpage",
@@ -4023,6 +3941,17 @@ def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = Fal
     if command == "help":
         return True, mailbot_command_help(cfg), []
 
+    if command == "help-admin":
+        if not private_allowed_sender(sender, cfg):
+            command_subject = footer_command_subject(cfg)
+            return False, (
+                "help-admin is available only to ALLOWED_FROM senders.\n\n"
+                "For regular-user help, send:\n\n"
+                f"  Subject: {command_subject}\n"
+                "  Body: help\n"
+            ), []
+        return True, mailbot_admin_help(cfg), []
+
     if command == "manpage":
         manual = mailbot_manual_text(cfg)
         data = manual.encode("utf-8")
@@ -4032,6 +3961,12 @@ def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = Fal
         return True, body, [ReplyAttachment("ttychatter.mailbot-manual.txt", data, "text", "plain")]
 
     if command == "config":
+        if sender and not private_allowed_sender(sender, cfg):
+            return False, (
+                "config is an administrator command. "
+                "User commands operate on your private mailbot profile; "
+                "global mailbot configuration export/update is not available here.\n"
+            ), []
         body, attachments = deliver_text_output(
             cfg,
             "config",
@@ -4354,7 +4289,16 @@ def process_mailbot_command_message(cfg: Config, conn: imaplib.IMAP4, uid: bytes
         return False
 
     body = extract_body(msg, cfg.max_body_bytes)
-    command_line = maybe_append_body_arguments(command_line, body) if command_line else (first_command_line_from_body(body) or "help")
+    body_first_line = first_command_line_from_body(body)
+    if command_line:
+        if body_first_line and command_line.strip() == body_first_line.strip():
+            # Body-command subjects already supplied the command as the first
+            # body line. Avoid converting Body: models into "models models".
+            command_line = command_line.strip()
+        else:
+            command_line = maybe_append_body_arguments(command_line, body)
+    else:
+        command_line = body_first_line or "help"
     ok, output, attachments = dispatch_mailbot_command(cfg, command_line, dry_run=dry_run, sender=message_sender(msg))
     reply = build_control_reply(cfg, msg, command_line, output, ok, attachments)
 
