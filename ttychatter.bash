@@ -62,7 +62,7 @@
 set -o pipefail
 
 PROGRAM="ttychatter.bash"
-VERSION="0.13.0-bash-only"
+VERSION="0.14.0-bash-only-parity"
 CONFIG_DIR="$HOME/.config/ttychatter/openrouter"
 CONFIG_FILE="$CONFIG_DIR/config"
 MODEL_CACHE_FILE="$CONFIG_DIR/models-cache.json"
@@ -89,7 +89,8 @@ MODEL_TEST_PROMPT="Please reply with a short sentence confirming this model is a
 DEMO_MODE=0
 STARTUP_NOTICE=1
 PROJECT_LEAD_NAME="remfan1994"
-PROJECT_LEAD_NOTICE="I strongly encourage everyone to get cruetly-free VEGETARIAN food and remember the 'bloodguilt' curse from the Bible.  -Project Lead, remfan1994"
+PROJECT_LEAD_NOTICE="Everyone is encouraged to get the cruelty-free vegetarian alternatives and remember the bloodguilt curse from the Bible... http://bloodguiltcurse.net"
+TC_PRECHAT_LINE="$PROJECT_LEAD_NOTICE"
 USER_NAME="$(whoami 2>/dev/null || printf user)"
 CONTEXT_BUFFER=()
 ATTACH_FILES=()
@@ -104,6 +105,27 @@ UNSET_KEY=""
 RUNTIME_SEND_OVERRIDE=""
 LOOPBACK=0
 LOOPBACK_FILE=""
+SESSION_AUTO_TITLE=0
+SESSION_TITLE_MODEL="openrouter/auto"
+SESSION_TITLE_MAX_WORDS=8
+STREAM=0
+STATUS_UPDATES=0
+VOICE_INPUT_CMD=""
+VOICE_OUTPUT_CMD=""
+VOICE_OUTPUT=0
+PROMPT_TEXT=""
+INPUT_FILE=""
+OUTPUT_PATH=""
+INTERACTIVE=0
+FORCE_NEW=0
+TURN_SESSION=""
+TURN_NUMBER=""
+EXPORT_SESSION=""
+EXPORT_FORMAT="markdown"
+VOICE_INPUT_PATH=""
+SPEAK_OVERRIDE=""
+SEARCH_QUERY=""
+SEARCH_ALL=0
 
 # ==========================================================
 # BASIC HELPERS
@@ -136,6 +158,16 @@ truthy() { case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in 1|yes|y|tr
 # behavior changes.
 # ----------------------------------------------------------
 normalize_model_id() { case "$1" in models/*) printf '%s\n' "${1#models/}";; *) printf '%s\n' "$1";; esac; }
+sanitize_session_name() {
+  local cleaned
+  cleaned="$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_' | sed 's/^[_ .-]*//; s/[_ .-]*$//')"
+  [ -n "$cleaned" ] || cleaned="session"
+  printf '%s\n' "$cleaned"
+}
+effective_model() { if [ -n "$MODEL" ]; then normalize_model_id "$MODEL"; else printf '%s
+' "$FALLBACK_MODEL"; fi; }
+model_label() { if [ -n "$MODEL" ]; then normalize_model_id "$MODEL"; else printf '%s (fallback; no MODEL configured)
+' "$FALLBACK_MODEL"; fi; }
 # ----------------------------------------------------------
 # MAINTAINER COMMENTARY: function json_escape_stream
 # json_escape_stream is part of the dependency-light client behavior.
@@ -235,6 +267,14 @@ load_config() {
       CODE_ATTACHMENT_MIN_LINES) CODE_ATTACHMENT_MIN_LINES="$value" ;;
       DEMO_MODE) DEMO_MODE="$value" ;;
       STARTUP_NOTICE) STARTUP_NOTICE="$value" ;;
+      SESSION_AUTO_TITLE) SESSION_AUTO_TITLE="$value" ;;
+      SESSION_TITLE_MODEL) SESSION_TITLE_MODEL="$(normalize_model_id "$value")" ;;
+      SESSION_TITLE_MAX_WORDS) SESSION_TITLE_MAX_WORDS="$value" ;;
+      STREAM) STREAM="$value" ;;
+      STATUS_UPDATES|PROGRESS_UPDATES) STATUS_UPDATES="$value" ;;
+      VOICE_INPUT_CMD|TRANSCRIBE_CMD) VOICE_INPUT_CMD="$value" ;;
+      VOICE_OUTPUT_CMD|TTS_CMD) VOICE_OUTPUT_CMD="$value" ;;
+      VOICE_OUTPUT|TTS) VOICE_OUTPUT="$value" ;;
     esac
   done < "$CONFIG_READ_FILE"
 }
@@ -381,9 +421,17 @@ help_menu() {
 $PROGRAM (bash-only edition) - dependency-light OpenRouter terminal chat client
 
 USAGE
-    $PROGRAM [session]
+    $PROGRAM
+    $PROGRAM input.txt
+    $PROGRAM input.txt output.log
+    $PROGRAM -i [session]
+    $PROGRAM --prompt TEXT
+    $PROGRAM --input FILE [--output FILE]
+    $PROGRAM --session SESSION
     $PROGRAM --resume <session>
     $PROGRAM --list
+    $PROGRAM --rename-session SESSION TITLE
+    $PROGRAM --search QUERY [--all-sessions]
     $PROGRAM --models [--model-type TYPE]
     $PROGRAM --favorites
     $PROGRAM --favorite-model MODEL
@@ -398,7 +446,15 @@ USAGE
     $PROGRAM --select-model [--save]
     $PROGRAM --test-model <model> [--save]
     $PROGRAM --set-api-key
+    $PROGRAM --forget-api-key
     $PROGRAM --attach FILE [session]
+    $PROGRAM --stream | --no-stream
+    $PROGRAM --status | --no-status
+    $PROGRAM --voice-input FILE | --transcribe FILE
+    $PROGRAM --speak | --no-speak
+    $PROGRAM --turns SESSION
+    $PROGRAM --branch SESSION TURN
+    $PROGRAM --export SESSION [--format markdown|text] [--output FILE]
     $PROGRAM --loopback [session]
     $PROGRAM --loopback-file PATH [session]
     $PROGRAM --credits
@@ -422,6 +478,11 @@ INPUT
     SEND_INPUT=ctrl_d keeps multiline Ctrl+D behavior.
     SEND_INPUT=enter reads one line per message.
 
+SESSION TITLES
+    Logs keep timestamped filenames. --list shows session-title metadata when present.
+    --rename-session changes title metadata, not the filename.
+    Optional AI title metadata is off by default: SESSION_AUTO_TITLE=0.
+
 OPENROUTER HELP
     Model docs:      https://openrouter.ai/docs/models
     Models API:      https://openrouter.ai/docs/api-reference/models/get-models
@@ -444,6 +505,22 @@ RUNTIME COMMAND MODE
         :attach /path/to/file.txt
         :editor
         :credits
+
+MODEL FILTER ALIASES
+    --routers                       Show router/free routes in model list
+    --show-preview | --hide-preview Control model preview text
+    --require-tokens | --allow-missing-tokens
+                                    Control token metadata filtering
+    --min-input-tokens N             Filter by input-token capacity when available
+    --min-output-tokens N            Filter by output-token capacity when available
+    --unbookmark-model MODEL         Alias for --unfavorite-model
+
+COMPATIBILITY / TESTING
+    --demo                           Use local demo responses and demo model rows
+    --interactive                    Alias for -i
+    --new                            Force a fresh timestamped session
+    --progress | --no-progress       Aliases for --status/--no-status
+    --edit-turn SESSION TURN         Not implemented in bash-only; use C or python helper
 
 NOTES
     This edition uses Bash and basic Unix tools only. JSON parsing is
@@ -469,7 +546,7 @@ Project focus:
   and forth to an AI.
 
 Project Lead notice:
-  I strongly encourage everyone to get cruetly-free VEGETARIAN food and remember the 'bloodguilt' curse from the Bible.  -Project Lead, remfan1994
+  Everyone is encouraged to get the cruelty-free vegetarian alternatives and remember the bloodguilt curse from the Bible... http://bloodguiltcurse.net
 EOF
 }
 
@@ -754,14 +831,78 @@ test_model() { local model="$1"; printf 'Model: %s\nPrompt: %s\n\n' "$model" "$M
 # Changes should preserve old-system usability and update docs/comments if
 # behavior changes.
 # ----------------------------------------------------------
-resolve_session_path() { printf '%s/%s.log\n' "$SESSION_DIR" "$1"; }
-# ----------------------------------------------------------
-# MAINTAINER COMMENTARY: function list_sessions
-# list_sessions is part of the dependency-light client behavior. Changes
-# should preserve old-system usability and update docs/comments if behavior
-# changes.
-# ----------------------------------------------------------
-list_sessions() { for f in "$SESSION_DIR"/*.log; do [ -e "$f" ] && basename "$f" .log; done; }
+resolve_session_path() { printf '%s/%s.log
+' "$SESSION_DIR" "$1"; }
+
+resolve_session_arg() {
+  case "$1" in
+    */*|*.log) printf '%s
+' "$1" ;;
+    *) printf '%s/%s.log
+' "$SESSION_DIR" "$(sanitize_session_name "$1")" ;;
+  esac
+}
+
+session_title_clean() {
+  local max="${2:-8}"
+  case "$max" in ''|*[!0-9]*) max=8 ;; esac
+  [ "$max" -lt 1 ] && max=8
+  printf '%s
+' "$1" | tr '
+	' '   ' | awk -v max="$max" '
+    { gsub(/[[:cntrl:]]/," "); gsub(/[[:space:]]+/," "); sub(/^[[:space:]]+/,""); sub(/[[:space:]]+$/,"");
+      lower=tolower($0); if (lower ~ /^session[ -]?title:/ || lower ~ /^title:/) sub(/^[^:]*:[[:space:]]*/,"");
+      gsub(/^["`*.-]+/,""); gsub(/["`*.-]+$/,"");
+      n=split($0,w," "); out=""; for(i=1;i<=n && i<=max;i++){ if(w[i]!="") out=(out?out" ":"") w[i]; }
+      if(length(out)>96) out=substr(out,1,96); sub(/[[:space:]]+$/,"",out); if(out!="") print out; }'
+}
+
+session_title_from_file() {
+  local path="$1" raw
+  [ -f "$path" ] || return 1
+  raw="$(awk 'BEGIN{IGNORECASE=1} /session-title:/ { line=$0; sub(/^.*session-title:[[:space:]]*/,"",line); val=line } END{ if(val!="") print val }' "$path")"
+  [ -n "$raw" ] || return 1
+  session_title_clean "$raw" "$SESSION_TITLE_MAX_WORDS"
+}
+
+write_session_title_metadata() {
+  local path="$1" title clean
+  title="$2"
+  clean="$(session_title_clean "$title" "$SESSION_TITLE_MAX_WORDS")"
+  [ -n "$clean" ] || return 1
+  mkdir -p "$(dirname "$path")"
+  printf '[%s] system: session-title: %s
+' "$(timestamp)" "$clean" >> "$path"
+}
+
+ensure_prechat_line() {
+  local path="$1"
+  mkdir -p "$(dirname "$path")"
+  if [ ! -s "$path" ]; then
+    printf '%s
+' "$TC_PRECHAT_LINE" > "$path"
+  fi
+}
+
+list_sessions() {
+  local f base title shown=0
+  mkdir -p "$SESSION_DIR"
+  printf '%-42s %s
+' "TITLE" "FILE"
+  printf '%-42s %s
+' "-----" "----"
+  for f in "$SESSION_DIR"/*.log; do
+    [ -e "$f" ] || continue
+    base="$(basename "$f" .log)"
+    title="$(session_title_from_file "$f" 2>/dev/null || true)"
+    [ -n "$title" ] || title="$base"
+    printf '%-42.42s %s
+' "$title" "$(basename "$f")"
+    shown=1
+  done
+  [ "$shown" -eq 1 ] || printf '%s
+' "no saved sessions"
+}
 # ----------------------------------------------------------
 # MAINTAINER COMMENTARY: function add_context
 # Maintains rolling conversation memory for chat continuity.
@@ -918,8 +1059,8 @@ General:
   :doctor                 Run diagnostics
 
 Sessions:
-  :list                   List saved sessions
-  :rename NAME            Rename current session/log file
+  :list                   List saved sessions with friendly titles
+  :rename TITLE           Set friendly session-title metadata
 
 Models:
   :models                 Show model list
@@ -947,6 +1088,14 @@ Files and editor:
   :attach FILE            Attach FILE to next message
   :attachments            List saved attachments
   :editor                 Compose a prompt in VISUAL/EDITOR/vi/nano and send it
+  :turns                  List message numbers
+  :branch N               Branch current session after message N
+  :search TEXT            Search current session
+  :search-all TEXT        Search all saved sessions
+  :stream on|off          Toggle requested streaming mode
+  :status on|off          Toggle local status updates
+  :voice FILE             Transcribe FILE with VOICE_INPUT_CMD and send
+  :speak on|off|last      Toggle/speak with VOICE_OUTPUT_CMD
 
 Use Ctrl+D after a colon command, just as you do for chat messages.
 Type \: at the beginning if you really want to send a message beginning with :.
@@ -961,6 +1110,14 @@ print_config_summary() {
   printf 'ATTACHMENT_DIR=%s\n' "$ATTACHMENT_DIR"
   printf 'MODEL_TEST_PROMPT=%s\n' "$MODEL_TEST_PROMPT"
   printf 'STARTUP_NOTICE=%s\n' "$STARTUP_NOTICE"
+  printf 'SESSION_AUTO_TITLE=%s\n' "$SESSION_AUTO_TITLE"
+  printf 'SESSION_TITLE_MODEL=%s\n' "$SESSION_TITLE_MODEL"
+  printf 'SESSION_TITLE_MAX_WORDS=%s\n' "$SESSION_TITLE_MAX_WORDS"
+  printf 'STREAM=%s\n' "$STREAM"
+  printf 'STATUS_UPDATES=%s\n' "$STATUS_UPDATES"
+  printf 'VOICE_INPUT_CMD=%s\n' "$VOICE_INPUT_CMD"
+  printf 'VOICE_OUTPUT_CMD=%s\n' "$VOICE_OUTPUT_CMD"
+  printf 'VOICE_OUTPUT=%s\n' "$VOICE_OUTPUT"
   printf 'THEME=%s\n' "$THEME"
   printf 'SEND_INPUT=%s\n' "$SEND_INPUT"
   printf 'CODE_ATTACHMENT_MIN_LINES=%s\n' "$CODE_ATTACHMENT_MIN_LINES"
@@ -989,17 +1146,25 @@ compose_with_editor_basic() {
 }
 
 rename_current_session() {
-  local new_name="$1" clean_name new_path old_path
-  [ -n "$new_name" ] || { printf '%s\n' "usage: :rename NEW_SESSION_NAME"; return 1; }
-  clean_name="$(sanitize_session_name "$new_name")"
-  new_path="$(resolve_session_path "$clean_name")"
-  old_path="$SESSION"
-  [ "$new_path" = "$old_path" ] && { printf 'session already named: %s\n' "$clean_name"; return 0; }
-  [ -e "$new_path" ] && { printf 'cannot rename: target exists: %s\n' "$clean_name"; return 1; }
-  [ -f "$old_path" ] && mv "$old_path" "$new_path"
-  SESSION_NAME="$clean_name"
-  SESSION="$new_path"
-  printf 'current session renamed to: %s\n' "$SESSION_NAME"
+  local new_title="$1"
+  [ -n "$new_title" ] || { printf '%s
+' "usage: :rename NEW_TITLE"; return 1; }
+  ensure_prechat_line "$SESSION"
+  write_session_title_metadata "$SESSION" "$new_title" || return 1
+  printf 'session title set: %s
+' "$(session_title_from_file "$SESSION" 2>/dev/null || printf '%s' "$new_title")"
+}
+
+rename_session_command() {
+  local target="$1" new_title="$2" path
+  [ -n "$target" ] && [ -n "$new_title" ] || { printf '%s
+' "ERROR: --rename-session requires SESSION TITLE" >&2; return 2; }
+  path="$(resolve_session_arg "$target")"
+  [ -f "$path" ] || { printf 'ERROR: session not found: %s
+' "$target" >&2; return 1; }
+  write_session_title_metadata "$path" "$new_title" || return 1
+  printf 'session title set: %s
+' "$(session_title_from_file "$path" 2>/dev/null || printf '%s' "$new_title")"
 }
 
 show_current_memory_runtime() {
@@ -1041,6 +1206,143 @@ ACTIVE_MODEL="$(effective_model)" ;;
   esac
 }
 
+
+status_update() {
+  truthy "$STATUS_UPDATES" || return 0
+  printf '[%s] status: %s\n' "$(timestamp)" "$*" >&2
+}
+
+shell_quote() { printf '%q' "$1"; }
+
+command_with_file_placeholder() {
+  local template="$1" file="$2" q
+  q="$(shell_quote "$file")"
+  case "$template" in *%f*) printf '%s\n' "${template//%f/$q}" ;; *) printf '%s %s\n' "$template" "$q" ;; esac
+}
+
+run_voice_input_command() {
+  local path="$1" cmd out
+  [ -n "$path" ] || { printf '%s\n' "ERROR: --voice-input requires a file" >&2; return 2; }
+  [ -n "$VOICE_INPUT_CMD" ] || { printf '%s\n' "ERROR: VOICE_INPUT_CMD is not configured" >&2; return 1; }
+  cmd="$(command_with_file_placeholder "$VOICE_INPUT_CMD" "$path")"
+  out="$(eval "$cmd")" || return 1
+  printf '%s\n' "$out"
+}
+
+run_voice_output_command() {
+  local text="$1"
+  [ -n "$VOICE_OUTPUT_CMD" ] || { printf '%s\n' "ERROR: VOICE_OUTPUT_CMD/TTS_CMD is not configured" >&2; return 1; }
+  printf '%s\n' "$text" | eval "$VOICE_OUTPUT_CMD"
+}
+
+generate_session_title() {
+  local user_text="$1" ai_text="$2" prompt title saved
+  truthy "$SESSION_AUTO_TITLE" || return 0
+  [ -n "$(session_title_from_file "$SESSION" 2>/dev/null || true)" ] && return 0
+  if truthy "$DEMO_MODE"; then
+    title="$(session_title_clean "$user_text" "$SESSION_TITLE_MAX_WORDS")"
+  else
+    [ -n "$OPENROUTER_API_KEY" ] || return 0
+    [ -n "$SESSION_TITLE_MODEL" ] || return 0
+    prompt="Generate a concise topical title for this ttychatter session. Reply with only the title, no quotes, no explanation, maximum $SESSION_TITLE_MAX_WORDS words.\n\nUser: $user_text\nAssistant: $ai_text"
+    saved=("${ATTACH_FILES[@]}")
+    ATTACH_FILES=()
+    title="$(call_model "$SESSION_TITLE_MODEL" "$prompt" 2>/dev/null | head -n 1)"
+    ATTACH_FILES=("${saved[@]}")
+    title="$(session_title_clean "$title" "$SESSION_TITLE_MAX_WORDS")"
+  fi
+  [ -n "$title" ] && write_session_title_metadata "$SESSION" "$title"
+}
+
+turns_command() {
+  local path="$1"
+  path="$(resolve_session_arg "$path")"
+  [ -f "$path" ] || { printf 'session not found: %s\n' "$path" >&2; return 1; }
+  printf '%-5s %-10s %s\n' "MSG" "ROLE" "PREVIEW"
+  awk '
+    /^\[[0-9][0-9]:[0-9][0-9]:[0-9][0-9]\] / {
+      line=$0; sub(/^\[[^]]*\] /,"",line); speaker=line; sub(/:.*/,"",speaker);
+      if (speaker=="system" || speaker=="remfan1994") next;
+      role=(speaker=="AI" || speaker=="OpenRouter") ? "assistant" : "user";
+      content=line; sub(/^[^:]*:[[:space:]]*/,"",content); gsub(/[[:space:]]+/," ",content);
+      n++; if(length(content)>78) content=substr(content,1,75)"...";
+      printf "%-5d %-10s %s\n", n, role, content;
+    }' "$path"
+}
+
+branch_session_command() {
+  local source="$1" turn="$2" src branch
+  [ -n "$source" ] && [ -n "$turn" ] || { printf '%s\n' "usage: --branch SESSION TURN" >&2; return 2; }
+  src="$(resolve_session_arg "$source")"
+  [ -f "$src" ] || { printf 'session not found: %s\n' "$src" >&2; return 1; }
+  branch="$(resolve_session_path "session-$(date +%Y-%m-%d-%H-%M-%S)")"
+  ensure_prechat_line "$branch"
+  printf '[%s] system: branch-from: %s\n[%s] system: branch-turn: %s\n[%s] system: branch-reason: manual-branch\n' "$(timestamp)" "$src" "$(timestamp)" "$turn" "$(timestamp)" >> "$branch"
+  awk -v max="$turn" '
+    function ismsg(line, speaker) { if (line !~ /^\[[0-9][0-9]:[0-9][0-9]:[0-9][0-9]\] /) return 0; speaker=line; sub(/^\[[^]]*\] /,"",speaker); sub(/:.*/,"",speaker); return !(speaker=="system" || speaker=="remfan1994"); }
+    { if (ismsg($0)) { count++; keep=(count<=max) } if (keep && count<=max) print }
+  ' "$src" >> "$branch"
+  printf '%s\n' "$branch"
+}
+
+export_session_command() {
+  local name="$1" fmt="${2:-markdown}" out="$3" path title tmp
+  [ -n "$name" ] || { printf '%s\n' "usage: --export SESSION [--format markdown|text] [--output FILE]" >&2; return 2; }
+  path="$(resolve_session_arg "$name")"
+  [ -f "$path" ] || { printf 'session not found: %s\n' "$path" >&2; return 1; }
+  title="$(session_title_from_file "$path" 2>/dev/null || basename "$path" .log)"
+  tmp="$(mktemp)" || return 1
+  case "$fmt" in
+    text)
+      printf 'Title: %s\nSession: %s\n\n' "$title" "$path" > "$tmp"
+      awk '/^\[[0-9][0-9]:[0-9][0-9]:[0-9][0-9]\] / { line=$0; sub(/^\[[^]]*\] /,"",line); speaker=line; sub(/:.*/,"",speaker); if(speaker=="system"||speaker=="remfan1994") next; sub(/^[^:]*:[[:space:]]*/,"",line); print speaker ":\n" line "\n" }' "$path" >> "$tmp"
+      ;;
+    json)
+      printf '%s\n' "bash-only JSON export is intentionally omitted; use ttychatter.python or the C edition." >&2; rm -f "$tmp"; return 2 ;;
+    *)
+      printf '# %s\n\nSource: `%s`\n\n' "$title" "$path" > "$tmp"
+      awk '/^\[[0-9][0-9]:[0-9][0-9]:[0-9][0-9]\] / { line=$0; sub(/^\[[^]]*\] /,"",line); speaker=line; sub(/:.*/,"",speaker); if(speaker=="system"||speaker=="remfan1994") next; sub(/^[^:]*:[[:space:]]*/,"",line); label=(speaker=="AI"?"Assistant":"User"); print "## " label "\n\n" line "\n" }' "$path" >> "$tmp"
+      ;;
+  esac
+  if [ -n "$out" ]; then cat "$tmp" > "$out"; else cat "$tmp"; fi
+  rm -f "$tmp"
+}
+
+search_session_file() {
+  local file="$1" query="$2"
+  [ -f "$file" ] || { printf 'no such session log: %s\n' "$file" >&2; return 1; }
+  grep -in -- "$query" "$file" 2>/dev/null | sed "s#^#$(basename "$file"):#" || true
+}
+
+search_all_sessions() {
+  local query="$1" file found=0
+  for file in "$SESSION_DIR"/*.log; do
+    [ -e "$file" ] || continue
+    if grep -iq -- "$query" "$file" 2>/dev/null; then
+      found=1
+      printf '%s\n' "--- $(basename "$file") ---"
+      grep -in -- "$query" "$file" 2>/dev/null || true
+    fi
+  done
+  [ "$found" -eq 1 ] || printf 'no matches for: %s\n' "$query"
+}
+
+search_command() {
+  local query="$1" all="$2" target="${3:-}"
+  [ -n "$query" ] || { printf '%s\n' "ERROR: --search requires text" >&2; return 2; }
+  if [ "$all" -eq 1 ]; then
+    search_all_sessions "$query"
+  else
+    [ -n "$target" ] || target="$SESSION"
+    search_session_file "$target" "$query"
+  fi
+}
+
+edit_turn_command() {
+  printf '%s\n' "--edit-turn is not implemented in ttychatter.bash; use ttychatter.python or the C edition for edit-and-branch." >&2
+  return 2
+}
+
 handle_runtime_command() {
   local raw="$1" command rest key value editor_buffer
   case "$raw" in
@@ -1059,6 +1361,27 @@ handle_runtime_command() {
     doctor) doctor_command ;;
     list|sessions) list_sessions ;;
     rename) rename_current_session "$rest" ;;
+    turns) turns_command "$SESSION_NAME" ;;
+    branch|fork) branch_session_command "$SESSION_NAME" "$rest" ;;
+    search) [ -n "$rest" ] && search_command "$rest" 0 "$SESSION" || printf '%s
+' "usage: :search TEXT" ;;
+    search-all|search_all) [ -n "$rest" ] && search_command "$rest" 1 "$SESSION" || printf '%s
+' "usage: :search-all TEXT" ;;
+    stream) case "$rest" in on|1|yes|true) STREAM=1; printf '%s
+' "streaming requested" ;; off|0|no|false) STREAM=0; printf '%s
+' "streaming disabled" ;; *) printf '%s
+' "usage: :stream on|off" ;; esac ;;
+    status|progress) case "$rest" in on|1|yes|true) STATUS_UPDATES=1; printf '%s
+' "status updates enabled" ;; off|0|no|false) STATUS_UPDATES=0; printf '%s
+' "status updates disabled" ;; *) printf '%s
+' "usage: :status on|off" ;; esac ;;
+    voice|transcribe) [ -n "$rest" ] && { voice_text="$(run_voice_input_command "$rest")" && send_one_message "$voice_text"; } || printf '%s
+' "usage: :voice FILE" ;;
+    speak) case "$rest" in on) SPEAK_OVERRIDE=1; printf '%s
+' "voice output enabled" ;; off) SPEAK_OVERRIDE=0; printf '%s
+' "voice output disabled" ;; last) [ -n "${LAST_AI_OUTPUT:-}" ] && run_voice_output_command "$LAST_AI_OUTPUT" || printf '%s
+' "no previous AI output" ;; *) printf '%s
+' "usage: :speak on|off|last" ;; esac ;;
     models) list_models ;;
     routers) MODEL_TYPE_FILTER="routers"; list_models ;;
     update-models|update_models) update_models_cache ;;
@@ -1095,17 +1418,63 @@ ACTIVE_MODEL="$(effective_model)"; }; printf 'removed config key if present: %s\
 # ARGUMENTS
 # ==========================================================
 
+POSITIONAL_ARGS=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    -h|--help|help) ACTION=help;; --version) ACTION=version;; --demo) DEMO_MODE=1;; --loopback) LOOPBACK=1;; --loopback-file) shift; LOOPBACK_FILE="${1:-}"; [ -n "$LOOPBACK_FILE" ] || { printf 'ERROR: --loopback-file requires a path.\n' >&2; exit 2; };; --doctor) ACTION=doctor;; --credits) ACTION=credits;; --list) ACTION=list;; --models) ACTION=models;; --routers) ACTION=models; MODEL_TYPE_FILTER="routers";; --favorites) ACTION=favorites;; --favorite-model) ACTION=favorite; shift; TEST_MODEL="${1:-}";; --unfavorite-model|--unbookmark-model) ACTION=unfavorite; shift; TEST_MODEL="${1:-}";; --model-type) shift; MODEL_TYPE_FILTER="${1:-all}";; --sort) shift; MODEL_SORT_ORDER="${1:-$MODEL_SORT_ORDER}";; --min-input-tokens) shift; MODEL_MIN_INPUT_TOKENS="${1:-$MODEL_MIN_INPUT_TOKENS}";; --min-output-tokens) shift; MODEL_MIN_OUTPUT_TOKENS="${1:-$MODEL_MIN_OUTPUT_TOKENS}";; --require-tokens) MODEL_FILTER_REQUIRE_TOKENS=1;; --allow-missing-tokens) MODEL_FILTER_REQUIRE_TOKENS=0;; --theme) shift; THEME="${1:-default}";; --send-input) shift; SEND_INPUT="${1:-ctrl_d}";; --code-attachment-min-lines) shift; CODE_ATTACHMENT_MIN_LINES="${1:-5}";; --config) ACTION=config;; --set) ACTION=set-config; shift; SET_KEY="${1:-}"; shift; SET_VALUE="${1:-}";; --unset) ACTION=unset-config; shift; UNSET_KEY="${1:-}";; --update-models) ACTION=update-models;; --select-model) ACTION=select;; --test-model) ACTION=test; shift; TEST_MODEL="${1:-}";; --set-api-key) ACTION=set-key;; --forget-api-key) ACTION=forget-key;; --save) SAVE=1;; --attach) shift; ATTACH_FILES+=("${1:-}");; --resume) RESUME=1; shift; SESSION_NAME="${1:-}";; -*) printf 'unknown option: %s\n' "$1" >&2; exit 2;; *) [ -z "$SESSION_NAME" ] && SESSION_NAME="$1" || { printf 'unexpected argument: %s\n' "$1" >&2; exit 2; };;
+    -h|--help|help) ACTION=help;;
+    --version) ACTION=version;;
+    --demo) DEMO_MODE=1;;
+    -i|--interactive) INTERACTIVE=1;;
+    -n|--new) FORCE_NEW=1;;
+    -p|--prompt) shift; PROMPT_TEXT="${1:-}";;
+    --input) shift; INPUT_FILE="${1:-}";;
+    -o|--output) shift; OUTPUT_PATH="${1:-}";;
+    -s|--session) shift; SESSION_NAME="${1:-}";;
+    --stream) STREAM=1;; --no-stream) STREAM=0;;
+    --status|--progress) STATUS_UPDATES=1;; --no-status|--no-progress) STATUS_UPDATES=0;;
+    --voice-input|--transcribe) shift; VOICE_INPUT_PATH="${1:-}";;
+    --speak) VOICE_OUTPUT=1;; --no-speak) VOICE_OUTPUT=0;;
+    --turns) ACTION=turns; shift; TURN_SESSION="${1:-}";;
+    --branch) ACTION=branch; shift; TURN_SESSION="${1:-}"; shift; TURN_NUMBER="${1:-}";;
+    --edit-turn) ACTION=edit-turn; shift; TURN_SESSION="${1:-}"; shift; TURN_NUMBER="${1:-}";;
+    --export) ACTION=export; shift; EXPORT_SESSION="${1:-}";;
+    --search) ACTION=search; shift; SEARCH_QUERY="${1:-}";;
+    --all-sessions) SEARCH_ALL=1;;
+    --format) shift; EXPORT_FORMAT="${1:-markdown}";;
+    --rename-session) ACTION=rename; shift; RENAME_OLD="${1:-}"; shift; RENAME_NEW="${1:-}";;
+    --loopback) LOOPBACK=1;;
+    --loopback-file) shift; LOOPBACK_FILE="${1:-}"; [ -n "$LOOPBACK_FILE" ] || { printf 'ERROR: --loopback-file requires a path.\n' >&2; exit 2; };;
+    --doctor) ACTION=doctor;; --credits) ACTION=credits;; --list) ACTION=list;; --models) ACTION=models;; --routers) ACTION=models; MODEL_TYPE_FILTER="routers";;
+    --favorites) ACTION=favorites;; --favorite-model) ACTION=favorite; shift; TEST_MODEL="${1:-}";; --unfavorite-model|--unbookmark-model) ACTION=unfavorite; shift; TEST_MODEL="${1:-}";;
+    --model-type) shift; MODEL_TYPE_FILTER="${1:-all}";; --sort) shift; MODEL_SORT_ORDER="${1:-$MODEL_SORT_ORDER}";; --min-input-tokens) shift; MODEL_MIN_INPUT_TOKENS="${1:-$MODEL_MIN_INPUT_TOKENS}";; --min-output-tokens) shift; MODEL_MIN_OUTPUT_TOKENS="${1:-$MODEL_MIN_OUTPUT_TOKENS}";;
+    --require-tokens) MODEL_FILTER_REQUIRE_TOKENS=1;; --allow-missing-tokens) MODEL_FILTER_REQUIRE_TOKENS=0;; --theme) shift; THEME="${1:-default}";; --send-input) shift; SEND_INPUT="${1:-ctrl_d}";; --code-attachment-min-lines) shift; CODE_ATTACHMENT_MIN_LINES="${1:-5}";;
+    --config) ACTION=config;; --set) ACTION=set-config; shift; SET_KEY="${1:-}"; shift; SET_VALUE="${1:-}";; --unset) ACTION=unset-config; shift; UNSET_KEY="${1:-}";;
+    --update-models) ACTION=update-models;; --select-model) ACTION=select;; --test-model) ACTION=test; shift; TEST_MODEL="${1:-}";; --set-api-key) ACTION=set-key;; --forget-api-key) ACTION=forget-key;; --save) SAVE=1;;
+    --attach) shift; ATTACH_FILES+=("${1:-}");; --resume) RESUME=1; shift; SESSION_NAME="${1:-}";; --) shift; while [ "$#" -gt 0 ]; do POSITIONAL_ARGS+=("$1"); shift; done; break;;
+    -*) printf 'unknown option: %s\n' "$1" >&2; exit 2;;
+    *) POSITIONAL_ARGS+=("$1");;
   esac; shift
- done
+done
+
+if [ "${#POSITIONAL_ARGS[@]}" -eq 1 ] && [ -z "$SESSION_NAME" ] && [ -z "$PROMPT_TEXT" ] && [ -z "$INPUT_FILE" ]; then
+  if [ -f "${POSITIONAL_ARGS[0]}" ]; then INPUT_FILE="${POSITIONAL_ARGS[0]}"; else SESSION_NAME="${POSITIONAL_ARGS[0]}"; fi
+elif [ "${#POSITIONAL_ARGS[@]}" -eq 2 ] && [ -z "$INPUT_FILE" ] && [ -z "$OUTPUT_PATH" ]; then
+  INPUT_FILE="${POSITIONAL_ARGS[0]}"; OUTPUT_PATH="${POSITIONAL_ARGS[1]}"
+elif [ "${#POSITIONAL_ARGS[@]}" -gt 0 ]; then
+  printf 'unexpected argument: %s\n' "${POSITIONAL_ARGS[*]}" >&2; exit 2
+fi
 
 # The action dispatcher below deliberately stays near the bottom of the file.
 # By the time we reach it, config has been loaded and helper functions exist.
 # This keeps command behavior easy to audit: parse flags, dispatch one action,
 # or fall through into the interactive chat loop.
 case "$ACTION" in
+  turns) turns_command "$TURN_SESSION"; exit $?;;
+  branch) branch_session_command "$TURN_SESSION" "$TURN_NUMBER"; exit $?;;
+  edit-turn) edit_turn_command "$TURN_SESSION" "$TURN_NUMBER"; exit $?;;
+  export) export_session_command "$EXPORT_SESSION" "$EXPORT_FORMAT" "$OUTPUT_PATH"; exit $?;;
+  search) if [ -z "$SESSION_NAME" ]; then SEARCH_ALL=1; fi; search_command "$SEARCH_QUERY" "$SEARCH_ALL" "$( [ -n "$SESSION_NAME" ] && resolve_session_arg "$SESSION_NAME" || true )"; exit $?;;
+  rename) rename_session_command "$RENAME_OLD" "$RENAME_NEW"; exit $?;;
   help) help_menu; exit 0;; version) printf '%s version %s\n' "$PROGRAM" "$VERSION"; exit 0;; doctor) doctor_command; exit 0;; credits) credits; exit 0;; list) list_sessions; exit 0;; models) list_models; exit $?;; favorites) list_favorite_models; exit $?;; favorite) favorite_model_command "$TEST_MODEL"; exit $?;; unfavorite) unfavorite_model_command "$TEST_MODEL"; exit $?;; config) print_config_summary; exit 0;; set-config) [ -n "$SET_KEY" ] || { printf 'ERROR: --set requires KEY VALUE\n' >&2; exit 2; }; save_config_value "$SET_KEY" "$SET_VALUE"; exit $?;; unset-config) [ -n "$UNSET_KEY" ] || { printf 'ERROR: --unset requires KEY\n' >&2; exit 2; }; remove_config_key "$UNSET_KEY"; exit $?;; update-models) update_models_cache; exit $?;; select) select_model; exit $?;; test) [ -n "$TEST_MODEL" ] || { printf 'ERROR: --test-model requires a model\n' >&2; exit 2; }; test_model "$TEST_MODEL"; [ "$SAVE" -eq 1 ] && save_config_value MODEL "$TEST_MODEL"; exit $?;; set-key) set_api_key_command; exit $?;; forget-key) forget_api_key_command; exit $?;;
 esac
 
@@ -1114,14 +1483,34 @@ esac
 # ==========================================================
 
 require_api_key || exit 1
-[ -z "$SESSION_NAME" ] && SESSION_NAME="session-$(date +%Y-%m-%d-%H-%M-%S)" || SESSION_NAME="$(sanitize_session_name "$SESSION_NAME")"
-SESSION="$(resolve_session_path "$SESSION_NAME")"
-[ "$RESUME" -eq 1 ] && [ ! -f "$SESSION" ] && { printf 'session not found: %s\n' "$SESSION_NAME" >&2; exit 1; }
+if [ "$FORCE_NEW" -eq 1 ] && { [ -n "$SESSION_NAME" ] || [ -n "$OUTPUT_PATH" ] || [ "$RESUME" -eq 1 ]; }; then
+  printf '%s
+' "ERROR: --new cannot be combined with --session, --output, --resume, or a session operand" >&2
+  exit 2
+fi
+SESSION_ARG="$SESSION_NAME"
+if [ -z "$SESSION_ARG" ]; then
+  SESSION_NAME="session-$(date +%Y-%m-%d-%H-%M-%S)"
+  SESSION="$(resolve_session_path "$SESSION_NAME")"
+elif [ -n "$OUTPUT_PATH" ]; then
+  SESSION_NAME="$(sanitize_session_name "$SESSION_ARG")"
+  SESSION="$OUTPUT_PATH"
+else
+  case "$SESSION_ARG" in
+    */*|*.log) SESSION="$(resolve_session_arg "$SESSION_ARG")"; SESSION_NAME="$(basename "$SESSION" .log)" ;;
+    *) SESSION_NAME="$(sanitize_session_name "$SESSION_ARG")"; SESSION="$(resolve_session_path "$SESSION_NAME")" ;;
+  esac
+fi
+SESSION_WAS_EMPTY=1
+[ -s "$SESSION" ] && SESSION_WAS_EMPTY=0
+[ "$RESUME" -eq 1 ] && [ ! -f "$SESSION" ] && { printf 'session not found: %s
+' "$SESSION_NAME" >&2; exit 1; }
+ensure_prechat_line "$SESSION"
 load_context
 if truthy "$DEMO_MODE" && [ -z "$MODEL" ]; then MODEL="demo/auto"; fi
 ACTIVE_MODEL="$(effective_model)"
 NOTICE_VISIBLE=0
-truthy "$STARTUP_NOTICE" && [ ! -s "$SESSION" ] && NOTICE_VISIBLE=1
+truthy "$STARTUP_NOTICE" && [ "$SESSION_WAS_EMPTY" -eq 1 ] && NOTICE_VISIBLE=1
 
 # ----------------------------------------------------------
 # MAINTAINER COMMENTARY: loopback output routing
@@ -1138,7 +1527,7 @@ if [ "$LOOPBACK" -eq 1 ]; then
 fi
 
 printf '%s (bash-only)\n' "$PROGRAM"; printf 'session: %s\n' "$SESSION"; printf 'model: %s\n' "$(model_label)"; printf 'Ctrl+D to send, :help for commands, Ctrl+C to exit\n\n'
-if [ "$NOTICE_VISIBLE" -eq 1 ]; then printf '[%s] %s: %s\n' "$(timestamp)" "$PROJECT_LEAD_NAME" "$PROJECT_LEAD_NOTICE"; printf '[%s] system: This is the message list window. The notice above will disappear when you send your first message, and messages to and from AI will appear here.\n\n' "$(timestamp)"; fi
+if [ "$NOTICE_VISIBLE" -eq 1 ]; then printf '%s\n\n' "$TC_PRECHAT_LINE"; fi
 send_one_message() {
   local buffer="$1" ts context output cleaned
   ts="$(timestamp)"
@@ -1148,6 +1537,7 @@ send_one_message() {
 ' "$ts" "$USER_NAME" "$buffer" >> "$SESSION"
   add_context "User: $buffer"
   context="$(build_context)"
+  status_update "preparing request for $ACTIVE_MODEL"
   output="$(call_model "$ACTIVE_MODEL" "$context")"
   printf '[%s] AI: %s
 ' "$(timestamp)" "$output" >> "$SESSION"
@@ -1159,9 +1549,14 @@ send_one_message() {
     printf '%s\n' "$cleaned" >&3
   fi
   if [ -n "$LOOPBACK_FILE" ]; then
-    printf '%s\n' "$cleaned" >> "$LOOPBACK_FILE"
+    printf '%s
+' "$cleaned" >> "$LOOPBACK_FILE"
   fi
-  if [ "$LOOPBACK" -eq 1 ]; then printf '%s\n' "$cleaned"; else print_ai_output "$cleaned"; fi
+  LAST_AI_OUTPUT="$cleaned"
+  generate_session_title "$buffer" "$cleaned"
+  if truthy "$VOICE_OUTPUT" || [ "$SPEAK_OVERRIDE" = "1" ]; then run_voice_output_command "$cleaned" || true; fi
+  if [ "$LOOPBACK" -eq 1 ]; then printf '%s
+' "$cleaned"; else print_ai_output "$cleaned"; fi
 }
 
 # ----------------------------------------------------------
@@ -1180,6 +1575,18 @@ read_user_input() {
   buffer="$(cat)"
   return 0
 }
+
+if [ -n "$VOICE_INPUT_PATH" ]; then
+  PROMPT_TEXT="$(run_voice_input_command "$VOICE_INPUT_PATH")" || exit $?
+fi
+if [ -n "$INPUT_FILE" ]; then
+  if [ "$INPUT_FILE" = "-" ]; then PROMPT_TEXT="$(cat)"; else PROMPT_TEXT="$(cat "$INPUT_FILE")" || exit 1; fi
+fi
+if [ -n "$PROMPT_TEXT" ] || { [ ! -t 0 ] && [ "$INTERACTIVE" -eq 0 ]; }; then
+  if [ -z "$PROMPT_TEXT" ]; then PROMPT_TEXT="$(cat)"; fi
+  send_one_message "$PROMPT_TEXT"
+  exit $?
+fi
 
 while true; do
   ts="$(timestamp)"; printf '[%s] %s> ' "$ts" "$USER_NAME"; if ! read_user_input; then [ -t 0 ] || exit 0; continue; fi; if [ -z "$buffer" ]; then [ -t 0 ] || exit 0; continue; fi

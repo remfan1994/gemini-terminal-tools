@@ -1,144 +1,128 @@
-TTYCHATTER.NCURSES(1)      User Commands      TTYCHATTER.NCURSES(1)
-
-NAME
-    ttychatter.ncurses - full-screen ncurses OpenRouter chat client
-
-SYNOPSIS
-    ttychatter.ncurses [session]
-    ttychatter.ncurses --demo [session]
-    ttychatter.ncurses --resume SESSION_OR_LOG
-    ttychatter.ncurses --models
-    ttychatter.ncurses --routers
-    ttychatter.ncurses --test-model MODEL
-    ttychatter.ncurses --doctor
-    ttychatter.ncurses --version
-    ttychatter.ncurses --help
-
-DESCRIPTION
-    ttychatter.ncurses is the full-screen terminal interface for ttychatter.
-    It is OpenRouter-first and is intended to provide a browser-free chat
-    client with sessions, model browsing, favorites, attachments, themes,
-    diagnostics, GPG-aware API-key storage, and mouse/key-driven terminal UI.
-
-USAGE
-    Start in normal mode:
-        ttychatter.ncurses
-
-    Test without network chat calls:
-        ttychatter.ncurses --demo
-
-    Resume a session by name, .log filename, or path:
-        ttychatter.ncurses --resume notes
-        ttychatter.ncurses --resume notes.log
-        ttychatter.ncurses --resume ~/.local/share/ttychatter/openrouter/sessions/notes.log
-
-CONTROLS
-    F1      Help / command menu
-    F2      Model browser
-    F3      API-key manager
-    F4      Session browser
-    F5      Options
-    F6      Memory
-    F7      Files / attachments
-    F8      Open configured external editor for the current prompt
-    F9      Credits
-    F10     Quit
-
-    Enter       Sends or inserts a newline depending on SEND_INPUT.
-    Ctrl+G      Sends if SEND_INPUT is ctrl_g; remains a reliable send key.
-    Ctrl+K      Quick attach file for the next message.
-    Ctrl+L      List files currently queued for the next message.
-    j/k         Move down/up in menu and list screens.
-
-COMMAND AND HOTKEY BARS
-    The main screen separates two kinds of controls.
-
-    Function-key bar:
-        Shows screen-navigation commands such as F1 Help, F2 Models,
-        F5 Options, and F8 Editor.
-
-    Compose hotkey bar:
-        Shows actions that operate on the message currently being written,
-        including the configured send key, Ctrl+K attachment, and Ctrl+L
-        pending-file review.
-
-    The send label reflects the current SEND_INPUT setting instead of always
-    saying Enter or Ctrl+G.
-
-API KEY STORAGE
-    The F3 API-key screen supports three practical storage modes:
-
-        runtime only
-            The key is active only for the current run.
-
-        encrypt with gpg
-            The API-key entry screen shows a tickable "encrypt with gpg"
-            option.  If gpg is installed, ticking this option stores the key in
-            API_KEY_GPG_FILE using the external gpg command.
-
-        plaintext config
-            If the GPG checkbox is not ticked and the user chooses to save,
-            ttychatter warns that the key will be stored in plaintext.
-
-    If gpg is not installed, the API-key screen and options screen indicate:
-
-        gpg not found
-
-    Environment variables remain preferred for unattended use:
-
-        OPENROUTER_API_KEY
-        TTYCHATTER_API_KEY
-
-CONFIGURATION
-    Default config file:
-        ~/.config/ttychatter/openrouter/config
-
-    Important keys:
-        OPENROUTER_API_KEY
-        API_KEY_GPG_FILE
-        THEME
-        SEND_INPUT
-        MODEL
-        MODEL_TYPE_FILTER
-        MODEL_SORT_ORDER
-        CONTEXT_TURNS
-        SESSION_DIR
-        ATTACHMENT_DIR
-        MODEL_CACHE_FILE
-        CODE_ATTACHMENT_MIN_LINES
-        CONFIRM_LIVE_SEND
-        EDITOR
-
-GPG NOTES
-    GPG support is optional. ttychatter uses the external gpg command instead
-    of implementing cryptography internally. The decrypted API key is never
-    printed in diagnostics, logs, or transcripts.
-
-EDITOR BEHAVIOR
-    F8 opens the configured external editor immediately for the current prompt.
-    The edited text is loaded back into the input pane after the editor exits.
-
-    Editor selection belongs in F5 Options. The EDITOR option opens a detected
-    editor selector that searches PATH, shows runnable editors, supports a
-    custom command/path, and supports browsing for an executable.
-
-MODEL BROWSER
-    The F2 model browser supports cached OpenRouter model lists, search,
-    sorting, favorites/bookmarks, router/fixed/free/auto filters, and explicit
-    user-controlled network refresh.
-
-FILES
-    Sessions:
-        ~/.local/share/ttychatter/openrouter/sessions/
-
-    Attachments:
-        ~/.local/share/ttychatter/openrouter/attachments/
-
-    Model cache:
-        ~/.cache/ttychatter/openrouter/models.json
-
-    GPG API key:
-        ~/.config/ttychatter/openrouter/api-key.gpg
-
-VERSION
-    ttychatter.ncurses version 0.14.4
+.TH TTYCHATTER.NCURSES 1 "June 2026" "ttychatter.ncurses 0.15.0-parity" "User Commands"
+.SH NAME
+ttychatter.ncurses \- full-screen ncurses OpenRouter chat interface
+.SH SYNOPSIS
+.B ttychatter.ncurses
+.RI [ options ]
+.RI [ session ]
+.br
+.B ttychatter.ncurses
+.BR --list
+.br
+.B ttychatter.ncurses
+.BR --rename-session " SESSION TITLE"
+.br
+.B ttychatter.ncurses
+.BR --turns " SESSION"
+.br
+.B ttychatter.ncurses
+.BR --branch " SESSION TURN"
+.br
+.B ttychatter.ncurses
+.BR --export " SESSION"
+.RB [ --format
+.IR markdown|text|json ]
+.RB [ --output
+.IR FILE ]
+.SH DESCRIPTION
+.B ttychatter.ncurses
+is the full-screen terminal UI edition. It prioritizes interactive browsing,
+model selection, options, attachments, memory inspection, and session management.
+Batch-only command-line features are intentionally limited, but title metadata,
+list, retitle, turns, branch, and export are available outside the UI.
+.SH SESSION LOGS AND TITLES
+New logs begin with:
+.PP
+.nf
+Everyone is encouraged to get the cruelty-free vegetarian alternatives and remember the bloodguilt curse from the Bible... http://bloodguiltcurse.net
+.fi
+.PP
+Session files keep timestamped or user-supplied filenames. Friendly names are
+stored as session-title metadata. --list and the session browser display those
+titles when present. Retitling does not rename files or attachments.
+.SH OPTIONS
+.TP
+.BR -h , " --help"
+Show help.
+.TP
+.B --version
+Show version.
+.TP
+.B --demo
+Use local demo responses and demo model metadata.
+.TP
+.B --session NAME
+Open or create NAME. This is an alias for the positional session operand.
+.TP
+.B --resume NAME
+Resume an existing session.
+.TP
+.B --new
+Force a fresh timestamped session.
+.TP
+.B --list
+List saved sessions with title metadata when present.
+.TP
+.BR --rename-session " SESSION TITLE"
+Set session-title metadata for SESSION.
+.TP
+.BR --turns " SESSION"
+List user/assistant message numbers.
+.TP
+.BR --branch " SESSION TURN"
+Create a new timestamped branch containing messages through TURN.
+.TP
+.BR --edit-turn " SESSION TURN"
+Recognized for parity, but not implemented in the ncurses edition. Use the C
+edition or ttychatter.python.
+.TP
+.BR --export " SESSION"
+Export a session.
+.TP
+.BR --format " markdown|text|json"
+Choose export format.
+.TP
+.BR --output " FILE"
+Write export output to FILE.
+.TP
+.B --models
+List cached models, fetching the cache if needed.
+.TP
+.B --routers
+List router/special model entries.
+.TP
+.BR --model-type " all|routers|fixed|free|auto"
+Filter model display.
+.TP
+.B --update-models
+Refresh the OpenRouter model cache.
+.TP
+.B --doctor
+Run diagnostics.
+.TP
+.BR --test-model " MODEL"
+Send MODEL_TEST_PROMPT to MODEL and print the response.
+.TP
+.BR --loopback-file " PATH"
+Append each AI response to PATH while the ncurses UI remains interactive.
+.SH CONFIGURATION
+The shared config file is
+.IR ~/.config/ttychatter/openrouter/config .
+Relevant keys include MODEL, CONTEXT_TURNS, SESSION_DIR, ATTACHMENT_DIR,
+EDITOR, MODEL_CACHE_FILE, MODEL_FILTER_CHAT_COMPLETIONS,
+MODEL_FILTER_REQUIRE_TOKENS, MODEL_FILTER_HIDE_PREVIEW,
+MODEL_MIN_INPUT_TOKENS, MODEL_MIN_OUTPUT_TOKENS, MODEL_SORT_ORDER,
+MODEL_TYPE_FILTER, THEME, SEND_INPUT, PROMPT_SESSION_NAME,
+CODE_ATTACHMENT_MIN_LINES, STARTUP_NOTICE, SESSION_AUTO_TITLE,
+SESSION_TITLE_MODEL, SESSION_TITLE_MAX_WORDS, DEMO_MODE, CONFIRM_LIVE_SEND,
+API_KEY_GPG_FILE, and LOOPBACK_FILE.
+.PP
+SESSION_AUTO_TITLE defaults to 0. When enabled, SESSION_TITLE_MODEL is a
+secondary model used only to write session-title metadata after a response. The
+chat model remains MODEL.
+.SH UI NOTES
+F4 opens the session browser. The rename actions now retitle metadata instead of
+renaming log files. F5 opens options, including the AI session-title metadata
+settings. F2 opens model selection and F7 opens file/attachment tools.
+.SH SEE ALSO
+ttychatter.bash(1), ttychatter.python(1)

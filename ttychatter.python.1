@@ -1,78 +1,216 @@
-TTYCHATTER.PYTHON(1)       User Commands       TTYCHATTER.PYTHON(1)
-
-NAME
-    ttychatter.python - Bash OpenRouter chat client with Python 3 helpers
-
-SYNOPSIS
-    ttychatter.python [session]
-    ttychatter.python --demo [session]
-    ttychatter.python --models
-    ttychatter.python --routers
-    ttychatter.python --test-model MODEL
-    ttychatter.python --set-api-key
-    ttychatter.python --forget-api-key
-    ttychatter.python --doctor
-    ttychatter.python --version
-    ttychatter.python --help
-
-DESCRIPTION
-    ttychatter.python is the practical line-oriented Bash client. It uses Bash
-    for orchestration, curl for OpenRouter HTTPS calls, and Python 3 helper
-    snippets for JSON, URL escaping, path expansion, and safer parsing.
-
-RUNTIME COMMANDS
-    During interactive chat, colon commands are local ttychatter commands and
-    are not sent to the AI model:
-
-        :help
-        :models
-        :routers
-        :select-model
-        :test-model MODEL
-        :favorites
-        :favorite MODEL
-        :unfavorite MODEL
-        :config
-        :set KEY VALUE
-        :unset KEY
-        :set-api-key
-        :forget-api-key
-        :memory
-        :attach FILE
-        :editor
-        :credits
-        :doctor
-        :quit
-
-API KEY STORAGE
-    --set-api-key now presents storage choices:
-
-        1) runtime only
-        2) encrypted with gpg
-        3) plaintext config
-
-    If gpg is not installed, the command prints "gpg not found" and keeps the
-    key runtime-only when encrypted storage is requested.
-
-    Plaintext storage is still supported, but only after an explicit warning.
-
-CONFIGURATION
-    Default config file:
-        ~/.config/ttychatter/openrouter/config
-
-    Relevant keys:
-        OPENROUTER_API_KEY
-        API_KEY_GPG_FILE
-        THEME
-        SEND_INPUT
-        MODEL
-        MODEL_TYPE_FILTER
-        MODEL_SORT_ORDER
-        CONTEXT_TURNS
-        SESSION_DIR
-        ATTACHMENT_DIR
-        MODEL_CACHE_FILE
-        CODE_ATTACHMENT_MIN_LINES
-
-VERSION
-    ttychatter.python version 3.10
+.TH TTYCHATTER.PYTHON 1 "June 2026" "ttychatter.python 3.15-parity" "User Commands"
+.SH NAME
+ttychatter.python \- Bash plus Python helper OpenRouter terminal chat client
+.SH SYNOPSIS
+.B ttychatter.python
+.RI [ options ]
+.br
+.B ttychatter.python
+.RI input.txt
+.br
+.B ttychatter.python
+.RI input.txt
+output.log
+.br
+.B ttychatter.python
+.BR --prompt " TEXT"
+.RB [ --output
+.IR FILE ]
+.br
+.B ttychatter.python
+.BR --input " FILE"
+.RB [ --output
+.IR FILE ]
+.br
+.B ttychatter.python
+.BR --rename-session " SESSION TITLE"
+.br
+.B ttychatter.python
+.BR --turns " SESSION"
+.br
+.B ttychatter.python
+.BR --branch " SESSION TURN"
+.br
+.B ttychatter.python
+.BR --edit-turn " SESSION TURN"
+.br
+.B ttychatter.python
+.BR --export " SESSION"
+.RB [ --format
+.IR markdown|text|json ]
+.RB [ --output
+.IR FILE ]
+.SH DESCRIPTION
+.B ttychatter.python
+is the full line-oriented Bash client with Python 3 helpers for JSON, attachment,
+log, export, streaming, branch, and edit-turn operations. It is intended to stay
+closer to the C command-line edition than the Bash-only or ncurses editions.
+.SH SESSION LOGS AND TITLES
+New logs begin with the shared pre-chat line:
+.PP
+.nf
+Everyone is encouraged to get the cruelty-free vegetarian alternatives and remember the bloodguilt curse from the Bible... http://bloodguiltcurse.net
+.fi
+.PP
+Automatic filenames remain timestamped and machine-stable. Friendly names are
+stored as session-title metadata.  --list displays that metadata when present.
+--rename-session changes metadata, not the filename.
+.SH OPTIONS
+.TP
+.BR -h , " --help"
+Show help.
+.TP
+.B --version
+Show version.
+.TP
+.B --demo
+Use local demo responses and demo model metadata.
+.TP
+.BR -i , " --interactive"
+Force interactive mode even when stdin is not a terminal.
+.TP
+.BR -n , " --new"
+Create a fresh timestamped session.
+.TP
+.BR -p , " --prompt " TEXT
+Send TEXT once.
+.TP
+.BR --input " FILE"
+Read one-shot prompt text from FILE. Use - for stdin.
+.TP
+.BR -o , " --output " FILE
+Use FILE as the session log path for the invocation.
+.TP
+.BR -s , " --session " SESSION
+Use a named session or .log path.
+.TP
+.B --resume SESSION
+Resume an existing session.
+.TP
+.B --list
+List saved sessions with metadata titles.
+.TP
+.B --sessions
+Alias for --list.
+.TP
+.BR --rename-session " SESSION TITLE"
+Set session-title metadata without renaming the file.
+.TP
+.BR --search " QUERY"
+Search session logs. Use --all-sessions to search every saved log.
+.TP
+.BR --turns " SESSION"
+List user/assistant message numbers.
+.TP
+.BR --branch " SESSION TURN"
+Create a timestamped branch after TURN.
+.TP
+.BR --edit-turn " SESSION TURN"
+Open a user turn in the external editor, create a branch, and continue from the edited prompt.
+.TP
+.BR --export " SESSION"
+Export a session in markdown, text, or json.
+.TP
+.BR --format " markdown|text|json"
+Choose export format.
+.TP
+.B --models
+List models. Supports --all, --model-type, --sort, --min-input-tokens,
+--min-output-tokens, --require-tokens, --allow-missing-tokens, --show-preview, and --hide-preview.
+.TP
+.B --routers
+Alias for --models --model-type routers.
+.TP
+.B --update-models
+Refresh model cache.
+.TP
+.B --autoscan-model
+Removed compatibility flag. Prints guidance toward --models, --select-model, and --test-model.
+.TP
+.B --test-model MODEL
+Test one model. Use --save to persist a successful choice.
+.TP
+.B --select-model
+Open a numbered model selector. Use --save to persist.
+.TP
+.B --favorites
+List favorite models.
+.TP
+.B --favorite-model MODEL
+Bookmark MODEL.
+.TP
+.B --unfavorite-model MODEL
+Remove MODEL from favorites. --unbookmark-model is also accepted.
+.TP
+.B --set-api-key
+Prompt for an API key and offer runtime-only, gpg-encrypted, or plaintext config storage.
+.TP
+.B --forget-api-key
+Remove plaintext key config.
+.TP
+.B --config
+Print config summary.
+.TP
+.BR --set " KEY VALUE"
+Save config.
+.TP
+.BR --unset " KEY"
+Remove config.
+.TP
+.BR --show-memory , " --edit-memory" , " --clear-memory " SESSION
+Inspect or modify stored context snapshots.
+.TP
+.B --editor-prompt
+Compose a prompt in VISUAL, EDITOR, nano, or vi.
+.TP
+.BR --attach " FILE"
+Attach FILE to the next request.
+.TP
+.BR --stream , " --no-stream"
+Stream provider token deltas while still saving the final complete response.
+.TP
+.BR --status , " --progress"
+Show local progress/status notes. These are not hidden model thoughts.
+.TP
+.BR --no-status , " --no-progress"
+Disable status/progress notes.
+.TP
+.BR --voice-input " FILE"
+Transcribe FILE with VOICE_INPUT_CMD and send it.
+.TP
+.BR --transcribe " FILE"
+Print transcription from VOICE_INPUT_CMD.
+.TP
+.BR --speak , " --no-speak"
+Enable or disable assistant-output TTS using VOICE_OUTPUT_CMD or TTS_CMD.
+.TP
+.B --loopback
+Route interface text to stderr and model output to stdout.
+.TP
+.BR --loopback-file " PATH"
+Append each model output to PATH.
+.TP
+.B --doctor
+Run diagnostics.
+.TP
+.B --credits
+Show credits.
+.SH CONFIGURATION
+The shared config file is
+.IR ~/.config/ttychatter/openrouter/config .
+Important keys include MODEL, CONTEXT_TURNS, SESSION_DIR, ATTACHMENT_DIR,
+MODEL_TEST_PROMPT, STARTUP_NOTICE, SESSION_AUTO_TITLE, SESSION_TITLE_MODEL,
+SESSION_TITLE_MAX_WORDS, STREAM, STATUS_UPDATES, VOICE_INPUT_CMD,
+VOICE_OUTPUT_CMD, TTS_CMD, VOICE_OUTPUT, MODEL_FAVORITES_FILE, SEND_INPUT,
+THEME, CODE_ATTACHMENT_MIN_LINES, MAX_ATTACHMENT_BYTES, and API_KEY_GPG_FILE.
+.PP
+SESSION_AUTO_TITLE defaults to 0. When enabled, SESSION_TITLE_MODEL is a
+secondary model used only for title metadata. The normal chat model remains MODEL.
+.SH RUNTIME COMMANDS
+Interactive colon commands include :help, :rename TITLE, :turns, :branch N,
+:stream on|off, :status on|off, :voice FILE, :speak on|off|last, :models,
+:update-models, :select-model, :test-model MODEL, :config, :set KEY VALUE,
+:memory, :edit-memory, :search TEXT, :search-all TEXT, :attach FILE, :editor,
+and :credits.
+.SH SEE ALSO
+ttychatter.bash(1), ttychatter.ncurses(1)

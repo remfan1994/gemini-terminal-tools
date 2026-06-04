@@ -74,12 +74,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-VERSION = "0.14.4"
+VERSION = "0.15.0-parity"
 PROGRAM = "ttychatter.ncurses"
 FALLBACK_MODEL = "openrouter/auto"
 DEFAULT_MODEL_TEST_PROMPT = "Please reply with one short sentence confirming this model is available for text generation."
 DEFAULT_GITHUB_URL = "https://github.com/remfan1994/ttychatter"
-PROJECT_NOTICE = "I strongly encourage everyone to get cruetly-free VEGETARIAN food and remember the 'bloodguilt' curse from the Bible.  -Project Lead, remfan1994"
+PROJECT_NOTICE = "Everyone is encouraged to get the cruelty-free vegetarian alternatives and remember the bloodguilt curse from the Bible... http://bloodguiltcurse.net"
+PRECHAT_LINE = PROJECT_NOTICE
 INPUT_PLACEHOLDER_DEFAULT = "Type here..."
 MOUSE_SCROLL_LINES = 3
 MAX_INLINE_ATTACHMENT_BYTES = 20 * 1024 * 1024
@@ -148,6 +149,9 @@ class Config:
     max_attachment_bytes: int = MAX_INLINE_ATTACHMENT_BYTES
     demo_mode: bool = False
     loopback_file: Optional[Path] = None
+    session_auto_title: bool = False
+    session_title_model: str = FALLBACK_MODEL
+    session_title_max_words: int = 8
 
     @property
     # ------------------------------------------------------------
@@ -480,6 +484,12 @@ def load_config() -> Config:
                     cfg.demo_mode = parse_bool(value, cfg.demo_mode)
                 elif key == "LOOPBACK_FILE":
                     cfg.loopback_file = expand_path(value)
+                elif key == "SESSION_AUTO_TITLE":
+                    cfg.session_auto_title = parse_bool(value, cfg.session_auto_title)
+                elif key == "SESSION_TITLE_MODEL":
+                    cfg.session_title_model = normalize_model_id(value) or cfg.session_title_model
+                elif key == "SESSION_TITLE_MAX_WORDS":
+                    cfg.session_title_max_words = parse_positive_int(value, cfg.session_title_max_words)
 
     if env_api_key:
         cfg.api_key = env_api_key
@@ -570,8 +580,17 @@ def parse_args() -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(prog=PROGRAM, description="ncurses OpenRouter terminal chat interface")
     parser.add_argument("session_name", nargs="?", help="named session to create or open")
+    parser.add_argument("--session", metavar="NAME", help="open/create NAME as an alias for the positional session operand")
     parser.add_argument("--resume", metavar="NAME", help="resume an existing named session")
-    parser.add_argument("--list", action="store_true", help="list saved sessions")
+    parser.add_argument("--new", action="store_true", help="force a fresh timestamped session")
+    parser.add_argument("--list", action="store_true", help="list saved sessions with title metadata when present")
+    parser.add_argument("--rename-session", nargs=2, metavar=("SESSION", "TITLE"), help="set friendly session title metadata without renaming the file")
+    parser.add_argument("--turns", metavar="SESSION", help="list user/assistant message numbers from a session")
+    parser.add_argument("--branch", nargs=2, metavar=("SESSION", "TURN"), help="create a timestamped branch containing messages through TURN")
+    parser.add_argument("--edit-turn", nargs=2, metavar=("SESSION", "TURN"), help="not implemented in ncurses; use C or ttychatter.python")
+    parser.add_argument("--export", metavar="SESSION", help="export a session to stdout or --output")
+    parser.add_argument("--format", choices=("markdown", "text", "json"), default="markdown", help="export format")
+    parser.add_argument("--output", metavar="FILE", help="write --export output to FILE")
     parser.add_argument("--models", action="store_true", help="list cached OpenRouter chat models, fetching if cache is missing")
     parser.add_argument("--routers", action="store_true", help="list cached OpenRouter router/special entries such as openrouter/auto and openrouter/free")
     parser.add_argument("--model-type", choices=MODEL_TYPE_CHOICES, help="filter --models output by model type: all, routers, fixed, free, or auto")
@@ -582,7 +601,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--loopback-file", metavar="PATH", help="append each AI response to PATH while the ncurses UI remains interactive")
     parser.add_argument("--version", action="store_true", help="show version information")
     return parser.parse_args()
-
 
 # ------------------------------------------------------------
 # MAINTAINER COMMENTARY: def sanitize_session_name
@@ -612,10 +630,176 @@ def default_session_name() -> str:
 # the program. When changing it, check callers, documentation, config compatibility, session-log
 # compatibility, and the parallel Bash/C implementation plans.
 # ------------------------------------------------------------
+def clean_session_title(raw: str, max_words: int = 8) -> str:
+    text = re.sub(r"[\r\n\t\x00-\x1f]+", " ", raw or "")
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"^(session[ -]?title|title)\s*:\s*", "", text, flags=re.I)
+    text = text.strip(" \"'`*.-")
+    words = text.split()
+    text = " ".join(words[: max(1, max_words)])
+    if len(text) > 96:
+        text = text[:96].rsplit(" ", 1)[0] or text[:96]
+    return text.strip()
+
+
+def session_title_from_file(path: Path, max_words: int = 8) -> str:
+    if not path.exists():
+        return ""
+    title = ""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                match = re.search(r"session-title\s*:\s*(.*)$", line, re.I)
+                if match:
+                    title = match.group(1).strip()
+    except OSError:
+        return ""
+    return clean_session_title(title, max_words)
+
+
+def write_session_title_metadata(path: Path, title: str, max_words: int = 8) -> bool:
+    clean = clean_session_title(title, max_words)
+    if not clean:
+        return False
+    ensure_prechat_line(path)
+    append_log(path, "system", f"session-title: {clean}", now_time())
+    return True
+
+
+def ensure_prechat_line(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists() or path.stat().st_size == 0:
+        path.write_text(PRECHAT_LINE + "\n", encoding="utf-8")
+
+
+def session_display_title(path: Path, max_words: int = 8) -> str:
+    return session_title_from_file(path, max_words) or path.stem
+
+
 def list_sessions(session_dir: Path) -> None:
     session_dir.mkdir(parents=True, exist_ok=True)
-    for path in sorted(session_dir.glob("*.log")):
-        print(path.stem)
+    rows = sorted(session_dir.glob("*.log"))
+    if not rows:
+        print("no saved sessions")
+        return
+    print(f"{'TITLE':42} {'FILE':32} SIZE")
+    print(f"{'-----':42} {'----':32} ----")
+    for path in rows:
+        title = session_display_title(path)
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        print(f"{title[:42]:42} {path.name[:32]:32} {size}")
+
+
+def default_session_name_unique(session_dir: Path) -> str:
+    base = default_session_name()
+    name = base
+    n = 1
+    while (session_dir / f"{name}.log").exists():
+        name = f"{base}-{n:03d}"
+        n += 1
+    return name
+
+
+def real_session_messages(path: Path) -> List[LogEntry]:
+    out: List[LogEntry] = []
+    for entry in load_log_entries(path):
+        if entry.speaker.lower() == "system" or entry.speaker == "remfan1994":
+            continue
+        if is_snapshot_entry(entry):
+            continue
+        out.append(entry)
+    return out
+
+
+def print_turns(path: Path) -> int:
+    if not path.exists():
+        print(f"session not found: {path}", file=sys.stderr)
+        return 1
+    print(f"{'MSG':5} {'ROLE':10} PREVIEW")
+    for idx, entry in enumerate(real_session_messages(path), 1):
+        role = "assistant" if entry.speaker in {"AI", "OpenRouter", "Assistant"} else "user"
+        preview = re.sub(r"\s+", " ", entry.text).strip()
+        if len(preview) > 88:
+            preview = preview[:85] + "..."
+        print(f"{idx:<5} {role:<10} {preview}")
+    return 0
+
+
+def branch_session_cli(cfg: Config, source_path: Path, turn_text: str) -> int:
+    try:
+        turn = int(turn_text)
+    except ValueError:
+        print("branch turn must be numeric", file=sys.stderr)
+        return 2
+    if not source_path.exists():
+        print(f"session not found: {source_path}", file=sys.stderr)
+        return 1
+    name = default_session_name_unique(cfg.session_dir)
+    branch = cfg.session_dir / f"{name}.log"
+    ensure_prechat_line(branch)
+    append_log(branch, "system", f"branch-from: {source_path}", now_time())
+    append_log(branch, "system", f"branch-turn: {turn}", now_time())
+    append_log(branch, "system", "branch-reason: manual-branch", now_time())
+    for idx, entry in enumerate(real_session_messages(source_path), 1):
+        if idx > turn:
+            break
+        append_log(branch, entry.speaker, entry.text, entry.timestamp)
+    src_title = session_display_title(source_path)
+    write_session_title_metadata(branch, f"Branch of {src_title}", cfg.session_title_max_words)
+    print(branch)
+    return 0
+
+
+def export_session_cli(source_path: Path, fmt: str, output: Optional[str]) -> int:
+    if not source_path.exists():
+        print(f"session not found: {source_path}", file=sys.stderr)
+        return 1
+    title = session_display_title(source_path)
+    messages = []
+    for entry in real_session_messages(source_path):
+        role = "assistant" if entry.speaker in {"AI", "OpenRouter", "Assistant"} else "user"
+        messages.append({"role": role, "speaker": entry.speaker, "time": entry.timestamp, "text": entry.text})
+    if fmt == "json":
+        data = json.dumps({"title": title, "session": str(source_path), "messages": messages}, ensure_ascii=False, indent=2)
+    elif fmt == "text":
+        parts = [f"Title: {title}", f"Session: {source_path}", ""]
+        for item in messages:
+            label = "Assistant" if item["role"] == "assistant" else "User"
+            parts.extend([label + ":", item["text"], ""])
+        data = "\n".join(parts)
+    else:
+        parts = [f"# {title}", "", f"Source: `{source_path}`", ""]
+        for item in messages:
+            label = "Assistant" if item["role"] == "assistant" else "User"
+            parts.extend([f"## {label}", "", item["text"], ""])
+        data = "\n".join(parts)
+    if output:
+        out_path = expand_path(output)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(data, encoding="utf-8")
+    else:
+        print(data)
+    return 0
+
+
+def generate_session_title(cfg: Config, path: Path, user_text: str, assistant_text: str) -> None:
+    if not cfg.session_auto_title or session_title_from_file(path, cfg.session_title_max_words):
+        return
+    if cfg.demo_mode:
+        title = clean_session_title(user_text, cfg.session_title_max_words)
+    else:
+        prompt = (
+            "Generate a concise topical title for this ttychatter session. "
+            f"Reply only with the title, maximum {cfg.session_title_max_words} words.\n\n"
+            f"User: {user_text}\nAssistant: {assistant_text}"
+        )
+        ok, text = generate_with_model(cfg, cfg.session_title_model, prompt, path.stem, cfg.effective_attachment_dir, [], timeout=60)
+        title = clean_session_title(text.splitlines()[0] if ok and text else "", cfg.session_title_max_words)
+    if title:
+        write_session_title_metadata(path, title, cfg.session_title_max_words)
 
 
 # ---------------------------------------------------------------------------
@@ -1721,7 +1905,7 @@ def now_time() -> str:
 # compatibility, and the parallel Bash/C implementation plans.
 # ------------------------------------------------------------
 def append_log(path: Path, speaker: str, text: str, timestamp: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_prechat_line(path)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(f"[{timestamp}] {speaker}: {text}\n")
 
@@ -3826,21 +4010,15 @@ class AICursesApp:
     # session-log compatibility, and the parallel Bash/C implementation plans.
     # ------------------------------------------------------------
     def rename_session(self, old_name: str, new_name: str) -> None:
-        new_name = sanitize_session_name(new_name)
         old_path = self.cfg.session_dir / f"{old_name}.log"
-        new_path = self.cfg.session_dir / f"{new_name}.log"
-        if new_path.exists() and new_path != old_path:
-            self.show_message("RENAME SESSION", [f"Target already exists: {new_name}"])
+        if not old_path.exists():
+            self.show_message("RETITLE SESSION", [f"Session not found: {old_name}"])
             return
-        if old_path.exists():
-            old_path.rename(new_path)
-        # Rename attachment prefixes for consistency.
-        for path in self.attachment_dir.glob(f"{old_name}-*"):
-            path.rename(self.attachment_dir / (new_name + path.name[len(old_name):]))
-        if old_name == self.session_name:
-            self.session_name = new_name
-            self.session_path = new_path
-        self.status = f"renamed session: {old_name} -> {new_name}"
+        if write_session_title_metadata(old_path, new_name, self.cfg.session_title_max_words):
+            self.status = f"session title set: {session_display_title(old_path, self.cfg.session_title_max_words)}"
+        else:
+            self.show_message("RETITLE SESSION", ["Title was empty after cleanup."])
+
 
     # ------------------------------------------------------------
     # MAINTAINER COMMENTARY: def open_session_browser
@@ -3861,7 +4039,7 @@ class AICursesApp:
             height, width = self.stdscr.getmaxyx()
             visible_h = max(1, height - 6)
             self.safe_addstr(0, 0, "SESSION BROWSER", width, self.reverse_attr())
-            self.safe_addstr(1, 0, "Enter=switch | a=new chat | d=delete | r=rename | n=rename current | j/k move | Esc/q=cancel", width, self.dim_attr())
+            self.safe_addstr(1, 0, "Enter=switch | a=new chat | d=delete | r=retitle | n=retitle current | j/k move | Esc/q=cancel", width, self.dim_attr())
             self.safe_addstr(2, 0, f"Current: {self.session_name}", width)
             self.safe_addstr(3, 0, "_" * width, width, self.dim_attr())
             if selected < top_index:
@@ -3873,8 +4051,10 @@ class AICursesApp:
                 if idx >= len(names):
                     break
                 marker = "* " if names[idx] == self.session_name else "  "
+                title = session_display_title(self.cfg.session_dir / f"{names[idx]}.log", self.cfg.session_title_max_words)
+                label = f"{title}  ({names[idx]})" if title != names[idx] else names[idx]
                 attr = self.reverse_attr() if idx == selected else 0
-                self.safe_addstr(4 + row, 0, marker + names[idx], width, attr)
+                self.safe_addstr(4 + row, 0, marker + label, width, attr)
             self.safe_addstr(height - 1, 0, f"{selected + 1}/{len(names)}", width, self.dim_attr())
             self.stdscr.refresh()
             ch = self.stdscr.getch()
@@ -3928,12 +4108,12 @@ class AICursesApp:
                 continue
             if ch in (ord("r"), ord("R")):
                 old = names[selected]
-                new = self.text_input_modal("RENAME SESSION", f"Rename session '{old}' to:", old)
+                new = self.text_input_modal("RETITLE SESSION", f"Friendly title for '{old}':", session_display_title(self.cfg.session_dir / f"{old}.log", self.cfg.session_title_max_words))
                 if new:
                     self.rename_session(old, new)
                 continue
             if ch in (ord("n"), ord("N")):
-                new = self.text_input_modal("RENAME CURRENT SESSION", "New name for current session:", self.session_name)
+                new = self.text_input_modal("RETITLE CURRENT SESSION", "Friendly title for current session:", session_display_title(self.session_path, self.cfg.session_title_max_words))
                 if new:
                     self.rename_session(self.session_name, new)
                 continue
@@ -4075,6 +4255,9 @@ class AICursesApp:
                 {"key": "SEND_INPUT", "label": "Send key", "kind": "choice", "value": self.cfg.send_input, "choices": ["enter", "ctrl_g", "ctrl_enter"]},
                 {"key": "PROMPT_SESSION_NAME", "label": "Prompt for session name", "kind": "bool", "value": self.cfg.prompt_session_name},
                 {"key": "CODE_ATTACHMENT_MIN_LINES", "label": "Code block attachment min lines", "kind": "int", "value": str(self.cfg.code_attachment_min_lines)},
+                {"key": "SESSION_AUTO_TITLE", "label": "AI session-title metadata", "kind": "bool", "value": self.cfg.session_auto_title},
+                {"key": "SESSION_TITLE_MODEL", "label": "Session title model", "kind": "text", "value": self.cfg.session_title_model},
+                {"key": "SESSION_TITLE_MAX_WORDS", "label": "Session title max words", "kind": "int", "value": str(self.cfg.session_title_max_words)},
                 {"key": "MONOCHROME", "label": "Monochrome mode", "kind": "bool", "value": self.cfg.monochrome},
                 {"key": "STARTUP_NOTICE", "label": "Startup Project Lead notice", "kind": "bool", "value": self.cfg.startup_notice},
                 {"key": "DEMO_MODE", "label": "Demo mode", "kind": "bool", "value": self.cfg.demo_mode},
@@ -4157,6 +4340,15 @@ class AICursesApp:
             elif key == "CODE_ATTACHMENT_MIN_LINES":
                 self.cfg.code_attachment_min_lines = parse_positive_int(str(value), self.cfg.code_attachment_min_lines)
                 set_config_value(self.cfg, key, str(self.cfg.code_attachment_min_lines))
+            elif key == "SESSION_AUTO_TITLE":
+                self.cfg.session_auto_title = bool(value)
+                set_config_value(self.cfg, key, "1" if self.cfg.session_auto_title else "0")
+            elif key == "SESSION_TITLE_MODEL":
+                self.cfg.session_title_model = normalize_model_id(str(value)) or FALLBACK_MODEL
+                set_config_value(self.cfg, key, self.cfg.session_title_model)
+            elif key == "SESSION_TITLE_MAX_WORDS":
+                self.cfg.session_title_max_words = parse_positive_int(str(value), self.cfg.session_title_max_words)
+                set_config_value(self.cfg, key, str(self.cfg.session_title_max_words))
             elif key == "MONOCHROME":
                 self.cfg.monochrome = bool(value)
                 set_config_value(self.cfg, key, "1" if self.cfg.monochrome else "0")
@@ -4853,6 +5045,7 @@ class AICursesApp:
         self.context_buffer.append("Assistant: " + cleaned_output)
         self.trim_context_buffer()
         self.save_context_snapshot()
+        generate_session_title(self.cfg, self.session_path, message, cleaned_output)
         self.transcript.append(TranscriptItem("AI", cleaned_output, openrouter_time))
         self.status = "response complete"
 
@@ -5069,6 +5262,29 @@ def main() -> int:
     if args.list:
         list_sessions(cfg.session_dir)
         return 0
+    if args.rename_session:
+        session_name, session_path = resolve_session_argument(cfg, args.rename_session[0])
+        if not session_path.exists():
+            print(f"error: session not found: {args.rename_session[0]}", file=sys.stderr)
+            return 1
+        ok = write_session_title_metadata(session_path, args.rename_session[1], cfg.session_title_max_words)
+        if not ok:
+            print("error: title was empty after cleanup", file=sys.stderr)
+            return 1
+        print(f"session title set: {session_display_title(session_path, cfg.session_title_max_words)}")
+        return 0
+    if args.turns:
+        _session_name, session_path = resolve_session_argument(cfg, args.turns)
+        return print_turns(session_path)
+    if args.branch:
+        _session_name, session_path = resolve_session_argument(cfg, args.branch[0])
+        return branch_session_cli(cfg, session_path, args.branch[1])
+    if args.edit_turn:
+        print("--edit-turn is not implemented in ttychatter.ncurses; use ttychatter.python or the C edition for edit-and-branch.", file=sys.stderr)
+        return 2
+    if args.export:
+        _session_name, session_path = resolve_session_argument(cfg, args.export)
+        return export_session_cli(session_path, args.format, args.output)
     if args.model_type:
         cfg.model_type_filter = args.model_type
     if args.routers:
@@ -5082,8 +5298,12 @@ def main() -> int:
         return print_doctor(cfg)
     if args.test_model:
         return print_model_test(cfg, args.test_model)
-    if args.resume and args.session_name:
-        print("error: use either a session name or --resume, not both", file=sys.stderr)
+    chosen = args.session or args.session_name
+    if args.resume and chosen:
+        print("error: use either a session operand/--session or --resume, not both", file=sys.stderr)
+        return 2
+    if args.new and (args.resume or chosen):
+        print("error: --new cannot be combined with --resume, --session, or a session operand", file=sys.stderr)
         return 2
 
     if args.resume:
@@ -5091,11 +5311,10 @@ def main() -> int:
         if not session_path.exists():
             print(f"error: session not found: {session_name}", file=sys.stderr)
             return 1
-    elif args.session_name:
-        session_name = sanitize_session_name(args.session_name)
-        session_path = cfg.session_dir / f"{session_name}.log"
+    elif chosen:
+        session_name, session_path = resolve_session_argument(cfg, chosen)
     else:
-        session_name = default_session_name()
+        session_name = default_session_name_unique(cfg.session_dir)
         session_path = cfg.session_dir / f"{session_name}.log"
 
     app = AICursesApp(cfg, session_name, session_path)
