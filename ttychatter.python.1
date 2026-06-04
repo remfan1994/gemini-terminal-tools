@@ -197,12 +197,26 @@ Run diagnostics.
 Show credits.
 .SH CONFIGURATION
 The shared config file is
+.IR $XDG_CONFIG_HOME/ttychatter/openrouter/config
+or, when XDG_CONFIG_HOME is unset,
 .IR ~/.config/ttychatter/openrouter/config .
+Sessions default to
+.IR $XDG_DATA_HOME/ttychatter/openrouter/sessions ,
+attachments to
+.IR $XDG_DATA_HOME/ttychatter/openrouter/attachments ,
+and the model cache to
+.IR $XDG_CACHE_HOME/ttychatter/openrouter/models.json .
+Model favorites default to
+.IR $XDG_CONFIG_HOME/ttychatter/openrouter/model-favorites .
+All implementations use these shared paths and still read the old
+.IR $XDG_CONFIG_HOME/ttychatter/config
+file as a compatibility fallback when the provider-specific config is absent.
 Important keys include MODEL, CONTEXT_TURNS, SESSION_DIR, ATTACHMENT_DIR,
 MODEL_TEST_PROMPT, STARTUP_NOTICE, SESSION_AUTO_TITLE, SESSION_TITLE_MODEL,
 SESSION_TITLE_MAX_WORDS, STREAM, STATUS_UPDATES, VOICE_INPUT_CMD,
-VOICE_OUTPUT_CMD, TTS_CMD, VOICE_OUTPUT, MODEL_FAVORITES_FILE, SEND_INPUT,
-THEME, CODE_ATTACHMENT_MIN_LINES, MAX_ATTACHMENT_BYTES, and API_KEY_GPG_FILE.
+VOICE_OUTPUT_CMD, TTS_CMD, VOICE_OUTPUT, MODEL_CACHE_FILE,
+MODEL_FAVORITES_FILE, SEND_INPUT, THEME, CODE_ATTACHMENT_MIN_LINES,
+MAX_ATTACHMENT_BYTES, and API_KEY_GPG_FILE.
 .PP
 SESSION_AUTO_TITLE defaults to 0. When enabled, SESSION_TITLE_MODEL is a
 secondary model used only for title metadata. The normal chat model remains MODEL.

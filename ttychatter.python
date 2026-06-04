@@ -80,24 +80,27 @@
 # forked, repaired, and carried forward by people who were not present for the
 # original design conversations.
 # ==========================================================
-DEFAULT_KEY_FILE="/home/mailbot/.secrets/ttychatter/mailbot/openrouter-default.key"
-
-if [ -z "$OPENROUTER_API_KEY" ] && [ -r "$DEFAULT_KEY_FILE" ]; then
-    OPENROUTER_API_KEY="$(tr -d '\n' < "$DEFAULT_KEY_FILE")"
-    export OPENROUTER_API_KEY
-fi
 set -o pipefail
 
 PROGRAM="ttychatter.python"
-VERSION="3.15-parity"
+VERSION="3.16-parity"
 
-CONFIG_DIR="$HOME/.config/ttychatter/openrouter"
+XDG_CONFIG_ROOT="${XDG_CONFIG_HOME:-$HOME/.config}"
+XDG_DATA_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}"
+XDG_CACHE_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}"
+CONFIG_DIR="$XDG_CONFIG_ROOT/ttychatter/openrouter"
 CONFIG_FILE="$CONFIG_DIR/config"
-MODEL_CACHE_FILE="$CONFIG_DIR/models-cache.json"
-API_KEY_GPG_FILE="$CONFIG_DIR/api-key.gpg"
+LEGACY_CONFIG_FILE="$XDG_CONFIG_ROOT/ttychatter/config"
 CONFIG_READ_FILE="$CONFIG_FILE"
+[ ! -f "$CONFIG_READ_FILE" ] && [ -f "$LEGACY_CONFIG_FILE" ] && CONFIG_READ_FILE="$LEGACY_CONFIG_FILE"
+MODEL_CACHE_FILE="$XDG_CACHE_ROOT/ttychatter/openrouter/models.json"
+MODEL_CACHE_FILE_CONFIGURED=0
+LEGACY_MODEL_CACHE_FILE="$CONFIG_DIR/models-cache.json"
+API_KEY_GPG_FILE="$CONFIG_DIR/api-key.gpg"
+LEGACY_API_KEY_GPG_FILE="$XDG_CONFIG_ROOT/ttychatter/api-key.gpg"
 
-SESSION_DIR="$HOME/.local/share/ttychatter/openrouter/sessions"
+SESSION_DIR="$XDG_DATA_ROOT/ttychatter/openrouter/sessions"
+DEFAULT_ATTACHMENT_DIR="$XDG_DATA_ROOT/ttychatter/openrouter/attachments"
 ATTACHMENT_DIR=""
 ATTACHMENT_DIR_CONFIGURED=0
 
@@ -120,7 +123,8 @@ MODEL_MIN_INPUT_TOKENS=0
 MODEL_MIN_OUTPUT_TOKENS=0
 MODEL_SORT_ORDER="name"
 MODEL_TYPE_FILTER="all"
-MODEL_FAVORITES_FILE="$CONFIG_DIR/model-favorites.txt"
+MODEL_FAVORITES_FILE="$CONFIG_DIR/model-favorites"
+LEGACY_MODEL_FAVORITES_FILE="$CONFIG_DIR/model-favorites.txt"
 THEME="default"
 SEND_INPUT="ctrl_d"
 CODE_ATTACHMENT_MIN_LINES=5
@@ -461,6 +465,7 @@ if [ -f "$CONFIG_READ_FILE" ]; then
       MODEL_MIN_OUTPUT_TOKENS) MODEL_MIN_OUTPUT_TOKENS="$value" ;;
       MODEL_SORT_ORDER) MODEL_SORT_ORDER="$value" ;;
       MODEL_TYPE_FILTER) MODEL_TYPE_FILTER="$value" ;;
+      MODEL_CACHE_FILE) MODEL_CACHE_FILE="$(expand_path "$value")"; MODEL_CACHE_FILE_CONFIGURED=1 ;;
       MODEL_FAVORITES_FILE) MODEL_FAVORITES_FILE="$(expand_path "$value")" ;;
       THEME) THEME="$value" ;;
       SEND_INPUT) SEND_INPUT="$value" ;;
@@ -490,10 +495,16 @@ SESSION_TITLE_MAX_WORDS="$(positive_int_or_default "$SESSION_TITLE_MAX_WORDS" 8)
 if [ -z "$OPENROUTER_API_KEY" ]; then
   OPENROUTER_API_KEY="$(decrypt_gpg_key_file "$API_KEY_GPG_FILE" || true)"
 fi
+if [ -z "$OPENROUTER_API_KEY" ] && [ -f "$LEGACY_API_KEY_GPG_FILE" ]; then
+  OPENROUTER_API_KEY="$(decrypt_gpg_key_file "$LEGACY_API_KEY_GPG_FILE" || true)"
+fi
 
-if [ "$ATTACHMENT_DIR_CONFIGURED" -eq 0 ]; then ATTACHMENT_DIR="$SESSION_DIR/attachments"; fi
+if [ "$ATTACHMENT_DIR_CONFIGURED" -eq 0 ]; then ATTACHMENT_DIR="$DEFAULT_ATTACHMENT_DIR"; fi
 
-mkdir -p "$CONFIG_DIR" "$SESSION_DIR" "$ATTACHMENT_DIR"
+mkdir -p "$CONFIG_DIR" "$SESSION_DIR" "$ATTACHMENT_DIR" "$(dirname "$MODEL_CACHE_FILE")"
+if [ ! -e "$MODEL_FAVORITES_FILE" ] && [ -f "$LEGACY_MODEL_FAVORITES_FILE" ]; then
+  cp "$LEGACY_MODEL_FAVORITES_FILE" "$MODEL_FAVORITES_FILE" 2>/dev/null || true
+fi
 
 # ==========================================================
 # CONFIG WRITING / OPTIONS PARITY
@@ -564,14 +575,6 @@ Core:
   THEME=$THEME
   SEND_INPUT=$SEND_INPUT
   CODE_ATTACHMENT_MIN_LINES=$CODE_ATTACHMENT_MIN_LINES
-  STREAM=$STREAM
-  STATUS_UPDATES=$STATUS_UPDATES
-  SESSION_AUTO_TITLE=$SESSION_AUTO_TITLE
-  SESSION_TITLE_MODEL=${SESSION_TITLE_MODEL:-$FALLBACK_MODEL}
-  SESSION_TITLE_MAX_WORDS=$SESSION_TITLE_MAX_WORDS
-  VOICE_INPUT_CMD=$VOICE_INPUT_CMD
-  VOICE_OUTPUT_CMD=$VOICE_OUTPUT_CMD
-  VOICE_OUTPUT=$VOICE_OUTPUT
   MODEL_FAVORITES_FILE=$MODEL_FAVORITES_FILE
 
 Model cache:
@@ -1216,6 +1219,7 @@ fetch_models_live_json() {
 # ----------------------------------------------------------
 update_models_cache() {
   local json
+  mkdir -p "$(dirname "$MODEL_CACHE_FILE")" 2>/dev/null || true
   json="$(fetch_models_live_json)" || return 1
   printf '%s' "$json" > "$MODEL_CACHE_FILE"
   chmod 600 "$MODEL_CACHE_FILE" 2>/dev/null || true
@@ -1230,7 +1234,7 @@ update_models_cache() {
 # ----------------------------------------------------------
 models_json_for_display() {
   if truthy "$DEMO_MODE"; then demo_models_json; return 0; fi
-  if [ -f "$MODEL_CACHE_FILE" ]; then cat "$MODEL_CACHE_FILE"; else update_models_cache >/dev/null || return 1; cat "$MODEL_CACHE_FILE"; fi
+  if [ -f "$MODEL_CACHE_FILE" ]; then cat "$MODEL_CACHE_FILE"; elif [ "$MODEL_CACHE_FILE_CONFIGURED" -eq 0 ] && [ -f "$LEGACY_MODEL_CACHE_FILE" ]; then cat "$LEGACY_MODEL_CACHE_FILE"; else update_models_cache >/dev/null || return 1; cat "$MODEL_CACHE_FILE"; fi
 }
 
 # ----------------------------------------------------------

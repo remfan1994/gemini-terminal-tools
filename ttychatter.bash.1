@@ -58,6 +58,8 @@ Everyone is encouraged to get the cruelty-free vegetarian alternatives and remem
 .fi
 .PP
 Automatic log filenames remain timestamped under
+.IR $XDG_DATA_HOME/ttychatter/openrouter/sessions
+or, when XDG_DATA_HOME is unset,
 .IR ~/.local/share/ttychatter/openrouter/sessions .
 The friendly user-facing name is stored as session-title metadata inside the log.
 .B --list
@@ -233,12 +235,25 @@ Route interface text to stderr and model output to stdout.
 Append each model output to PATH.
 .SH CONFIGURATION
 The shared config file is
+.IR $XDG_CONFIG_HOME/ttychatter/openrouter/config
+or, when XDG_CONFIG_HOME is unset,
 .IR ~/.config/ttychatter/openrouter/config .
+Sessions default to
+.IR $XDG_DATA_HOME/ttychatter/openrouter/sessions ,
+attachments to
+.IR $XDG_DATA_HOME/ttychatter/openrouter/attachments ,
+and the model cache to
+.IR $XDG_CACHE_HOME/ttychatter/openrouter/models.json .
+Model favorites default to
+.IR $XDG_CONFIG_HOME/ttychatter/openrouter/model-favorites .
+All implementations use these shared paths and still read the old
+.IR $XDG_CONFIG_HOME/ttychatter/config
+file as a compatibility fallback when the provider-specific config is absent.
 Relevant parity keys include MODEL, CONTEXT_TURNS, SESSION_DIR, ATTACHMENT_DIR,
 STARTUP_NOTICE, SESSION_AUTO_TITLE, SESSION_TITLE_MODEL,
 SESSION_TITLE_MAX_WORDS, STREAM, STATUS_UPDATES, VOICE_INPUT_CMD,
-VOICE_OUTPUT_CMD, TTS_CMD, VOICE_OUTPUT, SEND_INPUT, and
-CODE_ATTACHMENT_MIN_LINES.
+VOICE_OUTPUT_CMD, TTS_CMD, VOICE_OUTPUT, MODEL_CACHE_FILE,
+MODEL_FAVORITES_FILE, SEND_INPUT, and CODE_ATTACHMENT_MIN_LINES.
 .PP
 SESSION_AUTO_TITLE defaults to 0. When enabled, ttychatter may use
 SESSION_TITLE_MODEL as a secondary model only for session-title metadata.

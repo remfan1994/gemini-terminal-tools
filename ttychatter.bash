@@ -62,13 +62,22 @@
 set -o pipefail
 
 PROGRAM="ttychatter.bash"
-VERSION="0.14.0-bash-only-parity"
-CONFIG_DIR="$HOME/.config/ttychatter/openrouter"
+VERSION="0.14.1-bash-only-parity"
+XDG_CONFIG_ROOT="${XDG_CONFIG_HOME:-$HOME/.config}"
+XDG_DATA_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}"
+XDG_CACHE_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}"
+CONFIG_DIR="$XDG_CONFIG_ROOT/ttychatter/openrouter"
 CONFIG_FILE="$CONFIG_DIR/config"
-MODEL_CACHE_FILE="$CONFIG_DIR/models-cache.json"
-API_KEY_GPG_FILE="$CONFIG_DIR/api-key.gpg"
+LEGACY_CONFIG_FILE="$XDG_CONFIG_ROOT/ttychatter/config"
 CONFIG_READ_FILE="$CONFIG_FILE"
-SESSION_DIR="$HOME/.local/share/ttychatter/openrouter/sessions"
+[ ! -f "$CONFIG_READ_FILE" ] && [ -f "$LEGACY_CONFIG_FILE" ] && CONFIG_READ_FILE="$LEGACY_CONFIG_FILE"
+MODEL_CACHE_FILE="$XDG_CACHE_ROOT/ttychatter/openrouter/models.json"
+MODEL_CACHE_FILE_CONFIGURED=0
+LEGACY_MODEL_CACHE_FILE="$CONFIG_DIR/models-cache.json"
+API_KEY_GPG_FILE="$CONFIG_DIR/api-key.gpg"
+LEGACY_API_KEY_GPG_FILE="$XDG_CONFIG_ROOT/ttychatter/api-key.gpg"
+SESSION_DIR="$XDG_DATA_ROOT/ttychatter/openrouter/sessions"
+DEFAULT_ATTACHMENT_DIR="$XDG_DATA_ROOT/ttychatter/openrouter/attachments"
 ATTACHMENT_DIR=""
 ATTACHMENT_DIR_CONFIGURED=0
 MODEL=""
@@ -78,7 +87,8 @@ MODEL_MIN_INPUT_TOKENS=0
 MODEL_MIN_OUTPUT_TOKENS=0
 MODEL_FILTER_REQUIRE_TOKENS=0
 MODEL_FILTER_HIDE_PREVIEW=0
-MODEL_FAVORITES_FILE="$CONFIG_DIR/model-favorites.txt"
+MODEL_FAVORITES_FILE="$CONFIG_DIR/model-favorites"
+LEGACY_MODEL_FAVORITES_FILE="$CONFIG_DIR/model-favorites.txt"
 THEME="default"
 SEND_INPUT="ctrl_d"
 CODE_ATTACHMENT_MIN_LINES=5
@@ -261,6 +271,7 @@ load_config() {
       MODEL_MIN_OUTPUT_TOKENS) MODEL_MIN_OUTPUT_TOKENS="$value" ;;
       MODEL_FILTER_REQUIRE_TOKENS) MODEL_FILTER_REQUIRE_TOKENS="$value" ;;
       MODEL_FILTER_HIDE_PREVIEW) MODEL_FILTER_HIDE_PREVIEW="$value" ;;
+      MODEL_CACHE_FILE) MODEL_CACHE_FILE="${value/#\~/$HOME}"; MODEL_CACHE_FILE_CONFIGURED=1 ;;
       MODEL_FAVORITES_FILE) MODEL_FAVORITES_FILE="${value/#\~/$HOME}" ;;
       THEME) THEME="$value" ;;
       SEND_INPUT) SEND_INPUT="$value" ;;
@@ -379,14 +390,20 @@ load_config
 if [ -z "$OPENROUTER_API_KEY" ]; then
   OPENROUTER_API_KEY="$(decrypt_gpg_key_file "$API_KEY_GPG_FILE" || true)"
 fi
+if [ -z "$OPENROUTER_API_KEY" ] && [ -f "$LEGACY_API_KEY_GPG_FILE" ]; then
+  OPENROUTER_API_KEY="$(decrypt_gpg_key_file "$LEGACY_API_KEY_GPG_FILE" || true)"
+fi
 case "$CONTEXT_TURNS" in ''|*[!0-9]*) CONTEXT_TURNS=8 ;; esac
 [ "$CONTEXT_TURNS" -lt 1 ] && CONTEXT_TURNS=8
 case "$MODEL_MIN_INPUT_TOKENS" in ''|*[!0-9]*) MODEL_MIN_INPUT_TOKENS=0 ;; esac
 case "$MODEL_MIN_OUTPUT_TOKENS" in ''|*[!0-9]*) MODEL_MIN_OUTPUT_TOKENS=0 ;; esac
 case "$CODE_ATTACHMENT_MIN_LINES" in ''|*[!0-9]*) CODE_ATTACHMENT_MIN_LINES=5 ;; esac
 [ "$CODE_ATTACHMENT_MIN_LINES" -lt 1 ] && CODE_ATTACHMENT_MIN_LINES=5
-[ "$ATTACHMENT_DIR_CONFIGURED" -eq 0 ] && ATTACHMENT_DIR="$SESSION_DIR/attachments"
-mkdir -p "$CONFIG_DIR" "$SESSION_DIR" "$ATTACHMENT_DIR"
+[ "$ATTACHMENT_DIR_CONFIGURED" -eq 0 ] && ATTACHMENT_DIR="$DEFAULT_ATTACHMENT_DIR"
+mkdir -p "$CONFIG_DIR" "$SESSION_DIR" "$ATTACHMENT_DIR" "$(dirname "$MODEL_CACHE_FILE")"
+if [ ! -e "$MODEL_FAVORITES_FILE" ] && [ -f "$LEGACY_MODEL_FAVORITES_FILE" ]; then
+  cp "$LEGACY_MODEL_FAVORITES_FILE" "$MODEL_FAVORITES_FILE" 2>/dev/null || true
+fi
 
 # ----------------------------------------------------------
 # MAINTAINER COMMENTARY: function require_api_key
@@ -581,14 +598,14 @@ fetch_models_json() { if truthy "$DEMO_MODE"; then demo_models_json; return 0; f
 # Changes should preserve old-system usability and update docs/comments if
 # behavior changes.
 # ----------------------------------------------------------
-update_models_cache() { local json; json="$(fetch_models_json)" || return 1; printf '%s' "$json" > "$MODEL_CACHE_FILE"; printf 'updated model cache: %s\n' "$MODEL_CACHE_FILE"; }
+update_models_cache() { local json; mkdir -p "$(dirname "$MODEL_CACHE_FILE")" 2>/dev/null || true; json="$(fetch_models_json)" || return 1; printf '%s' "$json" > "$MODEL_CACHE_FILE"; chmod 600 "$MODEL_CACHE_FILE" 2>/dev/null || true; printf 'updated model cache: %s\n' "$MODEL_CACHE_FILE"; }
 # ----------------------------------------------------------
 # MAINTAINER COMMENTARY: function models_json_source
 # models_json_source is part of the dependency-light client behavior.
 # Changes should preserve old-system usability and update docs/comments if
 # behavior changes.
 # ----------------------------------------------------------
-models_json_source() { if truthy "$DEMO_MODE"; then demo_models_json; return 0; fi; if [ -f "$MODEL_CACHE_FILE" ]; then cat "$MODEL_CACHE_FILE"; else fetch_models_json; fi; }
+models_json_source() { if truthy "$DEMO_MODE"; then demo_models_json; return 0; fi; if [ -f "$MODEL_CACHE_FILE" ]; then cat "$MODEL_CACHE_FILE"; elif [ "$MODEL_CACHE_FILE_CONFIGURED" -eq 0 ] && [ -f "$LEGACY_MODEL_CACHE_FILE" ]; then cat "$LEGACY_MODEL_CACHE_FILE"; else fetch_models_json; fi; }
 # ----------------------------------------------------------
 # MAINTAINER COMMENTARY: function parse_models_basic
 # parse_models_basic is part of the dependency-light client behavior.
@@ -841,6 +858,21 @@ resolve_session_arg() {
     *) printf '%s/%s.log
 ' "$SESSION_DIR" "$(sanitize_session_name "$1")" ;;
   esac
+}
+
+default_session_name_unique() {
+  local base name path n
+  base="session-$(date +%Y-%m-%d-%H-%M-%S)"
+  name="$base"
+  path="$(resolve_session_path "$name")"
+  n=1
+  while [ -e "$path" ]; do
+    name="$(printf '%s-%03d' "$base" "$n")"
+    path="$(resolve_session_path "$name")"
+    n=$((n+1))
+  done
+  printf '%s
+' "$name"
 }
 
 session_title_clean() {
@@ -1121,6 +1153,7 @@ print_config_summary() {
   printf 'THEME=%s\n' "$THEME"
   printf 'SEND_INPUT=%s\n' "$SEND_INPUT"
   printf 'CODE_ATTACHMENT_MIN_LINES=%s\n' "$CODE_ATTACHMENT_MIN_LINES"
+  printf 'MODEL_CACHE_FILE=%s\n' "$MODEL_CACHE_FILE"
   printf 'MODEL_FAVORITES_FILE=%s\n' "$MODEL_FAVORITES_FILE"
   printf 'MODEL_SORT_ORDER=%s\n' "$MODEL_SORT_ORDER"
   printf 'MODEL_MIN_INPUT_TOKENS=%s\n' "$MODEL_MIN_INPUT_TOKENS"
@@ -1275,7 +1308,7 @@ branch_session_command() {
   [ -n "$source" ] && [ -n "$turn" ] || { printf '%s\n' "usage: --branch SESSION TURN" >&2; return 2; }
   src="$(resolve_session_arg "$source")"
   [ -f "$src" ] || { printf 'session not found: %s\n' "$src" >&2; return 1; }
-  branch="$(resolve_session_path "session-$(date +%Y-%m-%d-%H-%M-%S)")"
+  branch="$(resolve_session_path "$(default_session_name_unique)")"
   ensure_prechat_line "$branch"
   printf '[%s] system: branch-from: %s\n[%s] system: branch-turn: %s\n[%s] system: branch-reason: manual-branch\n' "$(timestamp)" "$src" "$(timestamp)" "$turn" "$(timestamp)" >> "$branch"
   awk -v max="$turn" '
@@ -1490,7 +1523,7 @@ if [ "$FORCE_NEW" -eq 1 ] && { [ -n "$SESSION_NAME" ] || [ -n "$OUTPUT_PATH" ] |
 fi
 SESSION_ARG="$SESSION_NAME"
 if [ -z "$SESSION_ARG" ]; then
-  SESSION_NAME="session-$(date +%Y-%m-%d-%H-%M-%S)"
+  SESSION_NAME="$(default_session_name_unique)"
   SESSION="$(resolve_session_path "$SESSION_NAME")"
 elif [ -n "$OUTPUT_PATH" ]; then
   SESSION_NAME="$(sanitize_session_name "$SESSION_ARG")"

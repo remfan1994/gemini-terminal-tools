@@ -107,7 +107,20 @@ Send MODEL_TEST_PROMPT to MODEL and print the response.
 Append each AI response to PATH while the ncurses UI remains interactive.
 .SH CONFIGURATION
 The shared config file is
+.IR $XDG_CONFIG_HOME/ttychatter/openrouter/config
+or, when XDG_CONFIG_HOME is unset,
 .IR ~/.config/ttychatter/openrouter/config .
+Sessions default to
+.IR $XDG_DATA_HOME/ttychatter/openrouter/sessions ,
+attachments to
+.IR $XDG_DATA_HOME/ttychatter/openrouter/attachments ,
+and the model cache to
+.IR $XDG_CACHE_HOME/ttychatter/openrouter/models.json .
+Model favorites default to
+.IR $XDG_CONFIG_HOME/ttychatter/openrouter/model-favorites .
+All implementations use these shared paths and still read the old
+.IR $XDG_CONFIG_HOME/ttychatter/config
+file as a compatibility fallback when the provider-specific config is absent.
 Relevant keys include MODEL, CONTEXT_TURNS, SESSION_DIR, ATTACHMENT_DIR,
 EDITOR, MODEL_CACHE_FILE, MODEL_FILTER_CHAT_COMPLETIONS,
 MODEL_FILTER_REQUIRE_TOKENS, MODEL_FILTER_HIDE_PREVIEW,

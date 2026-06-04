@@ -74,7 +74,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-VERSION = "0.15.0-parity"
+VERSION = "0.15.1-parity"
 PROGRAM = "ttychatter.ncurses"
 FALLBACK_MODEL = "openrouter/auto"
 DEFAULT_MODEL_TEST_PROMPT = "Please reply with one short sentence confirming this model is available for text generation."
@@ -84,8 +84,21 @@ PRECHAT_LINE = PROJECT_NOTICE
 INPUT_PLACEHOLDER_DEFAULT = "Type here..."
 MOUSE_SCROLL_LINES = 3
 MAX_INLINE_ATTACHMENT_BYTES = 20 * 1024 * 1024
-DEFAULT_MODEL_CACHE_FILE = Path.home() / ".cache" / "ttychatter" / "openrouter" / "models.json"
-DEFAULT_GPG_API_KEY_FILE = Path.home() / ".config" / "ttychatter" / "openrouter" / "api-key.gpg"
+def xdg_home(env_name: str, fallback: Path) -> Path:
+    raw = os.environ.get(env_name, "").strip()
+    return Path(raw).expanduser() if raw else fallback
+
+
+DEFAULT_CONFIG_HOME = xdg_home("XDG_CONFIG_HOME", Path.home() / ".config")
+DEFAULT_DATA_HOME = xdg_home("XDG_DATA_HOME", Path.home() / ".local" / "share")
+DEFAULT_CACHE_HOME = xdg_home("XDG_CACHE_HOME", Path.home() / ".cache")
+DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_HOME / "ttychatter" / "openrouter" / "config"
+LEGACY_CONFIG_FILE = DEFAULT_CONFIG_HOME / "ttychatter" / "config"
+DEFAULT_MODEL_CACHE_FILE = DEFAULT_CACHE_HOME / "ttychatter" / "openrouter" / "models.json"
+DEFAULT_GPG_API_KEY_FILE = DEFAULT_CONFIG_HOME / "ttychatter" / "openrouter" / "api-key.gpg"
+LEGACY_GPG_API_KEY_FILE = DEFAULT_CONFIG_HOME / "ttychatter" / "api-key.gpg"
+DEFAULT_SESSION_DIR = DEFAULT_DATA_HOME / "ttychatter" / "openrouter" / "sessions"
+DEFAULT_ATTACHMENT_DIR = DEFAULT_DATA_HOME / "ttychatter" / "openrouter" / "attachments"
 DEFAULT_MODEL_MIN_INPUT_TOKENS = 0
 DEFAULT_MODEL_MIN_OUTPUT_TOKENS = 0
 DEFAULT_MODEL_SORT_ORDER = "api"
@@ -124,7 +137,7 @@ class Config:
     api_key_gpg_file: Optional[Path] = None
     confirm_live_send: bool = True
     live_send_confirmed: bool = False
-    session_dir: Path = field(default_factory=lambda: Path.home() / ".local" / "share" / "ttychatter" / "openrouter" / "sessions")
+    session_dir: Path = field(default_factory=lambda: DEFAULT_SESSION_DIR)
     attachment_dir: Optional[Path] = None
     editor: str = ""
     github_url: str = DEFAULT_GITHUB_URL
@@ -132,7 +145,7 @@ class Config:
     monochrome: bool = False
     input_placeholder: str = INPUT_PLACEHOLDER_DEFAULT
     startup_notice: bool = True
-    config_file: Path = field(default_factory=lambda: Path.home() / ".config" / "ttychatter" / "openrouter" / "config")
+    config_file: Path = field(default_factory=lambda: DEFAULT_CONFIG_FILE)
     model_cache_file: Path = field(default_factory=lambda: DEFAULT_MODEL_CACHE_FILE)
     model_filter_chat_completions: bool = True
     model_filter_require_tokens: bool = False
@@ -187,7 +200,7 @@ class Config:
     def effective_attachment_dir(self) -> Path:
         if self.attachment_dir is not None:
             return self.attachment_dir
-        return self.session_dir / "attachments"
+        return DEFAULT_ATTACHMENT_DIR
 
     @property
     def effective_model_favorites_file(self) -> Path:
@@ -199,7 +212,7 @@ class Config:
         """
         if self.model_favorites_file is not None:
             return self.model_favorites_file
-        return self.config_file.parent / "model-favorites.txt"
+        return self.config_file.parent / "model-favorites"
 
     @property
     # ------------------------------------------------------------
@@ -393,6 +406,8 @@ def load_config() -> Config:
     context_turns_explicit = False
 
     read_config_file = cfg.config_file
+    if not read_config_file.exists() and LEGACY_CONFIG_FILE.exists():
+        read_config_file = LEGACY_CONFIG_FILE
 
     # Namespace note:
     # ttychatter AI clients read ~/.config/ttychatter/openrouter/config. Keep
@@ -496,6 +511,8 @@ def load_config() -> Config:
 
     if not cfg.api_key:
         cfg.api_key = decrypt_gpg_file(cfg.effective_api_key_gpg_file)
+    if not cfg.api_key and LEGACY_GPG_API_KEY_FILE.exists():
+        cfg.api_key = decrypt_gpg_file(LEGACY_GPG_API_KEY_FILE)
 
     return cfg
 
@@ -3801,7 +3818,15 @@ class AICursesApp:
         """
         path = self.cfg.effective_model_favorites_file
         if not path.exists():
-            return set()
+            legacy = path.with_name("model-favorites.txt")
+            if legacy.exists():
+                try:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(legacy.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+                except OSError:
+                    path = legacy
+            else:
+                return set()
         return {line.strip() for line in path.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()}
 
     def save_model_favorites(self, favorites: set[str]) -> None:
@@ -4085,7 +4110,7 @@ class AICursesApp:
                 new = self.text_input_modal("NEW SESSION", "Name this new chat session (blank for timestamp):", "")
                 if new is None:
                     continue
-                name = sanitize_session_name(new) if new.strip() else default_session_name()
+                name = sanitize_session_name(new) if new.strip() else default_session_name_unique(self.cfg.session_dir)
                 self.reset_to_session(name, self.cfg.session_dir / f"{name}.log")
                 return
             if ch in (ord("d"), ord("D")):
@@ -4100,7 +4125,7 @@ class AICursesApp:
                     (self.cfg.session_dir / f"{victim}.log").unlink()
                     self.status = f"deleted session: {victim}"
                     if victim == self.session_name:
-                        name = default_session_name()
+                        name = default_session_name_unique(self.cfg.session_dir)
                         self.reset_to_session(name, self.cfg.session_dir / f"{name}.log")
                         return
                 except OSError as exc:
