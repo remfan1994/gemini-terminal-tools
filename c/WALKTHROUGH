@@ -38,6 +38,7 @@ The default model cache is:
     ./ttychatter --models --model-type routers
     ./ttychatter --routers
     ./ttychatter --select-model
+    ./ttychatter --autoscan-model    # removed; use --models or --select-model
     ./ttychatter --test-model openrouter/auto
     ./ttychatter --test-model openrouter/auto --save
 
@@ -46,6 +47,7 @@ Common model-list filters:
     ./ttychatter --models --favorites-only
     ./ttychatter --models --sort context
     ./ttychatter --models --min-input-tokens 32000
+    ./ttychatter --models --min-output-tokens 4096
     ./ttychatter --models --require-tokens
     ./ttychatter --models --allow-missing-tokens
     ./ttychatter --models --hide-preview
@@ -66,14 +68,35 @@ Favorite model commands:
     Explain what a Unix pipeline is in one paragraph.
     Ctrl+D
 
-6. Send input and write an explicit output/session log
+6. Send one input and auto-save a timestamped session
+-----------------------------------------------------
+
+    ./ttychatter input.txt
+
+This creates a new log under:
+
+    ~/.local/share/ttychatter/openrouter/sessions/
+
+The filename remains mechanical and timestamped, for example:
+
+    session-2026-06-03-14-22-33.log
+
+Equivalent one-shot forms:
+
+    ./ttychatter --input input.txt
+    ./ttychatter --prompt 'Explain what a Unix pipeline is.'
+    printf 'Explain what a Unix pipeline is.\n' | ./ttychatter
+
+7. Send input and write an explicit output/session log
 ------------------------------------------------------
 
     ./ttychatter input.txt session.log
+    ./ttychatter --input input.txt --output session.log
+    ./ttychatter --prompt 'Give me a tiny example.' --output session.log
 
 This uses ./session.log exactly.  It does not move the log into SESSION_DIR.
 
-7. Resume the same explicit session
+8. Resume the same explicit session
 -----------------------------------
 
     cat > followup.txt
@@ -82,13 +105,14 @@ This uses ./session.log exactly.  It does not move the log into SESSION_DIR.
 
     ./ttychatter followup.txt session.log
 
-8. Use named sessions
+9. Use named sessions
 ---------------------
 
 Bare session names resolve under the shared OpenRouter session directory:
 
     ./ttychatter --interactive notes
     ./ttychatter --resume notes
+    ./ttychatter --session notes --prompt 'Next question'
     ./ttychatter --show-memory notes
 
 The default path for that named session is:
@@ -97,8 +121,41 @@ The default path for that named session is:
 
 Use ./notes.log when the intended file is in the current directory.
 
-9. Attach files
----------------
+10. List and retitle sessions
+-----------------------------
+
+    ./ttychatter --list
+    ./ttychatter --rename-session notes Friendly Notes
+
+The retitle operation writes session-title metadata into the log.  It does not
+rename the filename.  The --list table displays the title when present and uses
+the filename stem as fallback.
+
+Automatic AI-generated titles are optional and off by default:
+
+    ./ttychatter --set SESSION_AUTO_TITLE=1
+    ./ttychatter --set SESSION_TITLE_MODEL=openrouter/auto
+    ./ttychatter --set SESSION_TITLE_MAX_WORDS=8
+
+SESSION_TITLE_MODEL is a secondary model used only for title metadata.  The
+main conversation still uses MODEL.
+
+11. Start interactive mode
+--------------------------
+
+No arguments on a terminal start a new auto-saved interactive session:
+
+    ./ttychatter
+    ./ttychatter --new
+
+Resume or name a specific interactive session:
+
+    ./ttychatter --interactive notes
+    ./ttychatter --chat notes
+    ./ttychatter --session notes --interactive
+
+12. Attach files
+----------------
 
     ./ttychatter -a notes.txt -a image.png prompt.txt session.log
 
@@ -106,13 +163,75 @@ Generated long fenced code blocks are saved under:
 
     ~/.local/share/ttychatter/openrouter/attachments/
 
-10. Use loopback output
+13. Use loopback output
 -----------------------
 
     ./ttychatter --loopback prompt.txt session.log | less
     ./ttychatter --loopback-file latest-answer.txt prompt.txt session.log
 
-11. Interactive mode with colon commands
+14. Stream output and show local status
+---------------------------------------
+
+Streaming prints assistant content as it arrives, while the final complete
+reply is still saved to the session log:
+
+    ./ttychatter --stream --prompt 'Explain what a Unix pipeline is.'
+    ./ttychatter --stream --interactive notes
+
+Status/progress updates are local ttychatter messages on stderr.  They describe
+client work such as loading context and saving logs.  They are not hidden model
+thoughts:
+
+    ./ttychatter --status --prompt 'Explain this error.'
+    ./ttychatter --progress --prompt 'Explain this error.'
+
+Config keys:
+
+    ./ttychatter --set STREAM=1
+    ./ttychatter --set STATUS_UPDATES=1
+
+15. Branch, edit, and export sessions
+-------------------------------------
+
+List message numbers before branching or editing:
+
+    ./ttychatter --turns notes
+
+Create a branch containing messages through message 2:
+
+    ./ttychatter --branch notes 2
+
+Edit user message 1 in $VISUAL, $EDITOR, or vi.  ttychatter creates a new
+branch before that message and sends the edited user turn there:
+
+    ./ttychatter --edit-turn notes 1
+
+Export outside the native log format:
+
+    ./ttychatter --export notes --format markdown --output notes.md
+    ./ttychatter --export notes --format json
+    ./ttychatter --export notes --format text
+
+16. Use external voice hooks
+----------------------------
+
+Voice input uses VOICE_INPUT_CMD and sends the command output as the prompt.
+The command may contain %f for the input file path; otherwise ttychatter appends
+the path:
+
+    ./ttychatter --set 'VOICE_INPUT_CMD=whisper-cli -f %f'
+    ./ttychatter --voice-input question.wav --session voice-notes
+
+The --transcribe flag is an alias for --voice-input.
+
+Voice output uses VOICE_OUTPUT_CMD or TTS_CMD.  Without %f, ttychatter pipes the
+assistant reply to the command's stdin.  With %f, ttychatter writes the reply to
+a temporary text file and substitutes that filename:
+
+    ./ttychatter --set 'VOICE_OUTPUT_CMD=piper --model voice.onnx --output-raw | aplay -r 22050 -f S16_LE -t raw -'
+    ./ttychatter --speak --prompt 'Read this aloud.'
+
+17. Interactive mode with colon commands
 ----------------------------------------
 
     ./ttychatter --interactive notes
@@ -121,9 +240,14 @@ Generated long fenced code blocks are saved under:
     ttychatter> :models
     ttychatter> :attach notes.txt
     ttychatter> :memory
+    ttychatter> :turns
+    ttychatter> :branch 2
+    ttychatter> :stream on
+    ttychatter> :status on
+    ttychatter> :rename Friendly Notes
     ttychatter> :quit
 
-12. Check command-line help
+18. Check command-line help
 ---------------------------
 
     ./ttychatter --help
@@ -133,7 +257,6 @@ Generated long fenced code blocks are saved under:
 Useful non-walkthrough flags are listed here so this file stays aligned with
 --help and the man page:
 
-    ./ttychatter --chat notes
     ./ttychatter --model openrouter/auto input.txt session.log
     ./ttychatter --attach notes.txt input.txt session.log
     ./ttychatter --yes input.txt session.log
@@ -142,25 +265,38 @@ Useful non-walkthrough flags are listed here so this file stays aligned with
     ./ttychatter --set MODEL=openrouter/auto
     ./ttychatter --unset MODEL
     ./ttychatter --list
-    ./ttychatter --rename-session notes archive-notes
     ./ttychatter --edit-memory notes
     ./ttychatter --clear-memory notes
+    ./ttychatter --editor-prompt
     ./ttychatter --editor-prompt session.log
+    ./ttychatter --turns notes
+    ./ttychatter --branch notes 2
+    ./ttychatter --edit-turn notes 1
+    ./ttychatter --export notes --format markdown
+    ./ttychatter --stream --prompt 'hello'
+    ./ttychatter --status --prompt 'hello'
+    ./ttychatter --voice-input question.wav
+    ./ttychatter --speak --prompt 'hello'
+    ./ttychatter --no-stream --prompt 'hello'
+    ./ttychatter --no-status --prompt 'hello'
+    ./ttychatter --no-progress --prompt 'hello'
+    ./ttychatter --no-speak --prompt 'hello'
     ./ttychatter --search-sessions TEXT
     ./ttychatter --search TEXT --all-sessions
-    ./ttychatter --models --min-output-tokens 4096
     ./ttychatter --send-input enter
     ./ttychatter --theme plain
     ./ttychatter --code-attachment-min-lines 20
     ./ttychatter --doctor
     ./ttychatter --credits
 
-13. Demo mode
+19. Demo mode
 -------------
 
 Demo mode avoids network/API use:
 
+    ./ttychatter --demo input.txt
     ./ttychatter --demo input.txt demo.log
+    ./ttychatter --demo --prompt 'demo prompt'
     ./ttychatter --demo --interactive demo
 
 Interactive parity commands
@@ -170,7 +306,7 @@ Inside the prompt, use colon commands for local control:
 
     :help
     :list
-    :rename research-notes
+    :rename Friendly Notes
     :models
     :routers
     :update-models
@@ -190,6 +326,21 @@ Inside the prompt, use colon commands for local control:
     :memory
     :edit-memory
     :clear-memory
+    :turns
+    :branch 2
+    :fork 2
+    :edit 1
+    :edit-turn 1
+    :stream on
+    :stream off
+    :status on
+    :status off
+    :progress on
+    :progress off
+    :voice question.wav
+    :transcribe question.wav
+    :speak on
+    :speak last
     :attach notes.txt
     :attachments
     :pending

@@ -36,6 +36,35 @@
 - Let --editor-prompt accept a space-separated optional output log path, matching
   the documented command form.
 - Added make-check coverage for the updated help/man-page documentation.
+- Exhausted the main terminal invocation forms: no-argument interactive mode,
+  one-argument auto-saved batch mode, explicit file-in/file-out mode,
+  --input, --output, --session, --prompt, --new, and stdin batch input.
+- Kept automatically generated session filenames timestamped under SESSION_DIR,
+  while making --list display user-friendly session-title metadata when present.
+- Changed --rename-session and interactive :rename from filesystem renames into
+  title-metadata updates so session storage remains stable and scriptable.
+- Added optional AI-generated session-title metadata via SESSION_AUTO_TITLE,
+  SESSION_TITLE_MODEL, and SESSION_TITLE_MAX_WORDS.  The feature is disabled by
+  default and uses a secondary title model only when explicitly enabled.
+- Added provider streaming support with --stream/--no-stream, STREAM config,
+  and interactive :stream toggles.  Streaming prints assistant content as it
+  arrives while still saving the final response to the session log.
+- Added local client progress reporting through --status/--progress,
+  --no-status/--no-progress, STATUS_UPDATES config, and interactive
+  :status/:progress toggles.
+- Added conversation turn inspection with --turns SESSION and interactive
+  :turns.
+- Added append-safe branching with --branch SESSION TURN and interactive
+  :branch/:fork.  Branches copy messages through the selected turn into a new
+  timestamped session and record branch metadata.
+- Added edit-and-branch workflow with --edit-turn SESSION TURN and interactive
+  :edit/:edit-turn.  Editing an old user message now creates a branch instead
+  of rewriting later history.
+- Added session export via --export SESSION with markdown, text, and JSON
+  formats.
+- Added external voice hooks: --voice-input/--transcribe using
+  VOICE_INPUT_CMD, --speak/--no-speak using VOICE_OUTPUT_CMD or TTS_CMD,
+  VOICE_OUTPUT config, and interactive :voice/:transcribe/:speak commands.
 
 ### Documented
 - Clarified the two address modes: explicit file-in/file-out paths versus
@@ -46,6 +75,11 @@
   man-page synopsis/options, and the README/WALKTHROUGH/man page now document
   the full active command-line option set including model filters, favorites,
   loopback-file, editor-prompt, credits, and config-compatibility shortcuts.
+- Documented streaming/status semantics clearly: streaming is real-time
+  assistant content, while status/progress messages are local ttychatter work
+  reports and not hidden model thoughts.
+- Documented branch/edit/export and external voice-hook workflows in --help,
+  README, WALKTHROUGH, ttychatter.1, and make-check documentation greps.
 
 ## 0.6.0-c-cli
 
@@ -56,7 +90,7 @@
 - `--resume SESSION` interactive-session shorthand
 - `--save` support for successful `--test-model MODEL`
 - Interactive `:list` command
-- Interactive `:rename NAME` command
+- Interactive `:rename TITLE` command
 - Interactive `:select-model` command
 - Interactive `:edit-memory` command
 - Interactive `:pending` alias for `:attachments`
@@ -86,7 +120,7 @@
 - Config support for MODEL_MIN_INPUT_TOKENS
 - Config support for MODEL_MIN_OUTPUT_TOKENS
 - `--list` session listing command
-- `--rename-session OLD NEW` command
+- `--rename-session SESSION TITLE` command
 - `--show-memory SESSION` command
 - `--clear-memory SESSION` command
 - `--edit-memory SESSION` command

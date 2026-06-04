@@ -4,24 +4,33 @@ NAME
     ttychatter - OpenRouter terminal chat client, C command-line edition
 
 SYNOPSIS
-    ttychatter [options] input.txt output.log
+    ttychatter
+    ttychatter [options] input.txt [output.log]
+    ttychatter --input input.txt [--output output.log|--session SESSION]
+    ttychatter --prompt TEXT [--output output.log|--session SESSION]
     ttychatter --interactive [SESSION|./output.log]
     ttychatter --chat [SESSION|./output.log]
     ttychatter --resume SESSION
-    ttychatter --demo [options] input.txt output.log
+    ttychatter --new
+    ttychatter --demo [options] input.txt [output.log]
     ttychatter --set-api-key [--gpg]
     ttychatter --forget-api-key
     ttychatter --update-models
     ttychatter --models [--search TEXT] [--model-type TYPE] [--sort KEY]
     ttychatter --routers
     ttychatter --select-model
+    ttychatter --autoscan-model
     ttychatter --test-model MODEL [--save]
     ttychatter --favorites
     ttychatter --favorite-model MODEL
     ttychatter --unfavorite-model MODEL
     ttychatter --unbookmark-model MODEL
     ttychatter --list
-    ttychatter --rename-session OLD NEW
+    ttychatter --rename-session SESSION TITLE
+    ttychatter --turns SESSION
+    ttychatter --branch SESSION TURN
+    ttychatter --edit-turn SESSION TURN
+    ttychatter --export SESSION [--format markdown|text|json] [--output FILE]
     ttychatter --show-memory SESSION
     ttychatter --edit-memory SESSION
     ttychatter --clear-memory SESSION
@@ -39,18 +48,31 @@ SYNOPSIS
 DESCRIPTION
     ttychatter is the traditional Unix command-line C client in the
     ttychatter project.  It is not an ncurses program and does not own the
-    full terminal screen.  Its primary interface is file-in/file-out:
+    full terminal screen.
+
+    The command line covers ordinary terminal use directly:
+
+        ttychatter
+            Start a new interactive session on a terminal.
+
+        ttychatter input.txt
+            Send one input file and save a new timestamped session under
+            SESSION_DIR.
 
         ttychatter input.txt output.log
+            Send one input file and append to an explicit output log.
 
-    The user creates input.txt using any editor or shell tool.  ttychatter
-    sends that input to OpenRouter, appends the result to output.log, and
-    later uses the same output.log as session history/context when the same
-    path is reused.
+        ttychatter --prompt TEXT
+            Send TEXT as one input and save a new timestamped session unless
+            --output or --session is supplied.
 
-    The C client also has a line-oriented interactive mode with local colon
-    commands.  Interactive mode is intentionally still plain line I/O, not a
-    curses UI.
+        printf 'hello\n' | ttychatter
+            Read standard input as one prompt and auto-save a timestamped
+            session.
+
+    The output log is both transcript and session state.  Reusing the same log
+    resumes that conversation because ttychatter reconstructs context from the
+    saved transcript.
 
 OPTIONS
     General options:
@@ -83,6 +105,41 @@ OPTIONS
         -a FILE, --attach FILE
             Attach FILE to the next request.  This option may be repeated.
 
+        --stream
+            Print assistant content to standard output as provider streaming
+            events arrive.  The final complete response is still saved in the
+            session log.
+
+        --no-stream
+            Disable streaming for this run even when STREAM=1 is configured.
+
+        --status
+            Print local ttychatter progress notes to standard error.  These are
+            client-side status updates, not hidden model chain-of-thought.
+
+        --no-status
+            Disable local progress notes for this run.
+
+        --progress
+            Alias for --status.
+
+        --no-progress
+            Alias for --no-status.
+
+        --voice-input FILE
+            Run VOICE_INPUT_CMD to transcribe FILE and send the resulting text
+            as the one-shot prompt.
+
+        --transcribe FILE
+            Alias for --voice-input.
+
+        --speak
+            Run VOICE_OUTPUT_CMD or TTS_CMD for assistant replies.
+
+        --no-speak
+            Disable voice output for this run even when VOICE_OUTPUT=1 is
+            configured.
+
         -l, --loopback
             Also print the clean AI output to standard output.
 
@@ -95,15 +152,55 @@ OPTIONS
         --chat
             Alias for --interactive.
 
-        --resume SESSION
-            Resume SESSION in interactive mode.  Bare names resolve under
+        -n, --new
+            Start a new interactive session using an automatic timestamped log.
+
+        -o output.log, --output output.log
+            Write the one-shot turn to output.log.  In batch mode this is
+            equivalent to the second positional argument.
+
+        -s SESSION, --session SESSION
+            Use SESSION as the session address.  Bare names resolve under
             SESSION_DIR; names containing '/' are treated as explicit paths.
 
-        --list
-            List named session logs in SESSION_DIR.
+        -p TEXT, --prompt TEXT
+            Send TEXT as the one-shot prompt instead of reading an input file.
 
-        --rename-session OLD NEW
-            Rename one named session log.
+        --input input.txt
+            Read input.txt as the one-shot prompt.  Use '-' to read stdin.
+
+        --resume SESSION
+            Resume SESSION in interactive mode.
+
+        --list
+            List saved sessions in SESSION_DIR.  The table displays
+            session-title metadata when present and falls back to the filename
+            stem when no title metadata exists.
+
+        --rename-session SESSION TITLE
+            Set the user-facing title metadata for SESSION.  This does not
+            rename the file.
+
+        --turns SESSION
+            List message numbers, roles, cycle numbers, and previews for
+            SESSION.
+
+        --branch SESSION TURN
+            Create a new timestamped branch session containing messages through
+            TURN.  No model request is sent.
+
+        --edit-turn SESSION TURN
+            Edit user message TURN in $VISUAL, $EDITOR, or vi, create a new
+            branch before that message, then send the edited user turn to the
+            model.
+
+        --export SESSION
+            Export SESSION to markdown, text, or JSON.  Without --output, the
+            export is written to standard output.
+
+        --format FORMAT
+            Select the export format for --export.  FORMAT may be markdown,
+            text, or json.
 
         --show-memory SESSION
             Print the reconstructed context buffer for SESSION.
@@ -117,8 +214,9 @@ OPTIONS
 
         --editor-prompt [output.log]
             Compose one message in $VISUAL, $EDITOR, or vi, send it, and append
-            the turn to output.log.  Without output.log, the default editor
-            session log is used.
+            the turn to output.log.  Without output.log, a new timestamped
+            session is created under SESSION_DIR.  --session may also choose the
+            destination session.
 
         --search TEXT
             With --models, filter cached model rows.  Without --models, search
@@ -146,6 +244,10 @@ OPTIONS
 
         --select-model
             Open a numbered cached model selector and save the chosen MODEL.
+
+        --autoscan-model
+            Removed compatibility flag.  It exits with guidance to use
+            --models, --test-model MODEL, or --select-model.
 
         --test-model MODEL
             Send the configured test prompt to MODEL.
@@ -225,7 +327,17 @@ OPTIONS
             Write CODE_ATTACHMENT_MIN_LINES.
 
 SESSION ADDRESSING
-    ttychatter supports two address modes.
+    ttychatter supports three address modes.
+
+    Auto-session mode is used when no explicit output or session destination is
+    supplied:
+
+        ttychatter
+        ttychatter input.txt
+        ttychatter --prompt 'hello'
+        printf 'hello\n' | ttychatter
+
+    In this mode, ttychatter creates a timestamped log under SESSION_DIR.
 
     Explicit-path mode is used by the traditional two-file command:
 
@@ -236,9 +348,10 @@ SESSION ADDRESSING
     relative path, an absolute path, or a path under any project directory.
     Reusing the same output path resumes that same conversation.
 
-    Named-session mode is used by --interactive, --resume, --list,
-    --rename-session, --show-memory, --edit-memory, --clear-memory, and
-    --search-sessions.  A bare SESSION name resolves under SESSION_DIR.  With
+    Named-session mode is used by --interactive, --resume, --session, --list,
+    --rename-session, --turns, --branch, --edit-turn, --export, --show-memory,
+    --edit-memory, --clear-memory, and --search-sessions.  A bare SESSION name
+    resolves under SESSION_DIR.  With
     the default OpenRouter storage, these are equivalent:
 
         ttychatter --resume notes
@@ -248,7 +361,39 @@ SESSION ADDRESSING
     A SESSION containing '/' is treated as an explicit path.  Use ./notes.log
     when the intended file is in the current directory rather than SESSION_DIR.
 
+SESSION TITLES AND --LIST
+    Automatic session filenames stay timestamped and mechanical, for example:
+
+        session-2026-06-03-14-22-33.log
+
+    Human-friendly names are stored as title metadata inside the log.  The
+    --list command displays that metadata when present and falls back to the
+    filename stem when absent.
+
+    Set title metadata manually:
+
+        ttychatter --rename-session notes Friendly Notes
+
+    In interactive mode, the equivalent command is:
+
+        :rename Friendly Notes
+
+    Automatic AI-generated title metadata is optional and disabled by default.
+    Enable it through config:
+
+        SESSION_AUTO_TITLE=1
+        SESSION_TITLE_MODEL=openrouter/auto
+        SESSION_TITLE_MAX_WORDS=8
+
+    SESSION_TITLE_MODEL is a secondary model used only for session-title
+    metadata.  The main chat request still uses MODEL.  If title generation
+    fails, the session continues normally.
+
 USAGE EXAMPLES
+    Start a new interactive session on a terminal:
+
+        ttychatter
+
     Save an API key in plaintext config:
 
         ttychatter --set-api-key
@@ -274,6 +419,10 @@ USAGE EXAMPLES
 
         ttychatter --select-model
 
+    The removed autoscan command reports a replacement hint:
+
+        ttychatter --autoscan-model
+
     Test one model without saving it:
 
         ttychatter --test-model openrouter/auto
@@ -281,6 +430,18 @@ USAGE EXAMPLES
     Test one model and save it as MODEL on success:
 
         ttychatter --test-model openrouter/auto --save
+
+    Send an input file and auto-save a timestamped session:
+
+        ttychatter prompt.txt
+
+    Send direct prompt text and auto-save a timestamped session:
+
+        ttychatter --prompt 'Explain Unix pipelines.'
+
+    Send stdin and auto-save a timestamped session:
+
+        printf 'Explain Unix pipelines.\n' | ttychatter
 
     Send an input file and append to an explicit session file:
 
@@ -290,6 +451,10 @@ USAGE EXAMPLES
 
         ttychatter followup.txt session.log
 
+    Send a prompt to a named session:
+
+        ttychatter --session notes --prompt 'Next question'
+
     Start a named interactive session in the shared session directory:
 
         ttychatter --interactive notes
@@ -297,6 +462,26 @@ USAGE EXAMPLES
     Resume a named interactive session:
 
         ttychatter --resume notes
+
+    Set a friendly title for --list:
+
+        ttychatter --rename-session notes Friendly Notes
+
+    Show message numbers, branch, edit a user turn, and export:
+
+        ttychatter --turns notes
+        ttychatter --branch notes 2
+        ttychatter --edit-turn notes 1
+        ttychatter --export notes --format markdown --output notes.md
+
+    Stream assistant text as it arrives and show local status notes:
+
+        ttychatter --stream --status --prompt 'Explain Unix pipelines.'
+
+    Use external voice hooks:
+
+        ttychatter --voice-input question.wav --session voice-notes
+        ttychatter --speak --prompt 'Read this aloud.'
 
     Attach multiple files:
 
@@ -316,7 +501,7 @@ RUNTIME COMMANDS
 
         :help
         :list
-        :rename NAME
+        :rename TITLE
         :models
         :routers
         :update-models
@@ -337,6 +522,17 @@ RUNTIME COMMANDS
         :memory
         :edit-memory
         :clear-memory
+        :turns
+        :branch N
+        :fork N
+        :edit N
+        :edit-turn N
+        :stream on|off
+        :status on|off
+        :progress on|off
+        :voice FILE
+        :transcribe FILE
+        :speak on|off|last
         :attach FILE
         :attachments
         :pending
@@ -363,6 +559,7 @@ MODEL MANAGEMENT
         ttychatter --models --model-type routers
         ttychatter --routers
         ttychatter --select-model
+        ttychatter --autoscan-model
         ttychatter --test-model MODEL [--save]
         ttychatter --models --favorites-only
         ttychatter --models --sort context
@@ -437,6 +634,15 @@ CONFIGURATION
         API_KEY_GPG_FILE
         OPENROUTER_API_KEY_GPG_FILE
         MODEL
+        STREAM
+        STATUS_UPDATES
+        VOICE_INPUT_CMD
+        VOICE_OUTPUT_CMD
+        TTS_CMD
+        VOICE_OUTPUT
+        SESSION_AUTO_TITLE
+        SESSION_TITLE_MODEL
+        SESSION_TITLE_MAX_WORDS
         MODEL_CACHE_FILE
         MODEL_FAVORITES_FILE
         MODEL_TYPE_FILTER
@@ -468,6 +674,77 @@ CONFIGURATION
     --send-input and --theme flags are command-line shortcuts for writing those
     compatibility keys.
 
+STREAMING AND STATUS
+    Streaming is real-time assistant-content output.  Use --stream or STREAM=1
+    to print content as it arrives while still saving the final complete
+    assistant response to the log.  Use --no-stream to turn it off for one run.
+
+    Streaming does not expose hidden model thoughts.  Local progress notes are
+    controlled separately with --status or STATUS_UPDATES=1.  Status notes
+    report ttychatter-side work such as loading context, preparing a request,
+    waiting for a response, and saving the log.
+
+    Interactive equivalents:
+
+        :stream on
+        :stream off
+        :status on
+        :status off
+
+BRANCHING, EDITING, AND EXPORT
+    Sessions are append-only by default.  Editing a previous user message
+    creates a new branch instead of silently rewriting later history.
+
+    Show message numbers:
+
+        ttychatter --turns notes
+
+    Create a branch containing messages through message 2:
+
+        ttychatter --branch notes 2
+
+    Edit user message 1, branch before it, and send the edited turn:
+
+        ttychatter --edit-turn notes 1
+
+    Export a session:
+
+        ttychatter --export notes --format markdown --output notes.md
+        ttychatter --export notes --format json
+
+    Interactive equivalents:
+
+        :turns
+        :branch 2
+        :edit 1
+
+VOICE HOOKS
+    Voice support is implemented as external command hooks.  ttychatter does
+    not embed a platform-specific microphone, speech recognition, or speaker
+    stack.
+
+    VOICE_INPUT_CMD transcribes audio into text.  If the command contains %f,
+    ttychatter substitutes a shell-quoted audio filename.  Otherwise the
+    filename is appended to the command:
+
+        VOICE_INPUT_CMD=whisper-cli -f %f
+        ttychatter --voice-input question.wav --session voice-notes
+
+    VOICE_OUTPUT_CMD or TTS_CMD receives assistant replies.  If the command
+    contains %f, ttychatter writes the reply to a temporary text file and
+    substitutes that filename.  Otherwise the reply is piped to the command's
+    standard input:
+
+        VOICE_OUTPUT_CMD=piper --model voice.onnx --output-raw | aplay -r 22050 -f S16_LE -t raw -
+        ttychatter --speak --prompt 'Read this aloud.'
+
+    Interactive equivalents:
+
+        :voice question.wav
+        :speak on
+        :speak off
+        :speak last
+
 SESSION FORMAT
     New logs start with this pre-chat line:
 
@@ -482,6 +759,10 @@ SESSION FORMAT
         User: ...
         Assistant: ...
         [HH:MM:SS] system: CONTEXT_END
+
+    Optional title metadata is stored as a system line:
+
+        [HH:MM:SS] system: session-title: Friendly Notes
 
     This keeps sessions readable and compatible with the other OpenRouter
     ttychatter clients.  The C parser also reads the older 0.6.0 C marker
@@ -499,7 +780,8 @@ ATTACHMENTS
 DEMO MODE
     --demo uses local demo models and local demo responses.  It does not
     require an API key and does not contact OpenRouter.  This is useful for
-    testing logs, attachments, loopback, and the interactive command loop.
+    testing logs, attachments, loopback, session-title metadata, and the
+    interactive command loop.
 
 FILES
     ~/.config/ttychatter/openrouter/config
@@ -515,7 +797,7 @@ FILES
         Cached OpenRouter model catalog.
 
     ~/.local/share/ttychatter/openrouter/sessions/
-        Default directory for named sessions.
+        Default directory for named and automatically generated sessions.
 
     ~/.local/share/ttychatter/openrouter/attachments/
         Default attachment and extracted-code directory.
