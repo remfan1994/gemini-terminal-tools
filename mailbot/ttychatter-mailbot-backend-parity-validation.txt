@@ -1,0 +1,10 @@
+python3 -m py_compile: pass
+version: ttychatter.mailbot version 0.6.2-mailbot-parity
+help contains backend options: pass
+help contains local session/search/export options: pass
+C demo backend chat: pass
+Bash demo backend chat: pass
+Python demo backend chat: pass
+metadata title listing/search: pass
+turns/export/branch commands: pass
+XDG path smoke tests: pass

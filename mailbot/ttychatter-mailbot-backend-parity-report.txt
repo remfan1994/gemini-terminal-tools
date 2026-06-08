@@ -1,0 +1,96 @@
+ttychatter.mailbot backend parity update
+=======================================
+
+Goal
+----
+Bring ttychatter.mailbot up to date with the current ttychatter family while preserving existing Python-helper deployments and adding practical support for the current C CLI and the Bash-only helper.
+
+Backend compatibility
+---------------------
+- Default backend remains ttychatter.python for existing installs.
+- Added TTYCHATTER_BACKEND=python|c|bash|auto|command.
+- Added CLI overrides --ttychatter-backend, --ttychatter-command, and --ttychatter-extra-args.
+- TTYCHATTER_COMMAND still overrides the backend map.
+- TTYCHATTER_CLIENT is accepted as a legacy alias for TTYCHATTER_BACKEND.
+- Chat calls now use the portable form:
+
+  COMMAND [TTYCHATTER_EXTRA_ARGS] --loopback --input - --attach FILE --session PATH
+
+  This avoids the C client's positional-argument ambiguity and works with current C, Python, and Bash ttychatter clients.
+
+XDG and shared state
+--------------------
+- Honors XDG_CONFIG_HOME, XDG_DATA_HOME, XDG_STATE_HOME, and XDG_CACHE_HOME.
+- Default mailbot config path: $XDG_CONFIG_HOME/ttychatter/mailbot/config.
+- Default mailbot state path: $XDG_STATE_HOME/ttychatter/mailbot/.
+- Default mailbot cache path: $XDG_CACHE_HOME/ttychatter/mailbot/.
+- Default ttychatter sessions path: $XDG_DATA_HOME/ttychatter/openrouter/sessions/.
+- Default ttychatter attachments path: $XDG_DATA_HOME/ttychatter/openrouter/attachments/.
+- Default model cache path: $XDG_CACHE_HOME/ttychatter/openrouter/models.json.
+- Runtime ttychatter subprocess environments now receive coherent XDG roots when paths follow the shared ttychatter/openrouter layout.
+
+Session parity
+--------------
+- Session listing reads friendly session-title metadata when present.
+- rename-session now updates session-title metadata instead of renaming the log file.
+- Added rename-session-file as a legacy escape hatch for actual file renames.
+- Session search now checks filenames, session-title metadata, and log contents.
+- tc:{new} creates an explicit timestamped session path selected by the mailbot so C, Python, and Bash all write under the same SESSION_DIR.
+
+New mailbot commands
+--------------------
+- turns SESSION
+- branch SESSION TURN
+- export SESSION [markdown|text|json]
+- rename-session SESSION TITLE
+- rename-session-file OLD NEW
+- search TEXT / search-sessions TEXT
+
+Local CLI additions
+-------------------
+- --ttychatter-backend BACKEND
+- --ttychatter-command COMMAND
+- --ttychatter-extra-args ARGS
+- --search TEXT
+- --search-sessions TEXT
+- --rename-session SESSION TITLE
+- --turns SESSION
+- --branch SESSION TURN
+- --export SESSION --format markdown|text|json
+
+Configuration compatibility
+---------------------------
+- tty-set emits --set KEY=VALUE for the C backend.
+- tty-set emits --set KEY VALUE for the Python and Bash helpers.
+- Optional ttychatter settings now allowed for per-user config include STREAM, STATUS_UPDATES, SESSION_AUTO_TITLE, SESSION_TITLE_MODEL, and SESSION_TITLE_MAX_WORDS.
+- External voice/TTS command settings are not enabled in the default per-user allowlist because they execute operator-configured commands.
+
+Model cache compatibility
+-------------------------
+- Preferred cache is models.json under XDG_CACHE_HOME/ttychatter/openrouter/.
+- Legacy models-cache.json paths are still checked as fallbacks.
+- Legacy model-favorites.txt is migrated/copied to model-favorites in per-user homes where applicable.
+
+Documentation
+-------------
+- Updated ttychatter.mailbot.1.
+- Updated built-in help and embedded fallback manpage text.
+
+Validation performed
+--------------------
+- python3 -m py_compile ttychatter.mailbot
+- --version and --help smoke tests
+- XDG path smoke tests
+- Backend resolution tests for Python, C, Bash, auto, command, and TTYCHATTER_CLIENT alias
+- Demo-mode chat call tests through current C, Bash, and Python clients
+- Verified created logs begin with the current ttychatter pre-chat line
+- Verified metadata rename appears in session listing and search
+- Verified turns, export, and branch mailbot commands against current C, Bash, and Python clients
+- Verified branch outputs remain under configured SESSION_DIR when the path follows the shared XDG layout
+- Verified C tty-set dry-run uses --set KEY=VALUE
+
+Not live-tested
+---------------
+- Real IMAP/SMTP mailbox operation
+- Real OpenRouter provider calls
+- Real attachment delivery over email

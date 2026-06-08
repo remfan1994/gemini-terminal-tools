@@ -40,6 +40,7 @@ import shlex
 import smtplib
 import ssl
 import subprocess
+import shutil
 import sys
 import tempfile
 import time
@@ -51,22 +52,44 @@ from pathlib import Path
 from typing import Any, Iterable, List, Optional, Tuple
 
 PROGRAM = "ttychatter.mailbot"
-VERSION = "0.6.1"
+VERSION = "0.6.2-mailbot-parity"
 AUTOMATED_MAILBOT_NOTICE = "I strongly encourage everyone to get cruelty-free vegetarian food and fear the AVENGER OF DEATH.  --BLOODGUILTCURSE.NET"
 
-DEFAULT_CONFIG_DIR = Path.home() / ".config" / "ttychatter" / "mailbot"
+
+def xdg_root(env_name: str, fallback: Path) -> Path:
+    value = os.environ.get(env_name, "").strip()
+    return Path(os.path.expandvars(os.path.expanduser(value))).resolve() if value else fallback
+
+
+def xdg_config_root() -> Path:
+    return xdg_root("XDG_CONFIG_HOME", Path.home() / ".config")
+
+
+def xdg_data_root() -> Path:
+    return xdg_root("XDG_DATA_HOME", Path.home() / ".local" / "share")
+
+
+def xdg_state_root() -> Path:
+    return xdg_root("XDG_STATE_HOME", Path.home() / ".local" / "state")
+
+
+def xdg_cache_root() -> Path:
+    return xdg_root("XDG_CACHE_HOME", Path.home() / ".cache")
+
+
+DEFAULT_CONFIG_DIR = xdg_config_root() / "ttychatter" / "mailbot"
 DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config"
-DEFAULT_STATE_DIR = Path.home() / ".local" / "state" / "ttychatter" / "mailbot"
-DEFAULT_CACHE_DIR = Path.home() / ".cache" / "ttychatter" / "mailbot"
-DEFAULT_SESSION_DIR = Path.home() / ".local" / "share" / "ttychatter" / "openrouter" / "sessions"
-DEFAULT_ATTACHMENT_DIR = Path.home() / ".local" / "share" / "ttychatter" / "openrouter" / "attachments"
-DEFAULT_MODEL_CACHE_FILE = Path.home() / ".config" / "ttychatter" / "openrouter" / "models-cache.json"
+DEFAULT_STATE_DIR = xdg_state_root() / "ttychatter" / "mailbot"
+DEFAULT_CACHE_DIR = xdg_cache_root() / "ttychatter" / "mailbot"
+DEFAULT_SESSION_DIR = xdg_data_root() / "ttychatter" / "openrouter" / "sessions"
+DEFAULT_ATTACHMENT_DIR = xdg_data_root() / "ttychatter" / "openrouter" / "attachments"
+DEFAULT_MODEL_CACHE_FILE = xdg_cache_root() / "ttychatter" / "openrouter" / "models.json"
 DEFAULT_USER_REGISTRY_FILE = DEFAULT_STATE_DIR / "users.json"
 DEFAULT_USER_HOME_ROOT = DEFAULT_STATE_DIR / "users"
 DEFAULT_SECRET_DIR = Path.home() / ".secrets" / "ttychatter" / "mailbot"
 DEFAULT_USER_SECRET_DIR = DEFAULT_SECRET_DIR / "openrouter-users"
 DEFAULT_OPENROUTER_API_KEY_FILE = DEFAULT_SECRET_DIR / "openrouter-default.key"
-DEFAULT_LEGACY_OPENROUTER_CONFIG_FILE = Path.home() / ".config" / "ttychatter" / "openrouter" / "config"
+DEFAULT_LEGACY_OPENROUTER_CONFIG_FILE = xdg_config_root() / "ttychatter" / "openrouter" / "config"
 DEFAULT_RATE_LIMIT_DB = DEFAULT_STATE_DIR / "rate-limits.json"
 DEFAULT_DAILY_QUOTA_DB = DEFAULT_STATE_DIR / "daily-quotas.json"
 CONFIG_ENV_VAR = "TTYCHATTER_MAILBOT_CONFIG"
@@ -155,7 +178,9 @@ class Config:
     process_attachments: bool = True
     mark_seen: bool = True
 
+    ttychatter_backend: str = "python"  # python, c, bash, auto, or command
     ttychatter_command: str = "ttychatter.python"
+    ttychatter_command_configured: bool = False
     ttychatter_extra_args: str = ""
     ttychatter_control_timeout: int = 180
     session_dir: Path = DEFAULT_SESSION_DIR
@@ -204,6 +229,8 @@ class Config:
         "MODEL_MIN_INPUT_TOKENS", "MODEL_MIN_OUTPUT_TOKENS",
         "MODEL_SORT_ORDER", "MODEL_TYPE_FILTER", "THEME", "SEND_INPUT",
         "CODE_ATTACHMENT_MIN_LINES", "MAX_ATTACHMENT_BYTES", "EDITOR",
+        "STREAM", "STATUS_UPDATES", "SESSION_AUTO_TITLE",
+        "SESSION_TITLE_MODEL", "SESSION_TITLE_MAX_WORDS",
     ])
 
     # Anti-abuse defaults are conservative and cheap: reject common mail-loop
@@ -292,7 +319,7 @@ KNOWN_CONFIG_KEYS = {
     "MAIL_FROM", "MAIL_TO", "ALLOWED_FROM", "DENY_FROM", "BANNED_FROM",
     "BANNED_LIST", "REJECT_SELF_SENDER", "SUBJECT_PREFIX", "POLL_INTERVAL",
     "MAX_MESSAGES_PER_RUN", "MAX_BODY_BYTES", "MAX_ATTACHMENT_BYTES",
-    "PROCESS_ATTACHMENTS", "MARK_SEEN", "TTYCHATTER_COMMAND",
+    "PROCESS_ATTACHMENTS", "MARK_SEEN", "TTYCHATTER_BACKEND", "TTYCHATTER_CLIENT", "TTYCHATTER_COMMAND",
     "TTYCHATTER_EXTRA_ARGS", "SESSION_DIR", "ATTACHMENT_DIR", "WORK_DIR",
     "PROCESSED_DB", "REPLY_SUBJECT_PREFIX", "INCLUDE_TTYCHATTER_STDERR",
     "CONFIG_SUBJECT_TOKEN", "MODELS_SUBJECT_TOKEN", "COMMAND_SUBJECT_TOKEN",
@@ -397,10 +424,7 @@ def config_parse_summary(path: Path) -> Tuple[int, List[str]]:
 
 
 def default_config_dir() -> Path:
-    xdg_config_home = os.environ.get("XDG_CONFIG_HOME", "").strip()
-    if xdg_config_home:
-        return expand_path(xdg_config_home) / "ttychatter" / "mailbot"
-    return Path.home() / ".config" / "ttychatter" / "mailbot"
+    return xdg_config_root() / "ttychatter" / "mailbot"
 
 
 def default_config_file() -> Path:
@@ -604,7 +628,10 @@ def load_config(path: Path = DEFAULT_CONFIG_FILE) -> Config:
         elif key == "PROCESS_ATTACHMENTS": cfg.process_attachments = parse_bool(value, cfg.process_attachments)
         elif key == "MARK_SEEN": cfg.mark_seen = parse_bool(value, cfg.mark_seen)
 
-        elif key == "TTYCHATTER_COMMAND": cfg.ttychatter_command = value
+        elif key in {"TTYCHATTER_BACKEND", "TTYCHATTER_CLIENT"}: cfg.ttychatter_backend = normalize_keyword(value)
+        elif key == "TTYCHATTER_COMMAND":
+            cfg.ttychatter_command = value
+            cfg.ttychatter_command_configured = True
         elif key == "TTYCHATTER_EXTRA_ARGS": cfg.ttychatter_extra_args = value
         elif key == "SESSION_DIR": cfg.session_dir = expand_path(value)
         elif key == "ATTACHMENT_DIR": cfg.attachment_dir = expand_path(value)
@@ -865,7 +892,7 @@ def imap_login_failure(exc: Exception, cfg: Config) -> RuntimeError:
 # ---------------------------------------------------------------------------
 # User registry, per-user ttychatter homes, and API-key secret files
 # ---------------------------------------------------------------------------
-# The mailbot is the multi-user boundary. ttychatter.python still sees a
+# The mailbot is the multi-user boundary. The selected ttychatter backend sees a
 # normal HOME with a normal ~/.config/ttychatter/openrouter/config, but that
 # HOME is synthesized per sender. API keys are injected through the subprocess
 # environment after being read from chmod 600 secret files; they are not written
@@ -1009,6 +1036,7 @@ def profile_for_user_id(cfg: Config, email_addr: str, user_id: str) -> UserProfi
     home = cfg.user_home_root / user_id
     tty_cfg_dir = home / ".config" / "ttychatter" / "openrouter"
     data_dir = home / ".local" / "share" / "ttychatter" / "openrouter"
+    cache_dir = home / ".cache" / "ttychatter" / "openrouter"
     return UserProfile(
         email=email_addr,
         user_id=user_id,
@@ -1016,8 +1044,8 @@ def profile_for_user_id(cfg: Config, email_addr: str, user_id: str) -> UserProfi
         config_file=tty_cfg_dir / "config",
         session_dir=data_dir / "sessions",
         attachment_dir=data_dir / "attachments",
-        model_cache_file=tty_cfg_dir / "models-cache.json",
-        favorites_file=tty_cfg_dir / "model-favorites.txt",
+        model_cache_file=cache_dir / "models.json",
+        favorites_file=tty_cfg_dir / "model-favorites",
         api_key_file=cfg.user_secret_dir / f"{user_id}.openrouter.key",
     )
 
@@ -1038,7 +1066,7 @@ def save_user_registry(cfg: Config, data: dict) -> None:
 
 def initial_user_config_text(profile: UserProfile) -> str:
     return textwrap.dedent(f"""\
-        # ttychatter.mailbot per-user ttychatter.python config
+        # ttychatter.mailbot per-user ttychatter config
         # This file stores non-secret ttychatter preferences only.
         # API keys are stored as chmod 600 files outside .config and injected by mailbot.
         CONTEXT_TURNS=12
@@ -1062,6 +1090,18 @@ def ensure_user_profile(cfg: Config, profile: UserProfile) -> None:
         cfg.user_secret_dir,
     ]:
         chmod_private_dir(path)
+    legacy_cache = profile.config_file.parent / "models-cache.json"
+    if legacy_cache.exists() and not profile.model_cache_file.exists():
+        try:
+            profile.model_cache_file.write_bytes(legacy_cache.read_bytes())
+        except OSError:
+            pass
+    legacy_favorites = profile.config_file.parent / "model-favorites.txt"
+    if legacy_favorites.exists() and not profile.favorites_file.exists():
+        try:
+            profile.favorites_file.write_bytes(legacy_favorites.read_bytes())
+        except OSError:
+            pass
     if not profile.config_file.exists():
         write_private_text(profile.config_file, initial_user_config_text(profile), mode=0o600)
     if not config_key_present(profile.config_file, "MODEL"):
@@ -1141,6 +1181,22 @@ def runtime_config_for_sender(cfg: Config, sender: str) -> Config:
     )
 
 
+def xdg_root_from_tail(path: Path, tail: Tuple[str, ...]) -> Optional[Path]:
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path.absolute()
+    parts = resolved.parts
+    if len(parts) < len(tail):
+        return None
+    if tuple(parts[-len(tail):]) != tail:
+        return None
+    root_parts = parts[:-len(tail)]
+    if not root_parts:
+        return Path(resolved.anchor or "/")
+    return Path(*root_parts)
+
+
 def ttychatter_environment(cfg: Config) -> dict:
     env = os.environ.copy()
     if cfg.runtime_ttychatter_home is not None:
@@ -1149,6 +1205,16 @@ def ttychatter_environment(cfg: Config) -> dict:
         env["XDG_CONFIG_HOME"] = str(home / ".config")
         env["XDG_DATA_HOME"] = str(home / ".local" / "share")
         env["XDG_CACHE_HOME"] = str(home / ".cache")
+    else:
+        config_root = xdg_root_from_tail(cfg.legacy_openrouter_config_file, ("ttychatter", "openrouter", "config"))
+        data_root = xdg_root_from_tail(cfg.session_dir, ("ttychatter", "openrouter", "sessions"))
+        cache_root = xdg_root_from_tail(cfg.model_cache_file, ("ttychatter", "openrouter", "models.json"))
+        if config_root is not None:
+            env["XDG_CONFIG_HOME"] = str(config_root)
+        if data_root is not None:
+            env["XDG_DATA_HOME"] = str(data_root)
+        if cache_root is not None:
+            env["XDG_CACHE_HOME"] = str(cache_root)
     if cfg.runtime_openrouter_api_key:
         env["OPENROUTER_API_KEY"] = cfg.runtime_openrouter_api_key
         env["TTYCHATTER_API_KEY"] = cfg.runtime_openrouter_api_key
@@ -1532,6 +1598,17 @@ def canonical_mailbot_command_word(word: str) -> str:
         "list": "sessions",
         "list-sessions": "sessions",
         "session-list": "sessions",
+        "search-sessions": "search",
+        "find-sessions": "search",
+        "set-session-title": "rename-session",
+        "retitle-session": "rename-session",
+        "title-session": "rename-session",
+        "rename-file": "rename-session-file",
+        "rename-session-log": "rename-session-file",
+        "turn-list": "turns",
+        "list-turns": "turns",
+        "fork": "branch",
+        "export-session": "export",
         "model-list": "models",
         "models-list": "models",
         "list-models": "models",
@@ -1587,6 +1664,10 @@ def known_mailbot_command_words() -> set[str]:
         "search",
         "search-session",
         "rename-session",
+        "rename-session-file",
+        "turns",
+        "branch",
+        "export",
         "delete-session",
         "archive-session",
         "model-cache",
@@ -1841,8 +1922,8 @@ def parse_subject_request(subject: str, cfg: Config, body: str = "") -> Optional
         if legacy_command is not None:
             return SubjectRequest("command", legacy_command, raw=token, legacy=True)
         # tc:{new} deliberately remains the literal session request. run_ttychatter()
-        # passes no session argument for it, letting ttychatter.python create its own
-        # default session-YYYY-MM-DD-HH-MM-SS name.
+        # maps it to a new timestamped session path using ttychatter's current
+        # session-YYYY-MM-DD-HH-MM-SS naming style.
         return SubjectRequest("session", token, raw=token)
 
     if cfg.allow_commands_in_subject and cfg.allow_bare_control_subjects:
@@ -2332,6 +2413,63 @@ def read_session_head_tail(path: Path, head_lines: int, tail_lines: int, line_ch
     return head_out, tail_out, total
 
 
+def session_title_clean(value: str, max_chars: int = 96) -> str:
+    text = re.sub(r"[\r\n\t]+", " ", value or "")
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > max_chars:
+        text = text[:max_chars].rstrip()
+    return text
+
+
+def session_title_from_line(raw: str) -> str:
+    line = (raw or "").strip()
+    match = re.match(r"^\[[^\]]+\]\s+system:\s*session-title:\s*(.*?)\s*$", line, flags=re.IGNORECASE)
+    if match:
+        return session_title_clean(match.group(1))
+    match = re.match(r"^session-title:\s*(.*?)\s*$", line, flags=re.IGNORECASE)
+    if match:
+        return session_title_clean(match.group(1))
+    match = re.match(r"^Session-Title:\s*(.*?)\s*$", line, flags=re.IGNORECASE)
+    if match:
+        return session_title_clean(match.group(1))
+    return ""
+
+
+def session_title_from_file(path: Path) -> str:
+    title = ""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for raw in fh:
+                found = session_title_from_line(raw)
+                if found:
+                    title = found
+    except OSError:
+        return ""
+    return title
+
+
+def session_display_title(path: Path) -> str:
+    return session_title_from_file(path) or path.stem
+
+
+def append_session_title_metadata(path: Path, title: str) -> str:
+    clean = session_title_clean(title)
+    if not clean:
+        raise ValueError("empty session title")
+    if not path.exists():
+        raise FileNotFoundError(f"session not found: {path.stem}")
+    stamp = time.strftime("%H:%M:%S", time.localtime())
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(f"[{stamp}] system: session-title: {clean}\n")
+    return clean
+
+
+def set_session_title_metadata(cfg: Config, session: str, title: str) -> str:
+    path = session_log_path(cfg, session)
+    clean = append_session_title_metadata(path, title)
+    return f"session title set: {path.stem} -> {clean}\n"
+
+
 def format_session_list_with_previews(cfg: Config) -> str:
     paths = session_files_newest_first(cfg)
     if not paths:
@@ -2358,8 +2496,9 @@ def format_session_list_with_previews(cfg: Config) -> str:
             cfg.session_list_tail_lines,
             cfg.session_preview_line_chars,
         )
-        lines.append(f"== {path.stem} ==")
-        lines.append(f"modified: {modified}; bytes: {size}; lines: {total}")
+        title = session_display_title(path)
+        lines.append(f"== {title} ==")
+        lines.append(f"file: {path.name}; modified: {modified}; bytes: {size}; lines: {total}")
         lines.append("head:")
         if head:
             lines.extend(f"  {line}" for line in head)
@@ -2393,6 +2532,13 @@ def search_session_logs(cfg: Config, query: str, session: Optional[str] = None) 
         if not path.exists():
             continue
         file_matches: List[str] = []
+        title = session_display_title(path)
+        if needle in path.name.casefold():
+            file_matches.append(f"file: {path.name}")
+            found += 1
+        if title and needle in title.casefold() and title != path.stem:
+            file_matches.append(f"title: {title}")
+            found += 1
         try:
             with path.open("r", encoding="utf-8", errors="replace") as fh:
                 for lineno, raw in enumerate(fh, 1):
@@ -2404,7 +2550,7 @@ def search_session_logs(cfg: Config, query: str, session: Optional[str] = None) 
         except OSError as exc:
             file_matches.append(f"[could not read: {exc}]")
         if file_matches:
-            lines.append(f"--- {path.name} ---")
+            lines.append(f"--- {title} ({path.name}) ---")
             lines.extend(file_matches)
             lines.append("")
         if found >= cfg.session_search_max_matches:
@@ -2416,7 +2562,8 @@ def search_session_logs(cfg: Config, query: str, session: Optional[str] = None) 
     return "\n".join(lines).rstrip() + "\n"
 
 
-def rename_session_file(cfg: Config, old: str, new: str) -> str:
+
+def rename_session_file_legacy(cfg: Config, old: str, new: str) -> str:
     old_name = sanitize_session_name(old)
     new_name = sanitize_session_name(new)
     old_path = session_log_path(cfg, old_name)
@@ -2896,40 +3043,135 @@ def cleanup_public_sessions(cfg: Config, dry_run: bool = False) -> str:
         lines.insert(0, "public session cleanup:")
     return "\n".join(lines).rstrip() + "\n"
 
+TTYCHATTER_BACKEND_COMMANDS = {
+    "python": "ttychatter.python",
+    "py": "ttychatter.python",
+    "c": "ttychatter",
+    "cli": "ttychatter",
+    "bash": "ttychatter.bash",
+    "bash-only": "ttychatter.bash",
+}
+
+
+def resolved_ttychatter_command(cfg: Config) -> str:
+    backend = normalize_keyword(cfg.ttychatter_backend or "python")
+    if cfg.ttychatter_command_configured or backend in {"command", "custom"}:
+        return cfg.ttychatter_command or "ttychatter.python"
+    if backend in {"auto", "detect"}:
+        for candidate in ["ttychatter", "ttychatter.python", "ttychatter.bash"]:
+            exe = shlex.split(candidate)[0]
+            if shutil.which(exe):
+                return candidate
+        return cfg.ttychatter_command or "ttychatter.python"
+    return TTYCHATTER_BACKEND_COMMANDS.get(backend, cfg.ttychatter_command or "ttychatter.python")
+
+
+def resolved_ttychatter_tokens(cfg: Config) -> List[str]:
+    command = resolved_ttychatter_command(cfg)
+    try:
+        tokens = shlex.split(command)
+    except ValueError as exc:
+        raise ValueError(f"TTYCHATTER_COMMAND parse failed: {exc}") from exc
+    if not tokens:
+        raise ValueError("TTYCHATTER_COMMAND resolved to an empty command")
+    return tokens
+
+
+def ttychatter_backend_kind(cfg: Config) -> str:
+    """Return a best-effort backend flavor for small CLI differences."""
+    backend = normalize_keyword(cfg.ttychatter_backend or "")
+    if backend in {"c", "cli", "python", "py", "bash", "bash-only"} and not cfg.ttychatter_command_configured:
+        if backend in {"c", "cli"}:
+            return "c"
+        if backend in {"bash", "bash-only"}:
+            return "bash"
+        return "python"
+    try:
+        tokens = resolved_ttychatter_tokens(cfg)
+    except ValueError:
+        tokens = shlex.split(cfg.ttychatter_command or "") if (cfg.ttychatter_command or "").strip() else []
+    lowered = [Path(tok).name.lower() for tok in tokens]
+    if any(name.endswith("ttychatter.bash") for name in lowered):
+        return "bash"
+    if any(name.endswith("ttychatter.python") for name in lowered):
+        return "python"
+    if any(name == "ttychatter" for name in lowered):
+        return "c"
+    if backend in {"bash", "bash-only"}:
+        return "bash"
+    if backend in {"c", "cli"}:
+        return "c"
+    if backend in {"python", "py"}:
+        return "python"
+    return "python"
+
+
+def ttychatter_label(cfg: Config, args: Iterable[str] = ()) -> str:
+    return " ".join([resolved_ttychatter_command(cfg)] + [str(arg) for arg in args]).strip()
+
+
+def unique_timestamp_session_path(cfg: Config) -> Path:
+    cfg.session_dir.mkdir(parents=True, exist_ok=True)
+    base = time.strftime("session-%Y-%m-%d-%H-%M-%S", time.localtime())
+    candidate = cfg.session_dir / f"{base}.log"
+    if not candidate.exists():
+        return candidate
+    for idx in range(1, 1000):
+        candidate = cfg.session_dir / f"{base}-{idx:03d}.log"
+        if not candidate.exists():
+            return candidate
+    digest = hashlib.sha256(f"{base}-{time.time_ns()}".encode("ascii")).hexdigest()[:12]
+    return cfg.session_dir / f"{base}-{digest}.log"
+
+
+def mailbot_session_target_path(cfg: Config, session: str) -> Path:
+    requested = (session or "").strip()
+    if not requested or requested.casefold() == "new":
+        return unique_timestamp_session_path(cfg)
+    return session_log_path(cfg, requested)
+
+
 def run_ttychatter(cfg: Config, session: str, body: str, attachments: List[Path]) -> Tuple[int, str, str]:
     cfg.session_dir.mkdir(parents=True, exist_ok=True)
     cfg.attachment_dir.mkdir(parents=True, exist_ok=True)
 
-    requested_session = (session or "").strip()
-    let_ttychatter_name_session = requested_session.casefold() == "new"
-    session_name = "" if let_ttychatter_name_session else session_log_path(cfg, requested_session).stem
+    try:
+        cmd = resolved_ttychatter_tokens(cfg)
+        extra_args = shlex.split(cfg.ttychatter_extra_args)
+    except ValueError as exc:
+        return 2, "", str(exc)
 
-    cmd = shlex.split(cfg.ttychatter_command)
-    cmd.append("--loopback")
-    for extra in shlex.split(cfg.ttychatter_extra_args):
-        cmd.append(extra)
+    target_path = mailbot_session_target_path(cfg, session)
+    cmd.extend(extra_args)
+    cmd.extend(["--loopback", "--input", "-"])
     for path in attachments:
         cmd.extend(["--attach", str(path)])
-    if session_name:
-        cmd.append(session_name)
+    cmd.extend(["--session", str(target_path)])
 
-    proc = subprocess.run(
-        cmd,
-        input=body,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=ttychatter_environment(cfg),
-    )
-    return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=body,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=ttychatter_environment(cfg),
+        )
+        return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+    except FileNotFoundError:
+        return 127, "", f"command not found: {cmd[0]}"
 
 
 def ttychatter_session_from_stderr(stderr_text: str) -> str:
     for raw in (stderr_text or "").splitlines():
         line = raw.strip()
-        if not line.lower().startswith("session:"):
-            continue
-        value = line.split(":", 1)[1].strip()
+        value = ""
+        if line.lower().startswith("session:"):
+            value = line.split(":", 1)[1].strip()
+        else:
+            match = re.search(r"\bappended response to\s+(.+?\.log)\s*$", line, flags=re.IGNORECASE)
+            if match:
+                value = match.group(1).strip()
         if not value:
             continue
         path = Path(value)
@@ -2939,15 +3181,18 @@ def ttychatter_session_from_stderr(stderr_text: str) -> str:
 
 def display_session_name(requested_session: str, stderr_text: str) -> str:
     requested = (requested_session or "").strip()
-    if requested.casefold() == "new":
+    if not requested or requested.casefold() == "new":
         detected = ttychatter_session_from_stderr(stderr_text)
-        return detected or "new (ttychatter default timestamped session)"
+        return detected or "new timestamped session"
     return sanitize_session_name(requested)
 
 
 def run_ttychatter_cli(cfg: Config, args: List[str], input_text: str = "", timeout: Optional[int] = None) -> Tuple[int, str, str]:
-    """Run a noninteractive ttychatter.python utility command."""
-    cmd = shlex.split(cfg.ttychatter_command) + [str(arg) for arg in args]
+    """Run a noninteractive ttychatter utility command."""
+    try:
+        cmd = resolved_ttychatter_tokens(cfg) + [str(arg) for arg in args]
+    except ValueError as exc:
+        return 2, "", str(exc)
     try:
         proc = subprocess.run(
             cmd,
@@ -2960,13 +3205,12 @@ def run_ttychatter_cli(cfg: Config, args: List[str], input_text: str = "", timeo
         )
         return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
     except FileNotFoundError:
-        return 127, "", f"command not found: {cmd[0] if cmd else cfg.ttychatter_command}"
+        return 127, "", f"command not found: {cmd[0] if cmd else resolved_ttychatter_command(cfg)}"
     except subprocess.TimeoutExpired as exc:
         stdout = exc.stdout if isinstance(exc.stdout, str) else ""
         stderr = exc.stderr if isinstance(exc.stderr, str) else ""
         stderr = (stderr + "\n" if stderr else "") + f"command timed out after {timeout or cfg.ttychatter_control_timeout} seconds"
         return 124, stdout.strip(), stderr.strip()
-
 
 def truncate_text_bytes(text: str, max_bytes: int) -> str:
     raw = (text or "").encode("utf-8", errors="replace")
@@ -2985,6 +3229,14 @@ def format_cli_result(label: str, rc: int, stdout: str, stderr_text: str, max_by
     if not stdout and not stderr_text:
         lines.extend(["", "(no output)"])
     return "\n".join(lines).rstrip() + "\n"
+
+
+def format_tty_result(cfg: Config, args: List[str], rc: int, stdout: str, stderr_text: str) -> str:
+    return format_cli_result(ttychatter_label(cfg, args), rc, stdout, stderr_text, cfg.max_command_output_bytes)
+
+
+def dry_run_tty_line(cfg: Config, args: List[str]) -> str:
+    return "[dry-run] would run: " + ttychatter_label(cfg, args) + "\n"
 
 
 def parse_updated_model_cache_path(output: str) -> Optional[Path]:
@@ -3015,8 +3267,29 @@ def read_file_attachment(path: Path, cfg: Config, filename: Optional[str] = None
     return ReplyAttachment(filename or safe_filename(path.name), data, maintype, subtype), f"attached: {filename or path.name} ({len(data)} bytes)"
 
 
+def model_cache_candidates(cfg: Config) -> List[Path]:
+    candidates: List[Path] = []
+
+    def add(path: Optional[Path]) -> None:
+        if path and path not in candidates:
+            candidates.append(path)
+
+    add(cfg.model_cache_file)
+    if cfg.runtime_ttychatter_config_file is not None:
+        add(cfg.runtime_ttychatter_config_file.parent / "models-cache.json")
+    add(xdg_config_root() / "ttychatter" / "openrouter" / "models-cache.json")
+    return candidates
+
+
+def existing_model_cache_file(cfg: Config) -> Path:
+    for path in model_cache_candidates(cfg):
+        if path.is_file():
+            return path
+    return cfg.model_cache_file
+
+
 def model_cache_reply(cfg: Config) -> Tuple[bool, str, List[ReplyAttachment]]:
-    cache_path = cfg.model_cache_file
+    cache_path = existing_model_cache_file(cfg)
     intro = "model-cache: existing cache only; no OpenRouter fetch was attempted"
     ok, body, attachments = deliver_file_output(cfg, "model-cache", cache_path, "models-cache.json", intro)
     if not ok:
@@ -3082,7 +3355,7 @@ def search_model_cache(cfg: Config, query: str) -> Tuple[bool, str]:
     query = (query or "").strip()
     if not query:
         return False, "usage: model-search TEXT\n"
-    path = cfg.model_cache_file
+    path = existing_model_cache_file(cfg)
     try:
         raw = path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
@@ -3367,7 +3640,8 @@ def build_control_reply(
 
 BODY_ARG_COMMANDS = {
     "models", "routers", "model-list", "models-list", "list-models", "show-models",
-    "search", "search-session", "rename-session", "favorite-model",
+    "search", "search-session", "rename-session", "rename-session-file",
+    "turns", "branch", "export", "favorite-model",
     "unfavorite-model", "test-model", "show-memory", "clear-memory",
     "tty-set", "tty-unset", "set", "unset", "api-key", "set-api-key",
 }
@@ -3474,10 +3748,15 @@ CONVERSATIONS AND SESSIONS
 
 COMMAND                     FUNCTION
 --------------------------  -----------------------------------------
-sessions                    List your saved sessions.
-search TEXT                 Search all of your session logs.
+sessions                    List saved sessions with friendly title metadata.
+search TEXT                 Search session filenames, titles, and logs.
 search-session SESSION TEXT Search one session log.
-rename-session OLD NEW      Rename a session log.
+rename-session SESSION TITLE
+                            Set session-title metadata; filename stays stable.
+rename-session-file OLD NEW Rename a session file; legacy escape hatch.
+turns SESSION               List turn numbers from a session.
+branch SESSION TURN         Branch a session after TURN.
+export SESSION [FORMAT]     Export a session as markdown, text, or json.
 delete-session SESSION      Delete a session log.
 archive-session             Show your archive-on-expire preference.
 archive-session on          Save expiring public sessions before deletion.
@@ -3505,7 +3784,7 @@ SAFE MODEL-LIST FLAGS
 
 --all --sort VALUE --modellist-sort-tokens --min-input-tokens N
 --min-output-tokens N --hide-preview --show-preview --require-tokens
---allow-missing-tokens --model-type VALUE
+--allow-missing-tokens --favorites-only --model-type VALUE
 
 OTHER USER UTILITIES
 
@@ -3665,6 +3944,25 @@ def external_mailbot_manpage(cfg: Optional[Config] = None) -> Optional[str]:
 
 def mailbot_manpage(cfg: Optional[Config] = None) -> str:
     return external_mailbot_manpage(cfg) or embedded_mailbot_manpage(cfg)
+
+
+def embedded_mailbot_manpage(cfg: Optional[Config] = None) -> str:
+    return rf""".TH TTYCHATTER.MAILBOT 1 "June 2026" "ttychatter.mailbot {VERSION}" "User Commands"
+.SH NAME
+ttychatter.mailbot \- email transport adapter and remote control surface for ttychatter
+.SH SYNOPSIS
+.B ttychatter.mailbot
+[--config-file PATH] [--once|--daemon] [--dry-run] [--open-to-public]
+.PP
+.B ttychatter.mailbot
+[--doctor] [--sessions] [--model-cache] [--model-search TEXT] [--search TEXT] [--update-models]
+.SH DESCRIPTION
+ttychatter.mailbot bridges IMAP mail to a selected ttychatter subprocess and replies by sendmail or SMTP. The selected backend may be ttychatter.python, the C ttychatter binary, or ttychatter.bash. Install ttychatter.mailbot.1 beside the program or in man1 for the full manual.
+.SH BACKENDS
+TTYCHATTER_BACKEND accepts python, c, bash, auto, or command. TTYCHATTER_CLIENT is accepted as a legacy alias. TTYCHATTER_COMMAND overrides the backend map. Chat calls use --loopback --input - --session PATH for compatibility with current C, Python, and Bash clients.
+.SH FILES
+Default config follows XDG_CONFIG_HOME/ttychatter/mailbot/config. Sessions follow XDG_DATA_HOME/ttychatter/openrouter/sessions. Model cache follows XDG_CACHE_HOME/ttychatter/openrouter/models.json.
+"""
 
 
 def roff_plain_unescape(text: str) -> str:
@@ -3835,6 +4133,7 @@ def validate_model_list_args(args: List[str]) -> Tuple[bool, List[str], str]:
         "--show-preview",
         "--require-tokens",
         "--allow-missing-tokens",
+        "--favorites-only",
     }
     with_value = {"--sort", "--min-input-tokens", "--min-output-tokens", "--model-type"}
     safe: List[str] = []
@@ -3889,6 +4188,17 @@ def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = Fal
         "list": "sessions",
         "list-sessions": "sessions",
         "session-list": "sessions",
+        "search-sessions": "search",
+        "find-sessions": "search",
+        "set-session-title": "rename-session",
+        "retitle-session": "rename-session",
+        "title-session": "rename-session",
+        "rename-file": "rename-session-file",
+        "rename-session-log": "rename-session-file",
+        "turn-list": "turns",
+        "list-turns": "turns",
+        "fork": "branch",
+        "export-session": "export",
         "model-list": "models",
         "models-list": "models",
         "list-models": "models",
@@ -4015,14 +4325,62 @@ def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = Fal
         return True, search_session_logs(cfg, " ".join(args[1:]), session=args[0]), []
 
     if command == "rename-session":
-        if len(args) != 2:
-            return False, "usage: rename-session OLD NEW\n", []
+        if len(args) < 2:
+            return False, "usage: rename-session SESSION TITLE\n", []
+        title = " ".join(args[1:])
         if dry_run:
-            return True, f"[dry-run] would rename session: {args[0]} -> {args[1]}\n", []
+            return True, f"[dry-run] would set session title: {args[0]} -> {title}\n", []
         try:
-            return True, rename_session_file(cfg, args[0], args[1]), []
+            return True, set_session_title_metadata(cfg, args[0], title), []
         except Exception as exc:
             return False, f"rename-session failed: {exc}\n", []
+
+    if command == "rename-session-file":
+        if len(args) != 2:
+            return False, "usage: rename-session-file OLD NEW\n", []
+        if dry_run:
+            return True, f"[dry-run] would rename session file: {args[0]} -> {args[1]}\n", []
+        try:
+            return True, rename_session_file_legacy(cfg, args[0], args[1]), []
+        except Exception as exc:
+            return False, f"rename-session-file failed: {exc}\n", []
+
+    if command == "turns":
+        if len(args) != 1:
+            return False, "usage: turns SESSION\n", []
+        cli = ["--turns", str(session_log_path(cfg, args[0]))]
+        if dry_run:
+            return True, dry_run_tty_line(cfg, cli), []
+        rc, stdout, stderr_text = run_ttychatter_cli(cfg, cli)
+        return rc == 0, format_tty_result(cfg, cli, rc, stdout, stderr_text), []
+
+    if command == "branch":
+        if len(args) != 2:
+            return False, "usage: branch SESSION TURN\n", []
+        cli = ["--branch", str(session_log_path(cfg, args[0])), args[1]]
+        if dry_run:
+            return True, dry_run_tty_line(cfg, cli), []
+        rc, stdout, stderr_text = run_ttychatter_cli(cfg, cli)
+        return rc == 0, format_tty_result(cfg, cli, rc, stdout, stderr_text), []
+
+    if command == "export":
+        if len(args) not in {1, 2}:
+            return False, "usage: export SESSION [markdown|text|json]\n", []
+        fmt = normalize_keyword(args[1]) if len(args) == 2 else "markdown"
+        if fmt not in {"markdown", "text", "json"}:
+            return False, "usage: export SESSION [markdown|text|json]\n", []
+        cli = ["--export", str(session_log_path(cfg, args[0])), "--format", fmt]
+        if dry_run:
+            return True, dry_run_tty_line(cfg, cli), []
+        rc, stdout, stderr_text = run_ttychatter_cli(cfg, cli)
+        intro = ttychatter_label(cfg, cli) + "\n" + f"exit_status: {rc}"
+        if stderr_text:
+            intro += "\n\n--- stderr ---\n" + truncate_text_bytes(stderr_text, cfg.max_command_output_bytes)
+        if rc == 0 and stdout:
+            ext = {"markdown": "md", "text": "txt", "json": "json"}[fmt]
+            body, attachments = deliver_text_output(cfg, "export", stdout, f"{sanitize_session_name(args[0])}.{ext}", intro)
+            return True, body, attachments
+        return False, format_tty_result(cfg, cli, rc, stdout, stderr_text), []
 
     if command == "delete-session":
         if len(args) != 1:
@@ -4068,9 +4426,9 @@ def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = Fal
         if args:
             return False, "usage: update-models\n", []
         if dry_run:
-            return True, f"[dry-run] would run: {cfg.ttychatter_command} --update-models\n", []
+            return True, dry_run_tty_line(cfg, ["--update-models"]), []
         rc, stdout, stderr_text = run_ttychatter_cli(cfg, ["--update-models"])
-        output = format_cli_result("ttychatter.python --update-models", rc, stdout, stderr_text, cfg.max_command_output_bytes)
+        output = format_tty_result(cfg, ["--update-models"], rc, stdout, stderr_text)
         cache_path = parse_updated_model_cache_path("\n".join([stdout, stderr_text])) or cfg.model_cache_file
         ok_file, file_body, attachments = deliver_file_output(cfg, "model-cache", cache_path, "models-cache.json", "updated model cache")
         output += "\n" + file_body
@@ -4082,16 +4440,16 @@ def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = Fal
             return False, reason + "\n", []
         cli = ["--models" if command == "models" else "--routers"] + safe_args
         if dry_run:
-            return True, "[dry-run] would run: " + " ".join([cfg.ttychatter_command] + cli) + "\n", []
+            return True, dry_run_tty_line(cfg, cli), []
         rc, stdout, stderr_text = run_ttychatter_cli(cfg, cli)
-        label = "ttychatter.python " + " ".join(cli)
+        label = ttychatter_label(cfg, cli)
         if stdout:
             intro = label + "\n" + f"exit_status: {rc}"
             if stderr_text:
                 intro += "\n\n--- stderr ---\n" + truncate_text_bytes(stderr_text, cfg.max_command_output_bytes)
             delivered, attachments = deliver_text_output(cfg, command, stdout, f"ttychatter-{command}.txt", intro)
             return rc == 0, delivered, attachments
-        body = format_cli_result(label, rc, stdout, stderr_text, cfg.max_command_output_bytes)
+        body = format_tty_result(cfg, cli, rc, stdout, stderr_text)
         return rc == 0, body, []
 
     fixed_tty_commands = {
@@ -4104,9 +4462,9 @@ def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = Fal
         if args:
             return False, f"usage: {command}\n", []
         if dry_run:
-            return True, "[dry-run] would run: " + " ".join([cfg.ttychatter_command] + fixed_tty_commands[command]) + "\n", []
+            return True, dry_run_tty_line(cfg, fixed_tty_commands[command]), []
         rc, stdout, stderr_text = run_ttychatter_cli(cfg, fixed_tty_commands[command])
-        return rc == 0, format_cli_result("ttychatter.python " + " ".join(fixed_tty_commands[command]), rc, stdout, stderr_text, cfg.max_command_output_bytes), []
+        return rc == 0, format_tty_result(cfg, fixed_tty_commands[command], rc, stdout, stderr_text), []
 
     single_arg_tty_commands = {
         "favorite-model": "--favorite-model",
@@ -4118,11 +4476,13 @@ def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = Fal
     if command in single_arg_tty_commands:
         if len(args) != 1:
             return False, f"usage: {command} ARG\n", []
-        cli = [single_arg_tty_commands[command], args[0]]
+        session_ref_commands = {"show-memory", "clear-memory"}
+        arg_value = str(session_log_path(cfg, args[0])) if command in session_ref_commands else args[0]
+        cli = [single_arg_tty_commands[command], arg_value]
         if dry_run:
-            return True, "[dry-run] would run: " + " ".join([cfg.ttychatter_command] + cli) + "\n", []
+            return True, dry_run_tty_line(cfg, cli), []
         rc, stdout, stderr_text = run_ttychatter_cli(cfg, cli)
-        return rc == 0, format_cli_result("ttychatter.python " + " ".join(cli), rc, stdout, stderr_text, cfg.max_command_output_bytes), []
+        return rc == 0, format_tty_result(cfg, cli, rc, stdout, stderr_text), []
 
     if command == "tty-unset":
         if len(args) != 1:
@@ -4139,9 +4499,9 @@ def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = Fal
             return False, "tty-unset refused; allowed keys: " + ", ".join(cfg.user_ttyconfig_allowed_keys) + "\n", []
         cli = ["--unset", key]
         if dry_run:
-            return True, "[dry-run] would run: " + " ".join([cfg.ttychatter_command] + cli) + "\n", []
+            return True, dry_run_tty_line(cfg, cli), []
         rc, stdout, stderr_text = run_ttychatter_cli(cfg, cli)
-        return rc == 0, format_cli_result("ttychatter.python --unset " + key, rc, stdout, stderr_text, cfg.max_command_output_bytes), []
+        return rc == 0, format_tty_result(cfg, cli, rc, stdout, stderr_text), []
 
     if command == "tty-set":
         if len(args) < 2:
@@ -4157,11 +4517,16 @@ def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = Fal
                 return False, f"api-key save failed: {exc}\n", []
         if not user_ttyconfig_key_allowed(cfg, key):
             return False, "tty-set refused; allowed keys: " + ", ".join(cfg.user_ttyconfig_allowed_keys) + "\n", []
-        cli = ["--set", key, value]
+        if ttychatter_backend_kind(cfg) == "c":
+            cli = ["--set", f"{key}={value}"]
+            label_cli = ["--set", f"{key}=VALUE"]
+        else:
+            cli = ["--set", key, value]
+            label_cli = ["--set", key, "VALUE"]
         if dry_run:
-            return True, "[dry-run] would run: " + " ".join([cfg.ttychatter_command, "--set", key, "VALUE"]) + "\n", []
+            return True, "[dry-run] would run: " + ttychatter_label(cfg, label_cli) + "\n", []
         rc, stdout, stderr_text = run_ttychatter_cli(cfg, cli)
-        return rc == 0, format_cli_result(f"ttychatter.python --set {key} VALUE", rc, stdout, stderr_text, cfg.max_command_output_bytes), []
+        return rc == 0, format_tty_result(cfg, label_cli, rc, stdout, stderr_text), []
 
     return False, f"unknown mailbot command: {tokens[0]}\n\n" + mailbot_command_help(cfg), []
 
@@ -4529,7 +4894,13 @@ def doctor(cfg: Config) -> int:
     env_cfg = os.environ.get(CONFIG_ENV_VAR, "").strip()
     checks.append(("config env", True, f"{CONFIG_ENV_VAR}={env_cfg}" if env_cfg else "not set"))
     xdg_cfg = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    xdg_data = os.environ.get("XDG_DATA_HOME", "").strip()
+    xdg_state = os.environ.get("XDG_STATE_HOME", "").strip()
+    xdg_cache = os.environ.get("XDG_CACHE_HOME", "").strip()
     checks.append(("xdg config home", True, f"XDG_CONFIG_HOME={xdg_cfg}" if xdg_cfg else "not set"))
+    checks.append(("xdg data home", True, f"XDG_DATA_HOME={xdg_data}" if xdg_data else "not set"))
+    checks.append(("xdg state home", True, f"XDG_STATE_HOME={xdg_state}" if xdg_state else "not set"))
+    checks.append(("xdg cache home", True, f"XDG_CACHE_HOME={xdg_cache}" if xdg_cache else "not set"))
     checks.append(("config file", cfg.config_file.exists(), str(cfg.config_file)))
     checks.append(("config readable", config_readable(cfg.config_file), f"mode {config_mode_string(cfg.config_file)}"))
     parsed_keys, ignored_lines = config_parse_summary(cfg.config_file)
@@ -4561,7 +4932,8 @@ def doctor(cfg: Config) -> int:
     checks.append(("api cost protection", True, "enabled" if cfg.api_cost_protection else "disabled"))
     checks.append(("mail from", bool(cfg.mail_from or cfg.smtp_user or cfg.imap_user), cfg.mail_from or cfg.smtp_user or cfg.imap_user or "missing"))
     checks.append(("gpg", gpg_available(), "found" if gpg_available() else "not found"))
-    checks.append(("ttychatter command", bool(cfg.ttychatter_command), cfg.ttychatter_command))
+    checks.append(("ttychatter backend", True, cfg.ttychatter_backend))
+    checks.append(("ttychatter command", bool(resolved_ttychatter_command(cfg)), resolved_ttychatter_command(cfg)))
     checks.append(("model cache file", True, str(cfg.model_cache_file)))
     found_manpage = next((p for p in mailbot_manpage_candidates(cfg) if p.is_file()), None)
     checks.append(("mailbot manpage", True, str(found_manpage) if found_manpage else "embedded fallback"))
@@ -4607,6 +4979,9 @@ def print_config(cfg: Config) -> None:
     print(f"HOME={Path.home()}")
     print(f"{CONFIG_ENV_VAR}={os.environ.get(CONFIG_ENV_VAR, '').strip()}")
     print(f"XDG_CONFIG_HOME={os.environ.get('XDG_CONFIG_HOME', '').strip()}")
+    print(f"XDG_DATA_HOME={os.environ.get('XDG_DATA_HOME', '').strip()}")
+    print(f"XDG_STATE_HOME={os.environ.get('XDG_STATE_HOME', '').strip()}")
+    print(f"XDG_CACHE_HOME={os.environ.get('XDG_CACHE_HOME', '').strip()}")
     print(f"CONFIG_FILE={cfg.config_file}")
     print(f"CONFIG_EXISTS={int(cfg.config_file.exists())}")
     print(f"CONFIG_READABLE={int(config_readable(cfg.config_file))}")
@@ -4677,7 +5052,9 @@ def print_config(cfg: Config) -> None:
     print(f"MAX_ATTACHMENT_BYTES={cfg.max_attachment_bytes}")
     print(f"PROCESS_ATTACHMENTS={int(cfg.process_attachments)}")
     print(f"MARK_SEEN={int(cfg.mark_seen)}")
+    print(f"TTYCHATTER_BACKEND={cfg.ttychatter_backend}")
     print(f"TTYCHATTER_COMMAND={cfg.ttychatter_command}")
+    print(f"TTYCHATTER_RESOLVED_COMMAND={resolved_ttychatter_command(cfg)}")
     print(f"TTYCHATTER_EXTRA_ARGS={cfg.ttychatter_extra_args}")
     print(f"TTYCHATTER_CONTROL_TIMEOUT={cfg.ttychatter_control_timeout}")
     print(f"SESSION_DIR={cfg.session_dir}")
@@ -4781,8 +5158,16 @@ USAGE
     {PROGRAM} --manpage
     {PROGRAM} --model-cache
     {PROGRAM} --model-search TEXT
+    {PROGRAM} --search TEXT
     {PROGRAM} --update-models
+    {PROGRAM} --rename-session SESSION TITLE [--dry-run]
     {PROGRAM} --delete-session SESSION [--dry-run]
+    {PROGRAM} --turns SESSION
+    {PROGRAM} --branch SESSION TURN [--dry-run]
+    {PROGRAM} --export SESSION [--format markdown|text|json]
+    {PROGRAM} --ttychatter-backend python|c|bash|auto
+    {PROGRAM} --ttychatter-command COMMAND
+    {PROGRAM} --ttychatter-extra-args ARGS
     {PROGRAM} --config
     {PROGRAM} --raw-config
     {PROGRAM} --set KEY VALUE
@@ -4796,7 +5181,7 @@ MAIL SUBJECTS
     Ordinary subject             Uses the subject as the sender's private session name when SUBJECT_SESSIONS=1
     Re: ordinary subject         Resumes that same sender/session pair
     tc:CONFIG                    Export/apply mailbot config attachment
-    tc:MODELS                    Return existing models-cache.json; no refresh
+    tc:MODELS                    Return existing models.json cache; no refresh
     tc:MODELS TEXT               Search existing model cache for TEXT
     tc:CMD                       Run first nonempty body line as a command
     tc:command args              Run a mailbot command directly
@@ -4804,7 +5189,7 @@ MAIL SUBJECTS
     tc:rm{{session-name}}          Alias for delete{{session-name}}
     tc:archive-session on|off    Public archive-on-expire preference
     tc:{{session-name}}          Send body to ttychatter session
-    tc:{{new}}                   Let ttychatter create its default timestamped session
+    tc:{{new}}                   Create a fresh timestamped ttychatter session
     MAILBOT                      Use first nonempty body line as command/session selector
 
 USER REGISTRY AND PREFERENCES
@@ -4842,6 +5227,14 @@ OUTPUT MODES
     MODEL_SEARCH_OUTPUT, MODEL_LIST_OUTPUT, SESSIONS_OUTPUT, and CONFIG_OUTPUT
     accept auto, body, or attachment.
 
+
+TTYCHATTER BACKEND
+    TTYCHATTER_BACKEND selects the subprocess client: python, c, bash, auto,
+    or command. TTYCHATTER_CLIENT is accepted as a legacy alias. The default
+    remains python for existing deployments. C and Bash compatibility use the
+    shared command form --loopback --input - --session PATH. TTYCHATTER_COMMAND
+    overrides the backend map when set.
+
 CONFIG PATH
     If --config-file is omitted, the path is resolved as:
     TTYCHATTER_MAILBOT_CONFIG, then XDG_CONFIG_HOME/ttychatter/mailbot/config,
@@ -4873,8 +5266,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manpage", action="store_true")
     parser.add_argument("--model-cache", action="store_true")
     parser.add_argument("--model-search", metavar="TEXT")
+    parser.add_argument("--search", metavar="TEXT")
+    parser.add_argument("--search-sessions", metavar="TEXT")
     parser.add_argument("--update-models", action="store_true")
+    parser.add_argument("--rename-session", nargs=2, metavar=("SESSION", "TITLE"))
     parser.add_argument("--delete-session", metavar="SESSION")
+    parser.add_argument("--turns", metavar="SESSION")
+    parser.add_argument("--branch", nargs=2, metavar=("SESSION", "TURN"))
+    parser.add_argument("--export", metavar="SESSION")
+    parser.add_argument("--format", default="markdown", choices=("markdown", "text", "json"))
+    parser.add_argument("--ttychatter-backend", metavar="BACKEND")
+    parser.add_argument("--ttychatter-command", metavar="COMMAND")
+    parser.add_argument("--ttychatter-extra-args", metavar="ARGS")
     parser.add_argument("--config", action="store_true")
     parser.add_argument("--raw-config", action="store_true")
     parser.add_argument("--set", nargs=2, metavar=("KEY", "VALUE"))
@@ -4897,6 +5300,13 @@ def main() -> int:
         return 0
 
     cfg = load_config(resolve_config_file(args.config_file))
+    if args.ttychatter_backend:
+        cfg.ttychatter_backend = normalize_keyword(args.ttychatter_backend)
+    if args.ttychatter_command:
+        cfg.ttychatter_command = args.ttychatter_command
+        cfg.ttychatter_command_configured = True
+    if args.ttychatter_extra_args is not None:
+        cfg.ttychatter_extra_args = args.ttychatter_extra_args
     try:
         migrate_plaintext_openrouter_api_key(cfg)
     except Exception as exc:
@@ -4924,13 +5334,40 @@ def main() -> int:
         ok, body, _attachments = dispatch_mailbot_command(cfg, "model-search " + shlex.quote(args.model_search), dry_run=args.dry_run)
         print(body, end="")
         return 0 if ok else 1
+    if args.search or args.search_sessions:
+        query = args.search or args.search_sessions
+        ok, body, _attachments = dispatch_mailbot_command(cfg, "search " + shlex.quote(query), dry_run=args.dry_run)
+        print(body, end="")
+        return 0 if ok else 1
     if args.update_models:
         ok, body, _attachments = dispatch_mailbot_command(cfg, "update-models", dry_run=args.dry_run)
+        print(body, end="")
+        return 0 if ok else 1
+    if args.rename_session:
+        session, title = args.rename_session
+        ok, body, _attachments = dispatch_mailbot_command(cfg, "rename-session " + shlex.quote(session) + " " + shlex.quote(title), dry_run=args.dry_run)
         print(body, end="")
         return 0 if ok else 1
     if args.delete_session:
         ok, body, _attachments = dispatch_mailbot_command(cfg, "delete-session " + shlex.quote(args.delete_session), dry_run=args.dry_run)
         print(body, end="")
+        return 0 if ok else 1
+    if args.turns:
+        ok, body, _attachments = dispatch_mailbot_command(cfg, "turns " + shlex.quote(args.turns), dry_run=args.dry_run)
+        print(body, end="")
+        return 0 if ok else 1
+    if args.branch:
+        ok, body, _attachments = dispatch_mailbot_command(cfg, "branch " + shlex.quote(args.branch[0]) + " " + shlex.quote(args.branch[1]), dry_run=args.dry_run)
+        print(body, end="")
+        return 0 if ok else 1
+    if args.export:
+        ok, body, attachments = dispatch_mailbot_command(cfg, "export " + shlex.quote(args.export) + " " + shlex.quote(args.format), dry_run=args.dry_run)
+        print(body, end="")
+        for attachment in attachments:
+            try:
+                sys.stdout.write(attachment.data.decode("utf-8", errors="replace"))
+            except Exception:
+                pass
         return 0 if ok else 1
 
     if args.set:

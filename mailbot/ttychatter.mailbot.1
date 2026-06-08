@@ -1,4 +1,4 @@
-.TH TTYCHATTER.MAILBOT 1 "May 2026" "ttychatter.mailbot 0.6.1" "User Commands"
+.TH TTYCHATTER.MAILBOT 1 "June 2026" "ttychatter.mailbot 0.6.2-mailbot-parity" "User Commands"
 .SH NAME
 ttychatter.mailbot \- email transport adapter and remote control surface for ttychatter
 .SH SYNOPSIS
@@ -10,25 +10,71 @@ ttychatter.mailbot \- email transport adapter and remote control surface for tty
 .PP
 .B ttychatter.mailbot
 [--config|--raw-config] [--sessions|--list-sessions] [--manpage]
-[--model-cache] [--model-search TEXT] [--update-models]
-[--delete-session SESSION]
+[--model-cache] [--model-search TEXT] [--search TEXT|--search-sessions TEXT]
+[--update-models] [--rename-session SESSION TITLE] [--delete-session SESSION]
+[--turns SESSION] [--branch SESSION TURN] [--export SESSION --format FORMAT]
+.PP
+.B ttychatter.mailbot
+[--ttychatter-backend python|c|bash|auto|command]
+[--ttychatter-command COMMAND] [--ttychatter-extra-args ARGS]
 .PP
 .B ttychatter.mailbot
 [--set KEY VALUE] [--unset KEY] [--set-imap-password [--gpg]]
 [--set-smtp-password [--gpg]]
 .SH DESCRIPTION
 ttychatter.mailbot reads unread IMAP mail, maps each accepted message to a
-chat session or an allowlisted control command, calls ttychatter.python when
-chat or ttychatter utility work is needed, and replies by sendmail or SMTP.
+chat session or an allowlisted control command, invokes a ttychatter client,
+and replies by sendmail or SMTP.
 .PP
-Private mode requires ALLOWED_FROM. Public demo mode, enabled by
-.B --open-to-public
-or OPEN_TO_PUBLIC=1, accepts mail from any sender but restricts non-ALLOWED_FROM
-senders to public chat and the PUBLIC_ALLOWED_COMMANDS set.
+The mailbot is a transport adapter. It does not contain OpenRouter chat logic.
+The selected ttychatter backend owns model calls, context reconstruction,
+session logs, attachments, model selection, and exports.
 .PP
-USER_REGISTRY=1 maps each accepted sender to a private ttychatter HOME.
-SUBJECT_SESSIONS=1 lets ordinary email subjects become per-sender session
-names; Re: replies resume the same sender/session pair.
+The default backend remains
+.B ttychatter.python
+for existing deployments. The same mailbot can now use the current C CLI or the
+Bash-only client by setting TTYCHATTER_BACKEND or TTYCHATTER_COMMAND.
+.SH BACKENDS
+.TP
+.B TTYCHATTER_BACKEND=python
+Use
+.B ttychatter.python
+(default).
+.TP
+.B TTYCHATTER_BACKEND=c
+Use the C CLI command
+.B ttychatter.
+.TP
+.B TTYCHATTER_BACKEND=bash
+Use
+.B ttychatter.bash.
+.TP
+.B TTYCHATTER_BACKEND=auto
+Use the first available command in this order: ttychatter, ttychatter.python,
+ttychatter.bash.
+.TP
+.B TTYCHATTER_BACKEND=command
+Use TTYCHATTER_COMMAND exactly.
+.TP
+.B TTYCHATTER_CLIENT=python|c|bash|auto|command
+Legacy alias for TTYCHATTER_BACKEND. New configs should prefer TTYCHATTER_BACKEND.
+.TP
+.B TTYCHATTER_COMMAND=COMMAND
+Override the backend map. COMMAND is split with shell-like quoting.
+.TP
+.B TTYCHATTER_EXTRA_ARGS=ARGS
+Extra arguments added to chat subprocesses. This is commonly used for local
+smoke tests, for example ARGS="--demo".
+.PP
+Chat calls use the current cross-backend form:
+.PP
+.RS
+.nf
+COMMAND [TTYCHATTER_EXTRA_ARGS] --loopback --input - --attach FILE --session PATH
+.fi
+.RE
+.PP
+This works with the current C version, ttychatter.python, and ttychatter.bash.
 .SH PRIVATE SUBJECT GRAMMAR
 .TP
 .B ordinary email subject
@@ -39,15 +85,15 @@ SUBJECT_SESSIONS=1. Reply prefixes such as Re: and Fwd: are stripped.
 Send the message body to the named ttychatter session.
 .TP
 .B tc:{new}
-Start a new unnamed chat. The mailbot passes no session argument, so
-ttychatter.python creates its normal timestamped session name.
+Create a new timestamped session log using the current ttychatter session naming
+style, session-YYYY-MM-DD-HH-MM-SS.log, under the active SESSION_DIR.
 .TP
 .B tc:CONFIG
 Export or apply the mailbot config attachment.
 .TP
 .B tc:MODELS
 Return the existing MODEL_CACHE_FILE as models-cache.json. This is cache-only;
-it does not call ttychatter.python --update-models.
+it does not refresh models.
 .TP
 .B tc:MODELS TEXT
 Search the existing model cache for TEXT. This is also cache-only.
@@ -62,71 +108,73 @@ Run a mailbot command directly from the subject.
 When included in BODY_COMMAND_SUBJECTS, use the first nonempty body line as
 the command or session selector. "session NAME" and "chat NAME" route the
 remaining body to that chat session.
-.SH PUBLIC DEMO MODE
-In public mode, a message without a recognized control subject is treated as
-an AI prompt. PUBLIC_SESSION_MODE controls isolation: per-sender, per-message,
-or shared. The default is per-sender. Replies to public users use
-"Re: public-session-name" so the user can resume by replying with that subject.
-.PP
-Public sessions use PUBLIC_SESSION_PREFIX and are cleaned up automatically
-when PUBLIC_SESSION_CLEANUP=1. PUBLIC_SESSION_IDLE_HOURS,
-PUBLIC_SESSION_TTL_HOURS, and PUBLIC_SESSION_MAX_COUNT control deletion.
-PUBLIC_SESSION_MAX_TURNS trims surviving public logs to the most recent
-input/output cycles. Cleanup matches PUBLIC_SESSION_PREFIX-*.log logs and
-the configured shared public log when PUBLIC_SESSION_MODE=shared.
-.PP
-When PUBLIC_SESSION_ARCHIVE_ON_DELETE=1, an expiring public log is emailed
-to the recorded sender before local deletion. PUBLIC_SESSION_ARCHIVE_USER_TOGGLE=1
-lets public users change their own preference with archive-session on/off.
-PUBLIC_SESSION_ARCHIVE_FAILURE_POLICY=keep refuses deletion when archive
-sending fails; delete removes the local log anyway.
 .SH COMMANDS
 .TP
 .B help
-Return the email command summary.
+Return the regular-user email command summary.
+.TP
+.B help-admin
+Return administrator/operator help. Requires ALLOWED_FROM.
 .TP
 .B manpage
-Return the mailbot manual as a plain-text email attachment. Aliases: manual, get-manpage, fetch-manpage.
+Return this manual as a plain-text email attachment. Aliases: manual,
+get-manpage, fetch-manpage.
 .TP
 .B sessions
-List saved session names with short head and tail previews.
+List saved sessions. Friendly session-title metadata is displayed when present;
+filenames remain stable timestamp or subject/session names.
 .TP
 .B search TEXT
-Search all session logs for TEXT.
+Search session filenames, friendly titles, and log contents.
 .TP
 .B search-session SESSION TEXT
 Search one session log.
 .TP
-.B rename-session OLD NEW
-Rename a session log.
+.B rename-session SESSION TITLE
+Set session-title metadata. This no longer renames the log file. Aliases include
+retitle-session, title-session, and set-session-title.
+.TP
+.B rename-session-file OLD NEW
+Legacy escape hatch that renames the session log file.
+.TP
+.B turns SESSION
+Run ttychatter --turns for the session.
+.TP
+.B branch SESSION TURN
+Run ttychatter --branch for the session and turn.
+.TP
+.B export SESSION [markdown|text|json]
+Export a session. Markdown is the default. JSON support depends on the selected
+backend; the Bash-only ttychatter intentionally omits JSON export.
 .TP
 .B delete-session SESSION
-Delete a session log. Aliases: delete, rm, remove-session, rm-session.
-The target must resolve inside SESSION_DIR and the supplied name must already
-be the exact sanitized session name. Use --dry-run locally to show the path
-that would be deleted without deleting it.
+Delete a session log. Aliases: delete, rm, remove-session, rm-session. The target
+must resolve inside SESSION_DIR and the supplied name must already be the exact
+sanitized session name.
 .TP
 .B archive-session [on|off|status]
 Show or change the sender's public-mode archive-on-expire preference. Aliases:
 archive-opt-in and archive-opt-out.
 .TP
 .B user
-Show this sender's registry id, private HOME, per-user config path, and
-API-key source.
+Show this sender's registry id, private HOME, per-user config path, and API-key
+source.
 .TP
 .B prefs
 Show this sender's ttychatter configuration. Alias for ttyconfig.
 .TP
 .B tty-set KEY VALUE
 Set an allowlisted per-user ttychatter preference. The allowed list is
-USER_TTYCONFIG_ALLOWED_KEYS. Alias: set.
+USER_TTYCONFIG_ALLOWED_KEYS. Alias: set. The mailbot emits C-compatible
+--set KEY=VALUE syntax for the C backend and --set KEY VALUE for the Python and
+Bash helpers.
 .TP
 .B tty-unset KEY
 Remove an allowlisted per-user ttychatter preference. Alias: unset.
 .TP
 .B api-key KEY
-Store this sender's OpenRouter API key in USER_SECRET_DIR as a chmod 600
-secret file. The key is not written to .config. Alias: set-api-key.
+Store this sender's OpenRouter API key in USER_SECRET_DIR as a chmod 600 secret
+file. The key is not written to .config. Alias: set-api-key.
 .TP
 .B forget-api-key
 Remove this sender's stored OpenRouter API key and fall back to the server
@@ -139,83 +187,155 @@ Return the existing MODEL_CACHE_FILE only. Never refreshes the cache.
 Search the existing model cache only. Never refreshes the cache.
 .TP
 .B update-models
-Explicitly run ttychatter.python --update-models, then return models-cache.json.
+Explicitly run the selected backend with --update-models, then return the model
+cache.
 .TP
-.B model-list [FLAGS]
-Run ttychatter.python --models. Aliases include models and list-models.
+.B models [FLAGS]
+Run the selected backend with --models. Aliases include model-list and
+list-models.
 .TP
 .B routers [FLAGS]
-Run ttychatter.python --routers.
+Run the selected backend with --routers.
+.TP
+.B favorites
+Run ttychatter --favorites.
+.TP
+.B favorite-model MODEL
+Run ttychatter --favorite-model MODEL.
+.TP
+.B unfavorite-model MODEL
+Run ttychatter --unfavorite-model MODEL.
+.TP
+.B test-model MODEL
+Run ttychatter --test-model MODEL.
+.TP
+.B show-memory SESSION
+Run ttychatter --show-memory SESSION.
+.TP
+.B clear-memory SESSION
+Run ttychatter --clear-memory SESSION.
+.TP
+.B ttydoctor
+Run ttychatter --doctor.
+.TP
+.B credits
+Run ttychatter --credits.
+.SH SAFE MODEL-LIST FLAGS
+The mailbot allows only a bounded set of model-list flags through email:
+.PP
+.RS
+.nf
+--all
+--sort VALUE
+--modellist-sort-tokens
+--min-input-tokens N
+--min-output-tokens N
+--hide-preview
+--show-preview
+--require-tokens
+--allow-missing-tokens
+--favorites-only
+--model-type VALUE
+.fi
+.RE
+.SH PUBLIC DEMO MODE
+In public mode, a message without a recognized control subject is treated as an
+AI prompt. PUBLIC_SESSION_MODE controls isolation: per-sender, per-message, or
+shared. The default is per-sender.
+.PP
+Public sessions use PUBLIC_SESSION_PREFIX and are cleaned up automatically when
+PUBLIC_SESSION_CLEANUP=1. PUBLIC_SESSION_IDLE_HOURS,
+PUBLIC_SESSION_TTL_HOURS, and PUBLIC_SESSION_MAX_COUNT control deletion.
+PUBLIC_SESSION_MAX_TURNS trims surviving public logs to the most recent
+input/output cycles.
+.PP
+When PUBLIC_SESSION_ARCHIVE_ON_DELETE=1, an expiring public log is emailed to
+the recorded sender before local deletion. PUBLIC_SESSION_ARCHIVE_USER_TOGGLE=1
+lets public users change their own preference with archive-session on/off.
 .SH OUTPUT MODES
 COMMAND_OUTPUT_MODE, MODEL_CACHE_OUTPUT, MODEL_SEARCH_OUTPUT,
 MODEL_LIST_OUTPUT, SESSIONS_OUTPUT, and CONFIG_OUTPUT accept auto, body, or
-attachment. The default is auto globally, with short search/session results
-in the body and large cache/config results as attachments.
+attachment. The default is auto globally, with short search/session results in
+the body and large cache/config results as attachments.
 .SH CONFIGURATION KEYS
 Important keys include IMAP_HOST, IMAP_PORT, IMAP_SSL, IMAP_USER,
 IMAP_PASSWORD, IMAP_PASSWORD_GPG_FILE, SEND_METHOD, SENDMAIL_PATH,
-MAIL_FROM, MAIL_TO, ALLOWED_FROM, DENY_FROM, BANNED_FROM, BANNED_LIST, REJECT_SELF_SENDER, SUBJECT_PREFIX, SUBJECT_SEPARATOR,
-SESSION_OPEN_DELIM, SESSION_CLOSE_DELIM, BODY_COMMAND_SUBJECTS,
-ALLOW_COMMANDS_IN_SUBJECT, ALLOW_BODY_COMMAND_SUBJECTS,
-ALLOW_BARE_CONTROL_SUBJECTS, ALLOW_LEGACY_BRACED_CONTROL,
-RE_SESSION_SUBJECTS, OPEN_TO_PUBLIC, PUBLIC_SESSION_MODE,
-PUBLIC_SESSION_PREFIX, PUBLIC_SHARED_SESSION, PUBLIC_ALLOW_NAMED_SESSIONS,
+MAIL_FROM, MAIL_TO, ALLOWED_FROM, DENY_FROM, BANNED_FROM, BANNED_LIST,
+REJECT_SELF_SENDER, SUBJECT_PREFIX, SUBJECT_SEPARATOR, SESSION_OPEN_DELIM,
+SESSION_CLOSE_DELIM, BODY_COMMAND_SUBJECTS, ALLOW_COMMANDS_IN_SUBJECT,
+ALLOW_BODY_COMMAND_SUBJECTS, ALLOW_BARE_CONTROL_SUBJECTS,
+ALLOW_LEGACY_BRACED_CONTROL, RE_SESSION_SUBJECTS, OPEN_TO_PUBLIC,
+PUBLIC_SESSION_MODE, PUBLIC_SESSION_PREFIX, PUBLIC_SHARED_SESSION,
 PUBLIC_ALLOWED_COMMANDS, PUBLIC_SESSION_CLEANUP, PUBLIC_SESSION_TTL_HOURS,
-PUBLIC_SESSION_IDLE_HOURS, PUBLIC_SESSION_MAX_COUNT,
-PUBLIC_SESSION_MAX_TURNS, PUBLIC_SESSION_INDEX_FILE,
-PUBLIC_SESSION_ARCHIVE_ON_DELETE, PUBLIC_SESSION_ARCHIVE_USER_TOGGLE,
-PUBLIC_SESSION_ARCHIVE_FAILURE_POLICY, PUBLIC_SESSION_ARCHIVE_MAX_BYTES,
+PUBLIC_SESSION_IDLE_HOURS, PUBLIC_SESSION_MAX_COUNT, PUBLIC_SESSION_MAX_TURNS,
 USER_REGISTRY, SUBJECT_SESSIONS, USER_REGISTRY_FILE, USER_HOME_ROOT,
 USER_SECRET_DIR, DEFAULT_OPENROUTER_API_KEY_FILE,
 MIGRATE_PLAINTEXT_OPENROUTER_API_KEY, ALLOW_USER_API_KEYS,
-USER_TTYCONFIG_ALLOWED_KEYS, SPAM_PROTECTION, SPAM_MAX_RECIPIENTS,
-RATE_LIMIT_ENABLED, RATE_LIMIT_DB, RATE_LIMIT_WINDOW_SECONDS,
-RATE_LIMIT_SENDER_MESSAGES, RATE_LIMIT_GLOBAL_MESSAGES,
-RATE_LIMIT_PUBLIC_SENDER_MESSAGES, RATE_LIMIT_PUBLIC_GLOBAL_MESSAGES,
-ABUSE_LIMIT_ALLOWED_FROM, MAX_MESSAGE_BYTES, MAX_ATTACHMENT_COUNT,
-MAX_TOTAL_ATTACHMENT_BYTES, DAILY_QUOTA_ENABLED, DAILY_QUOTA_DB,
-DAILY_QUOTA_SENDER_MESSAGES, DAILY_QUOTA_PUBLIC_SENDER_MESSAGES,
-DAILY_QUOTA_GLOBAL_MESSAGES, MAX_SESSIONS_PER_SENDER,
-API_COST_PROTECTION, API_MAX_INPUT_CHARS, API_MAX_ESTIMATED_TOKENS,
-API_MAX_ATTACHMENT_BYTES, MODEL_CACHE_FILE,
-SESSION_DIR, ATTACHMENT_DIR, WORK_DIR, PROCESSED_DB, COMMAND_OUTPUT_MODE,
-MODEL_CACHE_OUTPUT, MODEL_SEARCH_OUTPUT, MODEL_LIST_OUTPUT, SESSIONS_OUTPUT,
-CONFIG_OUTPUT, OUTPUT_INLINE_MAX_BYTES, MAX_COMMAND_OUTPUT_BYTES, and
+USER_TTYCONFIG_ALLOWED_KEYS, SPAM_PROTECTION, RATE_LIMIT_ENABLED,
+DAILY_QUOTA_ENABLED, MAX_SESSIONS_PER_SENDER, API_COST_PROTECTION,
+API_MAX_INPUT_CHARS, API_MAX_ESTIMATED_TOKENS, API_MAX_ATTACHMENT_BYTES,
+TTYCHATTER_BACKEND, TTYCHATTER_CLIENT, TTYCHATTER_COMMAND, TTYCHATTER_EXTRA_ARGS,
+TTYCHATTER_CONTROL_TIMEOUT, MODEL_CACHE_FILE, SESSION_DIR, ATTACHMENT_DIR,
+WORK_DIR, PROCESSED_DB, COMMAND_OUTPUT_MODE, MODEL_CACHE_OUTPUT,
+MODEL_SEARCH_OUTPUT, MODEL_LIST_OUTPUT, SESSIONS_OUTPUT, CONFIG_OUTPUT,
+OUTPUT_INLINE_MAX_BYTES, MAX_COMMAND_OUTPUT_BYTES, and
 MAX_OUTGOING_ATTACHMENT_BYTES.
-.SH SECURITY
-Public mode is for demos. It should use a separate mailbox, conservative
-attachment/body limits, per-sender registry homes, subject sessions, and a
-small PUBLIC_ALLOWED_COMMANDS set. Do not expose config mutation, model
-refresh, session deletion, api-key, tty-set, or tty-unset to non-ALLOWED_FROM
-senders unless the deployment is intentionally disposable.
+.SH XDG PATHS
+Without overrides, ttychatter.mailbot follows the XDG base-directory layout:
 .PP
-OpenRouter keys are loaded from DEFAULT_OPENROUTER_API_KEY_FILE or a
-per-user secret file and injected into the ttychatter subprocess environment.
-The mailbot migrates legacy plaintext API-key lines out of the ttychatter
-config when MIGRATE_PLAINTEXT_OPENROUTER_API_KEY=1.
+.RS
+.nf
+config:      $XDG_CONFIG_HOME/ttychatter/mailbot/config
+state:       $XDG_STATE_HOME/ttychatter/mailbot/
+cache:       $XDG_CACHE_HOME/ttychatter/mailbot/
+sessions:    $XDG_DATA_HOME/ttychatter/openrouter/sessions/
+attachments: $XDG_DATA_HOME/ttychatter/openrouter/attachments/
+model cache: $XDG_CACHE_HOME/ttychatter/openrouter/models.json
+.fi
+.RE
+.PP
+When USER_REGISTRY=1, every sender gets a private HOME under USER_HOME_ROOT.
+That HOME contains the same ttychatter OpenRouter config/data/cache layout used
+by the C, Python, and Bash clients.
+.PP
+Compatibility fallback is retained for the older model cache name
+models-cache.json and older favorites file model-favorites.txt.
+.SH SECURITY
+Public mode is for demos. It should use a separate mailbox, conservative limits,
+per-sender registry homes, subject sessions, and a small PUBLIC_ALLOWED_COMMANDS
+set. Do not expose config mutation, model refresh, session deletion, api-key,
+tty-set, or tty-unset to non-ALLOWED_FROM senders unless the deployment is
+intentionally disposable.
+.PP
+OpenRouter keys are loaded from DEFAULT_OPENROUTER_API_KEY_FILE or a per-user
+secret file and injected into the ttychatter subprocess environment. The mailbot
+migrates legacy plaintext API-key lines out of ttychatter config when
+MIGRATE_PLAINTEXT_OPENROUTER_API_KEY=1.
 .PP
 SPAM_PROTECTION rejects auto-submitted/list/bulk mail and recipient floods.
 RATE_LIMIT_ENABLED enforces rolling sender/global work caps. DAILY_QUOTA_ENABLED
 enforces daily sender/global caps. MAX_MESSAGE_BYTES, MAX_ATTACHMENT_COUNT,
 MAX_TOTAL_ATTACHMENT_BYTES, MAX_SESSIONS_PER_SENDER, and API_COST_PROTECTION
-protect the mail-to-API boundary before ttychatter is called. Enforce SPF,
-DKIM, DMARC, greylisting, and reputation at the MTA.
+protect the mail-to-API boundary before ttychatter is called.
 .SH FILES
-Default config: ~/.config/ttychatter/mailbot/config
-.PP
-Default processed-message database: ~/.local/state/ttychatter/mailbot/processed-ids.txt
-.PP
-Default user registry: ~/.local/state/ttychatter/mailbot/users.json
-.PP
-Default per-user homes: ~/.local/state/ttychatter/mailbot/users/
-.PP
-Default server OpenRouter key: ~/.secrets/ttychatter/mailbot/openrouter-default.key
-.PP
-Default per-user OpenRouter keys: ~/.secrets/ttychatter/mailbot/openrouter-users/
-.PP
-Default session directory without USER_REGISTRY: ~/.local/share/ttychatter/openrouter/sessions
-.PP
-Default model cache without USER_REGISTRY: ~/.config/ttychatter/openrouter/models-cache.json
+.TP
+.B $XDG_CONFIG_HOME/ttychatter/mailbot/config
+Default mailbot config.
+.TP
+.B $XDG_STATE_HOME/ttychatter/mailbot/processed-ids.txt
+Processed-message database.
+.TP
+.B $XDG_STATE_HOME/ttychatter/mailbot/users.json
+User registry.
+.TP
+.B $XDG_STATE_HOME/ttychatter/mailbot/users/
+Per-user HOME roots.
+.TP
+.B ~/.secrets/ttychatter/mailbot/openrouter-default.key
+Default server OpenRouter key.
+.TP
+.B ~/.secrets/ttychatter/mailbot/openrouter-users/
+Per-user OpenRouter keys.
 .SH EXIT STATUS
 0 indicates success. Nonzero status indicates configuration, IMAP, SMTP,
 sendmail, or ttychatter subprocess failure.
