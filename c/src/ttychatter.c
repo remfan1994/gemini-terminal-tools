@@ -46,6 +46,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <termios.h>
@@ -74,6 +75,7 @@
 #define TC_CONTEXT_BEGIN "===== TTYCHATTER CONTEXT BEGIN ====="
 #define TC_CONTEXT_END   "===== TTYCHATTER CONTEXT END ====="
 #define TC_PRECHAT_LINE "Everyone is encouraged to get the cruelty-free vegetarian alternatives and remember the bloodguilt curse from the Bible... http://bloodguiltcurse.net"
+#define TC_STREAM_INTERRUPT_MARKER "[assistant stream interrupted by user]"
 
 /*
  * Configuration defaults follow XDG conventions rather than the early project
@@ -1049,6 +1051,10 @@ typedef struct TCStreamState {
     TCBuffer text;
     bool display;
     bool done;
+    bool cancelled;
+    bool cancel_enabled;
+    bool termios_active;
+    struct termios old_termios;
 } TCStreamState;
 
 static void streamstate_init(TCStreamState *st, bool display) {
@@ -1060,10 +1066,55 @@ static void streamstate_init(TCStreamState *st, bool display) {
 }
 
 static void streamstate_free(TCStreamState *st) {
+    if (st->termios_active) {
+        tcsetattr(STDIN_FILENO, TCSANOW, &st->old_termios);
+        st->termios_active = false;
+    }
     free(st->raw.data);
     free(st->pending.data);
     free(st->text.data);
     memset(st, 0, sizeof(*st));
+}
+
+static void stream_cancel_begin(TCStreamState *st) {
+    if (!st || !st->display || !isatty(STDIN_FILENO)) return;
+    struct termios raw;
+    if (tcgetattr(STDIN_FILENO, &st->old_termios) != 0) return;
+    raw = st->old_termios;
+    raw.c_lflag &= ~(ICANON | ECHO);
+    raw.c_cc[VMIN] = 0;
+    raw.c_cc[VTIME] = 0;
+    if (tcsetattr(STDIN_FILENO, TCSANOW, &raw) != 0) return;
+    st->termios_active = true;
+    st->cancel_enabled = true;
+}
+
+static void stream_cancel_end(TCStreamState *st) {
+    if (!st || !st->termios_active) return;
+    tcsetattr(STDIN_FILENO, TCSANOW, &st->old_termios);
+    st->termios_active = false;
+}
+
+static bool stream_cancel_poll(TCStreamState *st) {
+    if (!st || !st->cancel_enabled || st->cancelled) return st && st->cancelled;
+    fd_set rfds;
+    struct timeval tv;
+    unsigned char ch;
+    for (;;) {
+        FD_ZERO(&rfds);
+        FD_SET(STDIN_FILENO, &rfds);
+        tv.tv_sec = 0;
+        tv.tv_usec = 0;
+        int ready = select(STDIN_FILENO + 1, &rfds, NULL, NULL, &tv);
+        if (ready <= 0) break;
+        ssize_t n = read(STDIN_FILENO, &ch, 1);
+        if (n <= 0) break;
+        if (ch == 27) {
+            st->cancelled = true;
+            break;
+        }
+    }
+    return st->cancelled;
 }
 
 static const char *find_event_separator(const char *s) {
@@ -1149,13 +1200,24 @@ static void sse_process_pending(TCStreamState *st) {
 static size_t curl_sse_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
     TCStreamState *st = userdata;
     size_t n = size * nmemb;
+    if (stream_cancel_poll(st)) return 0;
     buffer_append_n(&st->raw, ptr, n);
     const char *s = ptr;
     for (size_t i = 0; i < n; i++) {
         if (s[i] != '\r') buffer_append_n(&st->pending, s + i, 1);
     }
     sse_process_pending(st);
+    if (stream_cancel_poll(st)) return 0;
     return n;
+}
+
+static int curl_sse_xferinfo_cb(void *userdata, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow) {
+    (void)dltotal;
+    (void)dlnow;
+    (void)ultotal;
+    (void)ulnow;
+    TCStreamState *st = userdata;
+    return stream_cancel_poll(st) ? 1 : 0;
 }
 
 static TCHttpResponse http_request_stream(const char *url, const char *api_key, const char *body, bool display) {
@@ -1164,6 +1226,7 @@ static TCHttpResponse http_request_stream(const char *url, const char *api_key, 
     if (!curl) die("curl_easy_init failed");
     TCStreamState st;
     streamstate_init(&st, display);
+    stream_cancel_begin(&st);
     struct curl_slist *headers = NULL;
     headers = curl_slist_append(headers, "Content-Type: application/json");
     headers = curl_slist_append(headers, "Accept: text/event-stream");
@@ -1181,11 +1244,27 @@ static TCHttpResponse http_request_stream(const char *url, const char *api_key, 
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &st);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "ttychatter-c-cli/0.6.1");
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 0L);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, curl_sse_xferinfo_cb);
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &st);
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body ? body : "{}");
     CURLcode rc = curl_easy_perform(curl);
-    if (st.pending.len > 0) sse_process_event_block(&st, st.pending.data);
-    if (rc != CURLE_OK) {
+    stream_cancel_end(&st);
+    if (st.pending.len > 0 && !st.cancelled) sse_process_event_block(&st, st.pending.data);
+    if (st.cancelled) {
+        r.status = 200;
+        if (st.text.len > 0 && st.text.data[st.text.len - 1] != '\n') buffer_append(&st.text, "\n");
+        buffer_append(&st.text, TC_STREAM_INTERRUPT_MARKER);
+        buffer_append(&st.text, "\n");
+        if (display) {
+            fputc('\n', stdout);
+            fputs(TC_STREAM_INTERRUPT_MARKER, stdout);
+            fputc('\n', stdout);
+            fflush(stdout);
+        }
+        r.body = xstrdup(st.text.data);
+    } else if (rc != CURLE_OK) {
         r.status = 0;
         r.body = xstrdup(curl_easy_strerror(rc));
     } else {
