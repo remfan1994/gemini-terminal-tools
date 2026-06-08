@@ -2502,6 +2502,7 @@ static void print_help(void) {
     printf("  ttychatter --input input.txt [--session SESSION|--output output.log]\n");
     printf("  ttychatter -i|--interactive|--chat [SESSION|./session.log]\n");
     printf("  ttychatter --resume SESSION\n");
+    printf("  ttychatter --new\n");
     printf("  ttychatter --set-api-key [--gpg]\n");
     printf("  ttychatter --forget-api-key\n");
     printf("  ttychatter --models [filters]\n");
@@ -2516,6 +2517,7 @@ static void print_help(void) {
     printf("  ttychatter --show-memory SESSION | --clear-memory SESSION | --edit-memory SESSION\n");
     printf("  ttychatter --editor-prompt [output.log]\n");
     printf("  ttychatter --search TEXT [--all-sessions]\n");
+    printf("  ttychatter --search-sessions TEXT\n");
     printf("  ttychatter --config | --set KEY=VALUE | --unset KEY\n");
     printf("  ttychatter --doctor | --credits | --version | --help\n");
     printf("\nGeneral:\n");
@@ -2547,8 +2549,8 @@ static void print_help(void) {
     printf("      --list                   list session logs with friendly titles\n");
     printf("      --rename-session SESSION TITLE set session title metadata\n");
     printf("      --turns SESSION          list message numbers in a session\n");
-    printf("      --branch SESSION TURN    create a new branch after message TURN\n");
-    printf("      --edit-turn SESSION TURN edit a user turn, branch, and resend\n");
+    printf("      --branch SESSION TURN    create branch after TURN; also accepts SESSION:TURN\n");
+    printf("      --edit-turn SESSION TURN edit user TURN; also accepts SESSION:TURN\n");
     printf("      --export SESSION         export a session as markdown/text/json\n");
     printf("      --format FORMAT          export format: markdown, text, or json\n");
     printf("      --show-memory SESSION    print reconstructed context/memory\n");
@@ -2600,6 +2602,7 @@ static void print_help(void) {
     printf("  SESSION_AUTO_TITLE=1 enables optional AI-generated titles for --list.\n");
     printf("  STREAM=1 enables streaming by default; STATUS_UPDATES=1 enables local progress notes.\n");
     printf("  VOICE_INPUT_CMD and VOICE_OUTPUT_CMD/TTS_CMD provide external audio hooks.\n");
+    printf("  Default paths honor XDG_CONFIG_HOME, XDG_DATA_HOME, and XDG_CACHE_HOME.\n");
 }
 
 static void print_version(void) {
@@ -3271,14 +3274,19 @@ static int export_session_command(const TCConfig *cfg, const char *session_name,
 static void runtime_command_help(void) {
     printf("Runtime colon commands:\n");
     printf("  :help                         show this command list\n");
+    printf("  :q                            alias for :quit\n");
     printf("  :list                         list saved sessions\n");
     printf("  :rename TITLE                 set current session title metadata\n");
     printf("  :turns                        list message numbers in current session\n");
     printf("  :branch N                     branch current session after message N\n");
+    printf("  :fork N                       alias for :branch\n");
     printf("  :edit N                       edit user message N, branch, and resend\n");
+    printf("  :edit-turn N                  alias for :edit\n");
     printf("  :stream [on|off]              toggle streaming assistant output\n");
     printf("  :status [on|off]              toggle local progress/status updates\n");
+    printf("  :progress [on|off]            alias for :status\n");
     printf("  :voice [FILE]                 transcribe with VOICE_INPUT_CMD and send\n");
+    printf("  :transcribe FILE              alias for :voice\n");
     printf("  :speak [on|off|last]          toggle TTS or speak last reply\n");
     printf("  :models                       list cached models\n");
     printf("  :routers                      list router models\n");
@@ -3370,6 +3378,7 @@ static void search_file_lines(const char *path, const char *needle) {
 }
 
 static void search_all_sessions(const TCConfig *cfg, const char *needle) {
+    if (!needle || !*needle) return;
     DIR *d = opendir(cfg->session_dir);
     if (!d) {
         fprintf(stderr, "could not open session dir %s: %s\n", cfg->session_dir, strerror(errno));
@@ -3379,6 +3388,14 @@ static void search_all_sessions(const TCConfig *cfg, const char *needle) {
     while ((de = readdir(d))) {
         if (de->d_name[0] == '.') continue;
         char *path = path_join2(cfg->session_dir, de->d_name);
+        char *title = session_title_from_file(path);
+        if (contains_casefold(de->d_name, needle)) {
+            printf("%s:0:file: %s\n", path, de->d_name);
+        }
+        if (title && *title && contains_casefold(title, needle)) {
+            printf("%s:0:title: %s\n", path, title);
+        }
+        free(title);
         search_file_lines(path, needle);
         free(path);
     }
