@@ -59,6 +59,7 @@ import mimetypes
 import os
 import platform
 import re
+import select
 import shlex
 import shutil
 import socket
@@ -81,6 +82,7 @@ DEFAULT_MODEL_TEST_PROMPT = "Please reply with one short sentence confirming thi
 DEFAULT_GITHUB_URL = "https://github.com/remfan1994/ttychatter"
 PROJECT_NOTICE = "Everyone is encouraged to get the cruelty-free vegetarian alternatives and remember the bloodguilt curse from the Bible... http://bloodguiltcurse.net"
 PRECHAT_LINE = PROJECT_NOTICE
+STREAM_INTERRUPT_MARKER = "[assistant stream interrupted by user]"
 INPUT_PLACEHOLDER_DEFAULT = "Type here..."
 MOUSE_SCROLL_LINES = 3
 MAX_INLINE_ATTACHMENT_BYTES = 20 * 1024 * 1024
@@ -165,6 +167,7 @@ class Config:
     session_auto_title: bool = False
     session_title_model: str = FALLBACK_MODEL
     session_title_max_words: int = 8
+    stream: bool = False
 
     @property
     # ------------------------------------------------------------
@@ -505,6 +508,8 @@ def load_config() -> Config:
                     cfg.session_title_model = normalize_model_id(value) or cfg.session_title_model
                 elif key == "SESSION_TITLE_MAX_WORDS":
                     cfg.session_title_max_words = parse_positive_int(value, cfg.session_title_max_words)
+                elif key == "STREAM":
+                    cfg.stream = parse_bool(value, cfg.stream)
 
     if env_api_key:
         cfg.api_key = env_api_key
@@ -616,6 +621,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--test-model", metavar="MODEL", help="send the model-test prompt to MODEL and print the response")
     parser.add_argument("--demo", action="store_true", help="run without OpenRouter network calls using local demo responses and demo model metadata")
     parser.add_argument("--loopback-file", metavar="PATH", help="append each AI response to PATH while the ncurses UI remains interactive")
+    parser.add_argument("--stream", action="store_true", help="stream assistant output into the transcript; press ESC to stop an active stream")
+    parser.add_argument("--no-stream", action="store_true", help="disable streaming for this run")
     parser.add_argument("--version", action="store_true", help="show version information")
     return parser.parse_args()
 
@@ -1186,7 +1193,7 @@ def mime_extension(mime_type: str) -> str:
 # Builds REST request parts. Keep text/media separation clear so maintainers can adapt when
 # AI changes MIME or file handling rules.
 # ------------------------------------------------------------
-def build_openrouter_user_content(prompt_text: str, attachments: List[PendingAttachment]) -> object:
+def build_openrouter_user_content(prompt_text: str, attachments: List[PendingAttachment], max_bytes: int = MAX_INLINE_ATTACHMENT_BYTES) -> object:
     """Build OpenRouter chat-message content for text plus optional files.
 
     Text-only requests use a plain string because that is the most widely
@@ -1209,8 +1216,8 @@ def build_openrouter_user_content(prompt_text: str, attachments: List[PendingAtt
         except OSError:
             content_parts.append({"type": "text", "text": f"\n[Attachment unavailable: {path}]"})
             continue
-        if size > MAX_INLINE_ATTACHMENT_BYTES:
-            content_parts.append({"type": "text", "text": f"\n[Attachment skipped; larger than {MAX_INLINE_ATTACHMENT_BYTES} bytes: {path.name}]"})
+        if size > max_bytes:
+            content_parts.append({"type": "text", "text": f"\n[Attachment skipped; larger than {max_bytes} bytes: {path.name}]"})
             continue
         if mime_type.startswith("text/") or mime_type in {"application/json", "application/xml", "application/x-yaml"}:
             try:
@@ -1288,7 +1295,7 @@ def generate_with_model(
         "messages": [
             {
                 "role": "user",
-                "content": build_openrouter_user_content(prompt_text, attachments or []),
+                "content": build_openrouter_user_content(prompt_text, attachments or [], cfg.max_attachment_bytes),
             }
         ],
     }
@@ -1318,6 +1325,127 @@ def generate_with_model(
     if not text.strip():
         return False, "OpenRouter returned an empty text response"
     return True, text
+
+
+def parse_openrouter_stream_piece(data: str) -> List[str]:
+    try:
+        obj = json.loads(data)
+    except Exception:
+        return []
+    pieces: List[str] = []
+    for choice in obj.get("choices", []) or []:
+        if not isinstance(choice, dict):
+            continue
+        delta = choice.get("delta") or {}
+        piece = delta.get("content") if isinstance(delta, dict) else None
+        if piece is None:
+            message = choice.get("message") or {}
+            if isinstance(message, dict):
+                piece = message.get("content")
+        if piece is None:
+            piece = choice.get("text")
+        if isinstance(piece, str) and piece:
+            pieces.append(piece)
+    return pieces
+
+
+def response_fileno(response: object) -> Optional[int]:
+    try:
+        return response.fileno()  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    try:
+        return response.fp.raw.fileno()  # type: ignore[attr-defined]
+    except Exception:
+        return None
+
+
+def generate_with_model_stream(
+    cfg: Config,
+    model_id: str,
+    prompt_text: str,
+    session_name: str,
+    attachment_dir: Path,
+    attachments: Optional[List[PendingAttachment]],
+    on_piece,
+    should_cancel,
+    timeout: int = 120,
+) -> Tuple[bool, str, bool]:
+    """Stream one OpenRouter response.
+
+    ESC cancellation is deliberately owned by the UI callback.  This provider
+    routine only asks should_cancel() between network reads, appends a stable
+    interruption marker to the saved assistant text, and returns normally so the
+    log remains usable after the user stops an irrelevant response.
+    """
+    if cfg.demo_mode:
+        text = demo_ai_response(prompt_text, attachments or [])
+        on_piece(text)
+        return True, text, False
+
+    if not cfg.api_key:
+        return False, "No OpenRouter API key loaded. Press F3 to paste an API key.", False
+
+    payload = {
+        "model": normalize_model_id(model_id),
+        "stream": True,
+        "messages": [
+            {
+                "role": "user",
+                "content": build_openrouter_user_content(prompt_text, attachments or [], cfg.max_attachment_bytes),
+            }
+        ],
+    }
+    data = json.dumps(payload).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {cfg.api_key}",
+        "HTTP-Referer": "https://github.com/remfan1994/ttychatter",
+        "X-Title": "ttychatter",
+    }
+    request = urllib.request.Request(model_endpoint(cfg, model_id), data=data, headers=headers, method="POST")
+    parts: List[str] = []
+    cancelled = False
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            fd = response_fileno(response)
+            while True:
+                if should_cancel():
+                    cancelled = True
+                    break
+                if fd is not None:
+                    ready, _, _ = select.select([fd], [], [], 0.1)
+                    if not ready:
+                        continue
+                raw = response.readline()
+                if not raw:
+                    break
+                line = raw.decode("utf-8", errors="replace").strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                payload_text = line[5:].strip()
+                if payload_text == "[DONE]":
+                    break
+                for piece in parse_openrouter_stream_piece(payload_text):
+                    parts.append(piece)
+                    on_piece(piece)
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        return False, f"OpenRouter HTTP error {exc.code}: {body[:1000]}", False
+    except urllib.error.URLError as exc:
+        return False, f"OpenRouter network error: {exc}", False
+    except Exception as exc:
+        return False, f"OpenRouter streaming error: {exc}", False
+
+    text = "".join(parts)
+    if cancelled:
+        if text and not text.endswith("\n"):
+            text += "\n"
+        text += STREAM_INTERRUPT_MARKER + "\n"
+        return True, text, True
+    if not text.strip():
+        return False, "OpenRouter returned an empty streamed text response", False
+    return True, text, False
 
 
 # ------------------------------------------------------------
@@ -4265,8 +4393,10 @@ class AICursesApp:
                 {"key": "CONTEXT_TURNS", "label": "Context turns", "kind": "int", "value": str(self.cfg.context_turns)},
                 {"key": "SESSION_DIR", "label": "Session directory", "kind": "path", "value": str(self.cfg.session_dir)},
                 {"key": "ATTACHMENT_DIR", "label": "Attachment directory", "kind": "path", "value": str(self.cfg.effective_attachment_dir)},
+                {"key": "MAX_ATTACHMENT_BYTES", "label": "Max inline attachment bytes", "kind": "int", "value": str(self.cfg.max_attachment_bytes)},
                 {"key": "EDITOR", "label": "External editor", "kind": "editor_choice", "value": self.cfg.editor},
                 {"key": "MODEL_CACHE_FILE", "label": "Model cache file", "kind": "path", "value": str(self.cfg.model_cache_file)},
+                {"key": "MODEL_FAVORITES_FILE", "label": "Model favorites file", "kind": "path", "value": str(self.cfg.effective_model_favorites_file)},
                 {"key": "MODEL_FILTER_CHAT_COMPLETIONS", "label": "Model browser: chat.completions only", "kind": "bool", "value": self.cfg.model_filter_chat_completions},
                 {"key": "MODEL_FILTER_REQUIRE_TOKENS", "label": "Model browser: require token limits", "kind": "bool", "value": self.cfg.model_filter_require_tokens},
                 {"key": "MODEL_FILTER_HIDE_PREVIEW", "label": "Model browser: hide preview/experimental", "kind": "bool", "value": self.cfg.model_filter_hide_preview},
@@ -4276,8 +4406,11 @@ class AICursesApp:
                 {"key": "MODEL_TYPE_FILTER", "label": "Model browser: type filter", "kind": "choice", "value": self.cfg.model_type_filter, "choices": MODEL_TYPE_CHOICES},
                 {"key": "THEME", "label": "Theme / style profile", "kind": "choice", "value": self.cfg.theme, "choices": THEME_CHOICES},
                 {"key": "MODEL_TEST_PROMPT", "label": "Model test prompt", "kind": "text", "value": self.cfg.model_test_prompt},
+                {"key": "GITHUB_URL", "label": "GitHub/status URL", "kind": "text", "value": self.cfg.github_url},
                 {"key": "INPUT_PLACEHOLDER", "label": "Input placeholder", "kind": "text", "value": self.cfg.input_placeholder},
                 {"key": "SEND_INPUT", "label": "Send key", "kind": "choice", "value": self.cfg.send_input, "choices": ["enter", "ctrl_g", "ctrl_enter"]},
+                {"key": "STREAM", "label": "Stream assistant output", "kind": "bool", "value": self.cfg.stream},
+                {"key": "LOOPBACK_FILE", "label": "Loopback output file", "kind": "path", "value": str(self.cfg.loopback_file or "")},
                 {"key": "PROMPT_SESSION_NAME", "label": "Prompt for session name", "kind": "bool", "value": self.cfg.prompt_session_name},
                 {"key": "CODE_ATTACHMENT_MIN_LINES", "label": "Code block attachment min lines", "kind": "int", "value": str(self.cfg.code_attachment_min_lines)},
                 {"key": "SESSION_AUTO_TITLE", "label": "AI session-title metadata", "kind": "bool", "value": self.cfg.session_auto_title},
@@ -4312,6 +4445,9 @@ class AICursesApp:
                 self.attachment_dir = self.cfg.effective_attachment_dir
                 self.attachment_dir.mkdir(parents=True, exist_ok=True)
                 set_config_value(self.cfg, key, str(self.attachment_dir))
+            elif key == "MAX_ATTACHMENT_BYTES":
+                self.cfg.max_attachment_bytes = parse_nonnegative_int(str(value), self.cfg.max_attachment_bytes)
+                set_config_value(self.cfg, key, str(self.cfg.max_attachment_bytes))
             elif key == "EDITOR":
                 self.cfg.editor = str(value)
                 set_config_value(self.cfg, key, self.cfg.editor)
@@ -4319,6 +4455,10 @@ class AICursesApp:
                 self.cfg.model_cache_file = expand_path(str(value))
                 self.cfg.model_cache_file.parent.mkdir(parents=True, exist_ok=True)
                 set_config_value(self.cfg, key, str(self.cfg.model_cache_file))
+            elif key == "MODEL_FAVORITES_FILE":
+                self.cfg.model_favorites_file = expand_path(str(value))
+                self.cfg.model_favorites_file.parent.mkdir(parents=True, exist_ok=True)
+                set_config_value(self.cfg, key, str(self.cfg.model_favorites_file))
             elif key == "MODEL_FILTER_CHAT_COMPLETIONS":
                 self.cfg.model_filter_chat_completions = bool(value)
                 set_config_value(self.cfg, key, "1" if self.cfg.model_filter_chat_completions else "0")
@@ -4353,12 +4493,22 @@ class AICursesApp:
             elif key == "MODEL_TEST_PROMPT":
                 self.cfg.model_test_prompt = str(value)
                 set_config_value(self.cfg, key, self.cfg.model_test_prompt)
+            elif key == "GITHUB_URL":
+                self.cfg.github_url = str(value)
+                set_config_value(self.cfg, key, self.cfg.github_url)
             elif key == "INPUT_PLACEHOLDER":
                 self.cfg.input_placeholder = str(value)
                 set_config_value(self.cfg, key, self.cfg.input_placeholder)
             elif key == "SEND_INPUT":
                 self.cfg.send_input = str(value)
                 set_config_value(self.cfg, key, self.cfg.send_input)
+            elif key == "STREAM":
+                self.cfg.stream = bool(value)
+                set_config_value(self.cfg, key, "1" if self.cfg.stream else "0")
+            elif key == "LOOPBACK_FILE":
+                text = str(value).strip()
+                self.cfg.loopback_file = expand_path(text) if text else None
+                set_config_value(self.cfg, key, str(self.cfg.loopback_file or ""))
             elif key == "PROMPT_SESSION_NAME":
                 self.cfg.prompt_session_name = bool(value)
                 set_config_value(self.cfg, key, "1" if self.cfg.prompt_session_name else "0")
@@ -5053,10 +5203,59 @@ class AICursesApp:
         context = self.build_context()
         prompt_text = (context + "\n" if context else "") + "User: " + message
         attachments_to_send = list(self.pending_attachments)
-        raw_output = call_ai(self.cfg, prompt_text, self.session_name, self.attachment_dir, attachments_to_send)
+        stream_item: Optional[TranscriptItem] = None
+
+        if self.cfg.stream:
+            openrouter_time = now_time()
+            stream_item = TranscriptItem("AI", "", openrouter_time)
+            self.transcript.append(stream_item)
+            self.status = "Streaming... press ESC to stop"
+            self.draw()
+
+            def on_stream_piece(piece: str) -> None:
+                if stream_item is not None:
+                    stream_item.text += piece
+                self.transcript_scroll = 0
+                self.status = "Streaming... press ESC to stop"
+                self.draw()
+
+            def stream_cancel_requested() -> bool:
+                while True:
+                    ch = self.stdscr.getch()
+                    if ch == -1:
+                        return False
+                    if ch == 27:
+                        return True
+                    if ch == curses.KEY_MOUSE:
+                        continue
+                return False
+
+            try:
+                self.stdscr.nodelay(True)
+                ok, streamed_text, cancelled = generate_with_model_stream(
+                    self.cfg,
+                    self.cfg.effective_model,
+                    prompt_text,
+                    self.session_name,
+                    self.attachment_dir,
+                    attachments_to_send,
+                    on_stream_piece,
+                    stream_cancel_requested,
+                    timeout=120,
+                )
+            finally:
+                self.stdscr.nodelay(False)
+            raw_output = streamed_text if ok else f"({streamed_text})"
+            if stream_item is not None:
+                stream_item.text = raw_output
+            if cancelled:
+                self.status = "stream stopped; partial response saved"
+        else:
+            raw_output = call_ai(self.cfg, prompt_text, self.session_name, self.attachment_dir, attachments_to_send)
+            openrouter_time = now_time()
+
         self.pending_attachments = []
 
-        openrouter_time = now_time()
         append_log(self.session_path, "AI", raw_output, openrouter_time)
         cleaned_output = extract_code_attachments(raw_output, self.attachment_dir, self.session_name, self.cfg.code_attachment_min_lines)
         if self.cfg.loopback_file is not None:
@@ -5071,8 +5270,12 @@ class AICursesApp:
         self.trim_context_buffer()
         self.save_context_snapshot()
         generate_session_title(self.cfg, self.session_path, message, cleaned_output)
-        self.transcript.append(TranscriptItem("AI", cleaned_output, openrouter_time))
-        self.status = "response complete"
+        if stream_item is not None:
+            stream_item.text = cleaned_output
+        else:
+            self.transcript.append(TranscriptItem("AI", cleaned_output, openrouter_time))
+        if self.status.startswith("Streaming"):
+            self.status = "response complete"
 
     # ------------------------------------------------------------------
     # Command dispatch
@@ -5281,6 +5484,10 @@ def main() -> int:
             cfg.model = "demo/auto"
     if args.loopback_file:
         cfg.loopback_file = expand_path(args.loopback_file)
+    if args.stream:
+        cfg.stream = True
+    if args.no_stream:
+        cfg.stream = False
     cfg.session_dir.mkdir(parents=True, exist_ok=True)
     cfg.effective_attachment_dir.mkdir(parents=True, exist_ok=True)
 

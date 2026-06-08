@@ -101,6 +101,7 @@ STARTUP_NOTICE=1
 PROJECT_LEAD_NAME="remfan1994"
 PROJECT_LEAD_NOTICE="Everyone is encouraged to get the cruelty-free vegetarian alternatives and remember the bloodguilt curse from the Bible... http://bloodguiltcurse.net"
 TC_PRECHAT_LINE="$PROJECT_LEAD_NOTICE"
+STREAM_INTERRUPT_MARKER="[assistant stream interrupted by user]"
 USER_NAME="$(whoami 2>/dev/null || printf user)"
 CONTEXT_BUFFER=()
 ATTACH_FILES=()
@@ -466,6 +467,7 @@ USAGE
     $PROGRAM --forget-api-key
     $PROGRAM --attach FILE [session]
     $PROGRAM --stream | --no-stream
+    ESC during streaming stops the active streamed response and saves the partial reply.
     $PROGRAM --status | --no-status
     $PROGRAM --voice-input FILE | --transcribe FILE
     $PROGRAM --speak | --no-speak
@@ -537,6 +539,7 @@ COMPATIBILITY / TESTING
     --interactive                    Alias for -i
     --new                            Force a fresh timestamped session
     --progress | --no-progress       Aliases for --status/--no-status
+    ESC during streaming              Stop the active streamed response and save the partial reply
     --edit-turn SESSION TURN         Not implemented in bash-only; use C or python helper
 
 NOTES
@@ -790,11 +793,19 @@ build_prompt_with_attachments() {
 # is used.
 # ----------------------------------------------------------
 build_openrouter_payload() {
-  local model="$1" prompt="$2"
+  local model="$1" prompt="$2" stream_flag="${3:-0}"
   if command -v jq >/dev/null 2>&1; then
-    jq -n --arg model "$model" --arg text "$prompt" '{model:$model, messages:[{role:"user", content:$text}]}'
+    if truthy "$stream_flag"; then
+      jq -n --arg model "$model" --arg text "$prompt" '{model:$model, stream:true, messages:[{role:"user", content:$text}]}'
+    else
+      jq -n --arg model "$model" --arg text "$prompt" '{model:$model, messages:[{role:"user", content:$text}]}'
+    fi
   else
-    printf '{"model":"%s","messages":[{"role":"user","content":"%s"}]}' "$(printf '%s' "$model" | json_escape_stream)" "$(printf '%s' "$prompt" | json_escape_stream)"
+    if truthy "$stream_flag"; then
+      printf '{"model":"%s","stream":true,"messages":[{"role":"user","content":"%s"}]}' "$(printf '%s' "$model" | json_escape_stream)" "$(printf '%s' "$prompt" | json_escape_stream)"
+    else
+      printf '{"model":"%s","messages":[{"role":"user","content":"%s"}]}' "$(printf '%s' "$model" | json_escape_stream)" "$(printf '%s' "$prompt" | json_escape_stream)"
+    fi
   fi
 }
 
@@ -811,6 +822,97 @@ extract_openrouter_text() {
     tr '\n' ' ' | sed -n 's/^.*"content"[[:space:]]*:[[:space:]]*"\(.*\)"[[:space:]]*[,}].*$/\1/p' | json_unescape_basic
   fi
 }
+extract_openrouter_stream_piece() {
+  if command -v jq >/dev/null 2>&1; then
+    jq -r '[.choices[]? | (.delta.content // .message.content // .text // empty)] | map(select(type=="string")) | join("")' 2>/dev/null
+  else
+    tr '\n' ' ' | sed -n 's/^.*"content"[[:space:]]*:[[:space:]]*"\([^"\\]*\).*$/\1/p' | json_unescape_basic
+  fi
+}
+
+stream_keyboard_watcher() {
+  local curl_pid="$1" flag_file="$2" ch
+  while kill -0 "$curl_pid" 2>/dev/null; do
+    IFS= read -r -s -n 1 -t 0.1 ch </dev/tty || continue
+    if [ "$ch" = $'\033' ]; then
+      : > "$flag_file"
+      kill "$curl_pid" 2>/dev/null || true
+      return 0
+    fi
+  done
+}
+
+call_model_stream() {
+  local model="$1" prompt="$2" full_prompt payload fifo err_file flag_file text line data piece curl_pid watcher_pid old_stty status
+  require_api_key || return 1
+  full_prompt="$(build_prompt_with_attachments "$prompt")"
+  payload="$(build_openrouter_payload "$(normalize_model_id "$model")" "$full_prompt" 1)"
+  fifo="$(mktemp -u "${TMPDIR:-/tmp}/ttychatter.stream.fifo.XXXXXX")" || return 1
+  err_file="$(mktemp "${TMPDIR:-/tmp}/ttychatter.stream.err.XXXXXX")" || return 1
+  flag_file="$(mktemp "${TMPDIR:-/tmp}/ttychatter.stream.cancel.XXXXXX")" || { rm -f "$err_file"; return 1; }
+  rm -f "$flag_file"
+  mkfifo "$fifo" || { rm -f "$err_file" "$flag_file"; return 1; }
+
+  printf '%s' "$payload" | curl -sS --no-buffer --max-time 120 \
+    -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+    -H 'HTTP-Referer: https://github.com/remfan1994/ttychatter' \
+    -H 'X-Title: ttychatter' \
+    -d @- 'https://openrouter.ai/api/v1/chat/completions' >"$fifo" 2>"$err_file" &
+  curl_pid=$!
+
+  if [ -t 0 ] && [ -r /dev/tty ]; then
+    old_stty="$(stty -g </dev/tty 2>/dev/null || true)"
+    [ -n "$old_stty" ] && stty -icanon -echo min 0 time 0 </dev/tty 2>/dev/null || true
+    stream_keyboard_watcher "$curl_pid" "$flag_file" &
+    watcher_pid=$!
+  else
+    watcher_pid=""
+    old_stty=""
+  fi
+
+  text=""
+  while IFS= read -r line; do
+    case "$line" in
+      data:*)
+        data="${line#data:}"
+        data="${data# }"
+        [ "$data" = "[DONE]" ] && break
+        piece="$(printf '%s' "$data" | extract_openrouter_stream_piece)"
+        if [ -n "$piece" ]; then
+          text="$text$piece"
+          printf '%s' "$piece" >&2
+        fi
+        ;;
+    esac
+  done <"$fifo"
+
+  wait "$curl_pid" 2>/dev/null
+  status=$?
+  [ -n "$watcher_pid" ] && kill "$watcher_pid" 2>/dev/null || true
+  [ -n "$old_stty" ] && stty "$old_stty" </dev/tty 2>/dev/null || true
+
+  if [ -f "$flag_file" ]; then
+    case "$text" in *$'\n'|"") ;; *) text="$text"$'\n' ;; esac
+    text="$text$STREAM_INTERRUPT_MARKER"
+    printf '\n%s\n' "$STREAM_INTERRUPT_MARKER" >&2
+    rm -f "$fifo" "$err_file" "$flag_file"
+    printf '%s\n' "$text"
+    return 0
+  fi
+
+  rm -f "$fifo" "$flag_file"
+  if [ "$status" -ne 0 ]; then
+    printf 'curl error: %s\n' "$(cat "$err_file" 2>/dev/null)"
+    rm -f "$err_file"
+    return 1
+  fi
+  rm -f "$err_file"
+  [ -n "$text" ] || text="(stream ended without extractable text)"
+  printf '\n' >&2
+  printf '%s\n' "$text"
+}
+
 
 # ----------------------------------------------------------
 # MAINTAINER COMMENTARY: function call_model
@@ -821,14 +923,18 @@ extract_openrouter_text() {
 call_model() {
   local model="$1" prompt="$2" full_prompt payload response text status
   if truthy "$DEMO_MODE"; then demo_ai_response "$prompt"; return 0; fi
+  if truthy "$STREAM"; then call_model_stream "$model" "$prompt"; return $?; fi
   require_api_key || return 1
   full_prompt="$(build_prompt_with_attachments "$prompt")"
   payload="$(build_openrouter_payload "$(normalize_model_id "$model")" "$full_prompt")"
   response="$(printf '%s' "$payload" | curl -sS --max-time 120 -H 'Content-Type: application/json' -H "Authorization: Bearer $OPENROUTER_API_KEY" -H 'HTTP-Referer: https://github.com/remfan1994/ttychatter' -H 'X-Title: ttychatter' -d @- 'https://openrouter.ai/api/v1/chat/completions' 2>&1)"
-  status=$?; [ "$status" -eq 0 ] || { printf 'curl error: %s\n' "$response"; return 1; }
+  status=$?; [ "$status" -eq 0 ] || { printf 'curl error: %s
+' "$response"; return 1; }
   text="$(printf '%s' "$response" | extract_openrouter_text)"
-  [ -n "$text" ] || text="(could not extract text response; raw response follows)\n$response"
-  printf '%s\n' "$text"
+  [ -n "$text" ] || text="(could not extract text response; raw response follows)
+$response"
+  printf '%s
+' "$text"
 }
 
 # ----------------------------------------------------------

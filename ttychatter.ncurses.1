@@ -1,4 +1,4 @@
-.TH TTYCHATTER.NCURSES 1 "June 2026" "ttychatter.ncurses 0.15.0-parity" "User Commands"
+.TH TTYCHATTER.NCURSES 1 "June 2026" "ttychatter.ncurses 0.15.1-parity" "User Commands"
 .SH NAME
 ttychatter.ncurses \- full-screen ncurses OpenRouter chat interface
 .SH SYNOPSIS
@@ -105,6 +105,14 @@ Send MODEL_TEST_PROMPT to MODEL and print the response.
 .TP
 .BR --loopback-file " PATH"
 Append each AI response to PATH while the ncurses UI remains interactive.
+.TP
+.B --stream
+Stream assistant output into the transcript. During an active stream, the status
+bar reads "Streaming... press ESC to stop"; pressing ESC stops the response and
+saves the partial reply with an interruption marker.
+.TP
+.B --no-stream
+Disable streaming for this run even when STREAM=1 is configured.
 .SH CONFIGURATION
 The shared config file is
 .IR $XDG_CONFIG_HOME/ttychatter/openrouter/config
@@ -122,20 +130,21 @@ All implementations use these shared paths and still read the old
 .IR $XDG_CONFIG_HOME/ttychatter/config
 file as a compatibility fallback when the provider-specific config is absent.
 Relevant keys include MODEL, CONTEXT_TURNS, SESSION_DIR, ATTACHMENT_DIR,
-EDITOR, MODEL_CACHE_FILE, MODEL_FILTER_CHAT_COMPLETIONS,
+EDITOR, MODEL_CACHE_FILE, MODEL_FAVORITES_FILE, MODEL_FILTER_CHAT_COMPLETIONS,
 MODEL_FILTER_REQUIRE_TOKENS, MODEL_FILTER_HIDE_PREVIEW,
 MODEL_MIN_INPUT_TOKENS, MODEL_MIN_OUTPUT_TOKENS, MODEL_SORT_ORDER,
 MODEL_TYPE_FILTER, THEME, SEND_INPUT, PROMPT_SESSION_NAME,
-CODE_ATTACHMENT_MIN_LINES, STARTUP_NOTICE, SESSION_AUTO_TITLE,
-SESSION_TITLE_MODEL, SESSION_TITLE_MAX_WORDS, DEMO_MODE, CONFIRM_LIVE_SEND,
-API_KEY_GPG_FILE, and LOOPBACK_FILE.
+CODE_ATTACHMENT_MIN_LINES, MAX_ATTACHMENT_BYTES, GITHUB_URL, STARTUP_NOTICE, SESSION_AUTO_TITLE,
+SESSION_TITLE_MODEL, SESSION_TITLE_MAX_WORDS, STREAM, DEMO_MODE,
+CONFIRM_LIVE_SEND, API_KEY_GPG_FILE, and LOOPBACK_FILE.
 .PP
 SESSION_AUTO_TITLE defaults to 0. When enabled, SESSION_TITLE_MODEL is a
 secondary model used only to write session-title metadata after a response. The
 chat model remains MODEL.
 .SH UI NOTES
 F4 opens the session browser. The rename actions now retitle metadata instead of
-renaming log files. F5 opens options, including the AI session-title metadata
-settings. F2 opens model selection and F7 opens file/attachment tools.
+renaming log files. F5 opens options, including streaming mode, loopback output, attachment
+limits, model favorites/cache paths, and the AI session-title metadata settings.
+F2 opens model selection and F7 opens file/attachment tools.
 .SH SEE ALSO
 ttychatter.bash(1), ttychatter.python(1)

@@ -963,7 +963,7 @@ SESSION TITLES
     Optional title generation is off by default and uses SESSION_AUTO_TITLE=1 plus SESSION_TITLE_MODEL.
 
 STREAMING / STATUS / VOICE
-    --stream shows provider token deltas while preserving the complete saved reply.
+    --stream shows provider token deltas while preserving the complete saved reply; press ESC to stop an active stream and save the partial reply.
     --status/--progress prints local progress notes, not hidden model reasoning.
     Voice input/output are external command hooks via VOICE_INPUT_CMD and VOICE_OUTPUT_CMD/TTS_CMD.
 
@@ -995,6 +995,7 @@ COMPATIBILITY / TESTING
     --demo                           Use local demo responses and demo model rows
     --interactive                    Alias for -i
     --progress | --no-progress       Aliases for --status/--no-status
+    ESC during streaming              Stop the active streamed response and save the partial reply
     --autoscan-model                 Removed compatibility option; exits with guidance
 
 LOOPBACK OUTPUT
@@ -2065,8 +2066,9 @@ call_openrouter_model_stream() {
   payload_file="$(mktemp "${TMPDIR:-/tmp}/ttychatter.stream.payload.XXXXXX")" || return 1
   printf '%s' "$prompt" | make_openrouter_payload "$clean_model" "${attachments[@]}" > "$payload_file" || { rm -f "$payload_file"; return 1; }
   python3 - "$OPENROUTER_API_KEY" "$payload_file" "$timeout" <<'PY_STREAM'
-import json, sys, urllib.request, urllib.error
+import json, os, select, sys, termios, urllib.request, urllib.error
 api_key, payload_path, timeout = sys.argv[1], sys.argv[2], float(sys.argv[3])
+marker='[assistant stream interrupted by user]'
 with open(payload_path, 'r', encoding='utf-8') as fh:
     payload=json.load(fh)
 payload['stream']=True
@@ -2078,9 +2080,80 @@ req=urllib.request.Request('https://openrouter.ai/api/v1/chat/completions', data
     'X-Title':'ttychatter',
 })
 parts=[]
+cancelled=False
+tty_fh=None
+tty_fd=None
+old_attrs=None
+
+def open_tty():
+    global tty_fh, tty_fd, old_attrs
+    try:
+        tty_fh=open('/dev/tty','rb', buffering=0)
+        tty_fd=tty_fh.fileno()
+        old_attrs=termios.tcgetattr(tty_fd)
+        attrs=list(old_attrs)
+        attrs[6]=list(old_attrs[6])
+        attrs[3] &= ~(termios.ICANON | termios.ECHO)
+        attrs[6][termios.VMIN]=0
+        attrs[6][termios.VTIME]=0
+        termios.tcsetattr(tty_fd, termios.TCSANOW, attrs)
+    except Exception:
+        close_tty()
+
+def close_tty():
+    global tty_fh, tty_fd, old_attrs
+    if tty_fd is not None and old_attrs is not None:
+        try: termios.tcsetattr(tty_fd, termios.TCSANOW, old_attrs)
+        except Exception: pass
+    if tty_fh is not None:
+        try: tty_fh.close()
+        except Exception: pass
+    tty_fh=None; tty_fd=None; old_attrs=None
+
+def esc_pressed():
+    if tty_fd is None:
+        return False
+    try:
+        while True:
+            r,_,_=select.select([tty_fd], [], [], 0)
+            if not r:
+                return False
+            ch=os.read(tty_fd, 1)
+            if not ch:
+                return False
+            if ch == b'\x1b':
+                return True
+    except Exception:
+        return False
+
+def response_fd(resp):
+    try: return resp.fileno()
+    except Exception: pass
+    try: return resp.fp.raw.fileno()
+    except Exception: pass
+    return None
+
+def append_piece(piece):
+    if isinstance(piece, str) and piece:
+        parts.append(piece)
+        sys.stderr.write(piece)
+        sys.stderr.flush()
+
 try:
+    open_tty()
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        for raw in resp:
+        fd=response_fd(resp)
+        while True:
+            if esc_pressed():
+                cancelled=True
+                break
+            if fd is not None:
+                r,_,_=select.select([fd], [], [], 0.1)
+                if not r:
+                    continue
+            raw=resp.readline()
+            if not raw:
+                break
             line=raw.decode('utf-8','replace').strip()
             if not line or not line.startswith('data:'):
                 continue
@@ -2097,17 +2170,21 @@ try:
                 if piece is None:
                     msg=ch.get('message') or {}
                     piece=msg.get('content')
-                if isinstance(piece, str) and piece:
-                    parts.append(piece)
-                    sys.stderr.write(piece)
-                    sys.stderr.flush()
+                append_piece(piece)
 except urllib.error.HTTPError as exc:
     sys.stderr.write('OpenRouter HTTP error %s: %s\n' % (exc.code, exc.read().decode('utf-8','replace')))
     sys.exit(1)
 except Exception as exc:
     sys.stderr.write('streaming error: %s\n' % exc)
     sys.exit(1)
-if parts:
+finally:
+    close_tty()
+if cancelled:
+    if parts and not ''.join(parts).endswith('\n'):
+        parts.append('\n')
+    parts.append(marker + '\n')
+    sys.stderr.write('\n' + marker + '\n')
+elif parts:
     sys.stderr.write('\n')
 print(''.join(parts))
 PY_STREAM
