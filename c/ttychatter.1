@@ -187,12 +187,13 @@ OPTIONS
 
         --branch SESSION TURN
             Create a new timestamped branch session containing messages through
-            TURN.  No model request is sent.
+            TURN.  No model request is sent.  The compact SESSION:TURN form is
+            also accepted.
 
         --edit-turn SESSION TURN
             Edit user message TURN in $VISUAL, $EDITOR, or vi, create a new
             branch before that message, then send the edited user turn to the
-            model.
+            model.  The compact SESSION:TURN form is also accepted.
 
         --export SESSION
             Export SESSION to markdown, text, or JSON.  Without --output, the
@@ -220,10 +221,12 @@ OPTIONS
 
         --search TEXT
             With --models, filter cached model rows.  Without --models, search
-            session logs.
+            session logs.  All-session search reports filename and
+            session-title metadata matches as well as transcript lines.
 
         --search-sessions TEXT
-            Search all session logs under SESSION_DIR.
+            Search all session logs under SESSION_DIR, including filename and
+            session-title metadata matches.
 
         --all-sessions
             With --search, search all sessions.
@@ -471,7 +474,9 @@ USAGE EXAMPLES
 
         ttychatter --turns notes
         ttychatter --branch notes 2
+        ttychatter --branch notes:2
         ttychatter --edit-turn notes 1
+        ttychatter --edit-turn notes:1
         ttychatter --export notes --format markdown --output notes.md
 
     Stream assistant text as it arrives and show local status notes:
@@ -617,7 +622,11 @@ API KEY STORAGE
 CONFIGURATION
     Default OpenRouter config file:
 
-        ~/.config/ttychatter/openrouter/config
+        ${XDG_CONFIG_HOME:-~/.config}/ttychatter/openrouter/config
+
+    Other default storage paths honor XDG_CACHE_HOME and XDG_DATA_HOME in the
+    same way.  If an XDG variable is unset, ttychatter uses the standard
+    home-directory fallback.
 
     If that file does not exist, ttychatter also reads the legacy C config:
 
@@ -702,10 +711,12 @@ BRANCHING, EDITING, AND EXPORT
     Create a branch containing messages through message 2:
 
         ttychatter --branch notes 2
+        ttychatter --branch notes:2
 
     Edit user message 1, branch before it, and send the edited turn:
 
         ttychatter --edit-turn notes 1
+        ttychatter --edit-turn notes:1
 
     Export a session:
 
@@ -784,22 +795,22 @@ DEMO MODE
     interactive command loop.
 
 FILES
-    ~/.config/ttychatter/openrouter/config
+    ${XDG_CONFIG_HOME:-~/.config}/ttychatter/openrouter/config
         Shared OpenRouter ttychatter configuration file.
 
-    ~/.config/ttychatter/openrouter/api-key.gpg
+    ${XDG_CONFIG_HOME:-~/.config}/ttychatter/openrouter/api-key.gpg
         Default encrypted OpenRouter API key file.
 
-    ~/.config/ttychatter/openrouter/model-favorites
+    ${XDG_CONFIG_HOME:-~/.config}/ttychatter/openrouter/model-favorites
         Shared plain-text favorite model list.
 
-    ~/.cache/ttychatter/openrouter/models.json
+    ${XDG_CACHE_HOME:-~/.cache}/ttychatter/openrouter/models.json
         Cached OpenRouter model catalog.
 
-    ~/.local/share/ttychatter/openrouter/sessions/
+    ${XDG_DATA_HOME:-~/.local/share}/ttychatter/openrouter/sessions/
         Default directory for named and automatically generated sessions.
 
-    ~/.local/share/ttychatter/openrouter/attachments/
+    ${XDG_DATA_HOME:-~/.local/share}/ttychatter/openrouter/attachments/
         Default attachment and extracted-code directory.
 
     ~/.config/ttychatter/config

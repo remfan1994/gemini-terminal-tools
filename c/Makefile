@@ -48,6 +48,13 @@ check: $(TARGET)
 	./$(TARGET) --help | grep -q -- '--export SESSION'
 	./$(TARGET) --help | grep -q -- '--format FORMAT'
 	./$(TARGET) --help | grep -q -- '--autoscan-model'
+	set -e; opts=$$(sed -n 's/^[[:space:]]*{\"\([^\"]*\)\",.*/--\1/p' $(SRC)); \
+	for opt in $$opts; do \
+		./$(TARGET) --help | grep -q -- "$$opt" || { echo "missing $$opt in --help"; exit 1; }; \
+		grep -q -- "$$opt" ttychatter.1 || { echo "missing $$opt in man page"; exit 1; }; \
+		grep -q -- "$$opt" README || { echo "missing $$opt in README"; exit 1; }; \
+		grep -q -- "$$opt" WALKTHROUGH || { echo "missing $$opt in WALKTHROUGH"; exit 1; }; \
+	done
 	grep -q '^OPTIONS' ttychatter.1
 	grep -q -- '--update-models' ttychatter.1
 	grep -q -- '--loopback-file FILE' ttychatter.1
@@ -73,9 +80,26 @@ check: $(TARGET)
 	grep -q -- '--voice-input' WALKTHROUGH
 	grep -q -- ':branch 2' WALKTHROUGH
 	grep -q -- '--autoscan-model' WALKTHROUGH
+	grep -q -- 'XDG_CONFIG_HOME' README
+	grep -q -- 'XDG_CONFIG_HOME' ttychatter.1
+	grep -q -- 'Interactive command equivalents' README
+	tmp=$$(mktemp -d); \
+	printf ':help\n:q\n' | XDG_CONFIG_HOME=$$tmp/config XDG_DATA_HOME=$$tmp/data XDG_CACHE_HOME=$$tmp/cache ./$(TARGET) --demo --interactive --new > $$tmp/runtime-help; \
+	grep -q -- ':fork N' $$tmp/runtime-help; \
+	grep -q -- ':edit-turn N' $$tmp/runtime-help; \
+	grep -q -- ':progress \[on|off\]' $$tmp/runtime-help; \
+	grep -q -- ':transcribe FILE' $$tmp/runtime-help; \
+	rm -rf $$tmp
 	tmp=$$(mktemp -d); \
 	XDG_CONFIG_HOME=$$tmp/config XDG_DATA_HOME=$$tmp/data XDG_CACHE_HOME=$$tmp/cache ./$(TARGET) --demo --prompt 'make check auto session' >/dev/null; \
 	test $$(find $$tmp/data/ttychatter/openrouter/sessions -type f -name 'session-*.log' | wc -l) -eq 1; \
+	rm -rf $$tmp
+	tmp=$$(mktemp -d); \
+	XDG_CONFIG_HOME=$$tmp/config XDG_DATA_HOME=$$tmp/data XDG_CACHE_HOME=$$tmp/cache ./$(TARGET) --set MODEL=demo/xdg >/dev/null; \
+	test -f $$tmp/config/ttychatter/openrouter/config; \
+	XDG_CONFIG_HOME=$$tmp/config XDG_DATA_HOME=$$tmp/data XDG_CACHE_HOME=$$tmp/cache ./$(TARGET) --config | grep -q 'model=demo/xdg'; \
+	XDG_CONFIG_HOME=$$tmp/config XDG_DATA_HOME=$$tmp/data XDG_CACHE_HOME=$$tmp/cache ./$(TARGET) --demo --update-models >/dev/null; \
+	test -f $$tmp/cache/ttychatter/openrouter/models.json; \
 	rm -rf $$tmp
 	tmp=$$(mktemp -d); \
 	mkdir -p $$tmp/config/ttychatter/openrouter; \
@@ -90,6 +114,11 @@ check: $(TARGET)
 	branch=$$(XDG_CONFIG_HOME=$$tmp/config XDG_DATA_HOME=$$tmp/data XDG_CACHE_HOME=$$tmp/cache ./$(TARGET) --branch branchdemo 2); \
 	test -f $$branch; \
 	! grep -q 'second branch message' $$branch; \
+	branch2=$$(XDG_CONFIG_HOME=$$tmp/config XDG_DATA_HOME=$$tmp/data XDG_CACHE_HOME=$$tmp/cache ./$(TARGET) --branch branchdemo:2); \
+	test -f $$branch2; \
+	XDG_CONFIG_HOME=$$tmp/config XDG_DATA_HOME=$$tmp/data XDG_CACHE_HOME=$$tmp/cache ./$(TARGET) --rename-session branchdemo Friendly Branch Demo >/dev/null; \
+	XDG_CONFIG_HOME=$$tmp/config XDG_DATA_HOME=$$tmp/data XDG_CACHE_HOME=$$tmp/cache ./$(TARGET) --search-sessions 'Friendly Branch' | grep -q 'title: Friendly Branch Demo'; \
+	XDG_CONFIG_HOME=$$tmp/config XDG_DATA_HOME=$$tmp/data XDG_CACHE_HOME=$$tmp/cache ./$(TARGET) --search-sessions 'branchdemo.log' | grep -q 'file: branchdemo.log'; \
 	XDG_CONFIG_HOME=$$tmp/config XDG_DATA_HOME=$$tmp/data XDG_CACHE_HOME=$$tmp/cache ./$(TARGET) --export branchdemo --format markdown | grep -q 'first branch message'; \
 	rm -rf $$tmp
 	tmp=$$(mktemp -d); \

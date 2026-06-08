@@ -169,12 +169,16 @@ OpenRouter storage parity
 The C client now uses the same default OpenRouter storage namespace as the
 other OpenRouter ttychatter clients:
 
-    config:      ~/.config/ttychatter/openrouter/config
-    api key gpg: ~/.config/ttychatter/openrouter/api-key.gpg
-    favorites:   ~/.config/ttychatter/openrouter/model-favorites
-    models:      ~/.cache/ttychatter/openrouter/models.json
-    sessions:    ~/.local/share/ttychatter/openrouter/sessions/
-    attachments: ~/.local/share/ttychatter/openrouter/attachments/
+    config:      ${XDG_CONFIG_HOME:-~/.config}/ttychatter/openrouter/config
+    api key gpg: ${XDG_CONFIG_HOME:-~/.config}/ttychatter/openrouter/api-key.gpg
+    favorites:   ${XDG_CONFIG_HOME:-~/.config}/ttychatter/openrouter/model-favorites
+    models:      ${XDG_CACHE_HOME:-~/.cache}/ttychatter/openrouter/models.json
+    sessions:    ${XDG_DATA_HOME:-~/.local/share}/ttychatter/openrouter/sessions/
+    attachments: ${XDG_DATA_HOME:-~/.local/share}/ttychatter/openrouter/attachments/
+
+The defaults honor XDG_CONFIG_HOME, XDG_CACHE_HOME, and XDG_DATA_HOME.  If an
+XDG variable is unset, ttychatter falls back to the standard home-directory
+path shown above.
 
 For existing 0.6.0 C users, the program still reads the legacy C config file
 when the new OpenRouter config file is absent:
@@ -215,7 +219,9 @@ slash:
     ttychatter --rename-session notes Friendly Notes
     ttychatter --turns notes
     ttychatter --branch notes 2
+    ttychatter --branch notes:2
     ttychatter --edit-turn notes 1
+    ttychatter --edit-turn notes:1
     ttychatter --export notes --format markdown
 
 Bare names resolve to:
@@ -310,11 +316,13 @@ Show message numbers:
 Create a branch after message 2 without sending a new model request:
 
     ttychatter --branch notes 2
+    ttychatter --branch notes:2
 
 Edit user message 1 in $VISUAL/$EDITOR/vi, create a new branch, and send the
 edited user turn to the model:
 
     ttychatter --edit-turn notes 1
+    ttychatter --edit-turn notes:1
 
 Interactive equivalents:
 
@@ -328,6 +336,20 @@ log format:
 
     ttychatter --export notes --format markdown --output notes.md
     ttychatter --export notes --format json
+
+Session search
+--------------
+
+Search scans session logs.  All-session search also reports matches against
+session filenames and session-title metadata before printing matching transcript
+lines:
+
+    ttychatter --search 'vegetarian alternatives'
+    ttychatter --search-sessions 'Friendly Notes'
+    ttychatter --search 'session-2026' --all-sessions
+
+Inside interactive mode, :search scans the current session and :search-all scans
+SESSION_DIR.
 
 Voice hooks
 -----------
@@ -365,6 +387,55 @@ Interactive commands:
     :speak on
     :speak off
     :speak last
+
+Interactive command equivalents
+-------------------------------
+
+Most interactive colon commands have a command-line/config equivalent so users
+can choose the control plane that fits the terminal workflow:
+
+    :help                  --help
+    :list                  --list
+    :rename TITLE          --rename-session SESSION TITLE
+    :turns                 --turns SESSION
+    :branch N, :fork N     --branch SESSION N
+    :edit N, :edit-turn N  --edit-turn SESSION N
+    :stream on|off         --stream / --no-stream, STREAM=1/0
+    :status on|off         --status / --no-status, STATUS_UPDATES=1/0
+    :progress on|off       alias for :status
+    :voice FILE            --voice-input FILE
+    :transcribe FILE       --transcribe FILE
+    :speak on|off          --speak / --no-speak, VOICE_OUTPUT=1/0
+    :models                --models
+    :routers               --routers
+    :update-models         --update-models
+    :select-model          --select-model
+    :test-model MODEL      --test-model MODEL
+    :model MODEL           --model MODEL for this run
+    :model-save MODEL      --set MODEL=MODEL or --test-model MODEL --save
+    :favorites             --favorites
+    :favorite MODEL        --favorite-model MODEL
+    :unfavorite MODEL      --unfavorite-model MODEL
+    :unbookmark MODEL      --unbookmark-model MODEL
+    :config                --config
+    :set KEY VALUE         --set KEY=VALUE
+    :unset KEY             --unset KEY
+    :set-api-key [gpg]     --set-api-key [--gpg]
+    :forget-api-key        --forget-api-key
+    :memory                --show-memory SESSION
+    :edit-memory           --edit-memory SESSION
+    :clear-memory          --clear-memory SESSION
+    :attach FILE           --attach FILE
+    :editor                --editor-prompt [LOG]
+    :search TEXT           --search TEXT
+    :search-all TEXT       --search-sessions TEXT
+    :credits               --credits
+    :doctor                --doctor
+    :quit, :q              exit interactive mode
+
+The pending-attachment commands (:attachments, :pending, and
+:clear-attachments) are local to the current interactive input queue and do not
+have a useful one-shot CLI equivalent.
 
 Session format
 --------------
