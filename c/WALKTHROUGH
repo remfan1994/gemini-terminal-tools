@@ -173,7 +173,8 @@ Generated long fenced code blocks are saved under:
 ---------------------------------------
 
 Streaming prints assistant content as it arrives, while the final complete
-reply is still saved to the session log:
+reply is still saved to the session log. Press ESC during an active stream to
+stop it and save the partial assistant reply with an interruption marker:
 
     ./ttychatter --stream --prompt 'Explain what a Unix pipeline is.'
     ./ttychatter --stream --interactive notes

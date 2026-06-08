@@ -276,10 +276,14 @@ mode:
     ttychatter --stream --prompt 'Explain this error.'
     ttychatter -i --stream notes
 
+    # While the stream is active: press ESC to stop and save the partial reply.
+
 Streaming is token streaming, not hidden model thought access.  OpenRouter sends
 Server-Sent Events when the request contains stream=true; ttychatter prints the
 returned assistant content while still saving the final complete response to the
-session log.
+session log. During an active stream, press ESC to stop the response; ttychatter
+saves the partial assistant text with an interruption marker and leaves the
+session open.
 
 Local status updates are separate from streaming.  They report client-side work
 such as preparing a request, loading context, waiting for a response, and saving

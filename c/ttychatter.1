@@ -686,7 +686,9 @@ CONFIGURATION
 STREAMING AND STATUS
     Streaming is real-time assistant-content output.  Use --stream or STREAM=1
     to print content as it arrives while still saving the final complete
-    assistant response to the log.  Use --no-stream to turn it off for one run.
+    assistant response to the log.  Press ESC during an active stream to stop it
+    and save the partial assistant reply.  Use --no-stream to turn it off for
+    one run.
 
     Streaming does not expose hidden model thoughts.  Local progress notes are
     controlled separately with --status or STATUS_UPDATES=1.  Status notes
