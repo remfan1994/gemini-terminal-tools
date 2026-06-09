@@ -152,6 +152,11 @@ Create /home/r94/.config/ttychatter/mailbot/config:
     USER_SECRET_DIR=/home/r94/.secrets/ttychatter/mailbot/openrouter-users
     DEFAULT_OPENROUTER_API_KEY_FILE=/home/r94/.secrets/ttychatter/mailbot/openrouter-default.key
     ALLOW_USER_API_KEYS=1
+    USER_API_KEY_MODE=persistent
+    USER_API_KEY_TTL_MINUTES=60
+    USER_API_KEY_RUNTIME_DIR=/tmp/ttychatter-mailbot-r94/user-api-keys
+    USER_API_KEY_FALLBACK_TO_OPERATOR=1
+    API_KEY_COMMANDS_REQUIRE_BODY=1
 
     COMMAND_OUTPUT_MODE=auto
     MODEL_CACHE_OUTPUT=auto
@@ -206,13 +211,54 @@ Create it:
     printf '%s\n' 'sk-or-v1-REPLACE-ME' > /home/r94/.secrets/ttychatter/mailbot/openrouter-default.key
     chmod 600 /home/r94/.secrets/ttychatter/mailbot/openrouter-default.key
 
-With USER_REGISTRY=1 and ALLOW_USER_API_KEYS=1, a sender may also set a private
-key by email:
+With USER_REGISTRY=1 and ALLOW_USER_API_KEYS=1, a sender may also provide a
+private key by email.  Use a body-command subject so the key is not placed in
+the message subject:
 
-    Subject: tc:api-key sk-or-v1-...
+    Subject: tc:CMD
 
-That key is stored under USER_SECRET_DIR as a chmod 600 secret file and injected
-into the ttychatter subprocess environment.  It is not written to .config.
+    api-key sk-or-v1-...
+
+With USER_API_KEY_MODE=persistent, that key is stored under USER_SECRET_DIR as
+a chmod 600 secret file and injected into the ttychatter subprocess environment.
+It is not written to .config.
+
+Temporary runtime keys are also supported for encrypted-mail or otherwise
+trusted deployments.  Enable them with:
+
+    USER_API_KEY_MODE=session
+
+or allow both temporary and persistent user keys with:
+
+    USER_API_KEY_MODE=both
+
+Then the sender can send:
+
+    Subject: tc:CMD
+
+    api-key-session sk-or-v1-...
+
+The temporary key is stored under USER_API_KEY_RUNTIME_DIR, expires after
+USER_API_KEY_TTL_MINUTES, and is preferred over a persistent key while valid.
+It avoids long-term .local/state or .config storage, but ordinary email is still
+not confidential unless the mail path is encrypted end-to-end.  A trusted host
+administrator or root can still inspect process/runtime storage.
+
+Useful API-key commands:
+
+    Subject: tc:CMD
+
+    api-key-status
+
+    Subject: tc:CMD
+
+    forget-session-api-key
+
+    Subject: tc:CMD
+
+    forget-api-key
+
+forget-api-key removes both persistent and temporary user keys.
 
 IMAP and SMTP password source
 -----------------------------
@@ -534,8 +580,10 @@ With USER_REGISTRY=1, each sender gets a private ttychatter HOME under:
     /home/r94/.local/state/ttychatter/mailbot/users/
 
 That private HOME contains the sender's ttychatter OpenRouter config, data,
-cache, favorites, sessions, and optional API-key secret.  This keeps different
-mail senders from colliding in the same subject-named sessions.
+cache, favorites, sessions, and optional API-key state.  Persistent user keys
+live under USER_SECRET_DIR; temporary user keys live under
+USER_API_KEY_RUNTIME_DIR until expiry.  This keeps different mail senders from
+colliding in the same subject-named sessions.
 
 Useful user commands:
 
@@ -570,7 +618,13 @@ For a public demo mailbox, add:
 
 With USER_REGISTRY=1, public senders are isolated by registry user and subject
 session.  ALLOWED_FROM remains the private/admin allowlist for global mailbot
-controls such as config export/update.
+controls such as config export/update.  If you want public users to bring their
+own temporary API keys instead of spending the operator key, set:
+
+    USER_API_KEY_MODE=session
+    USER_API_KEY_FALLBACK_TO_OPERATOR=0
+
+and tell users to send api-key-session through a body-command email.
 
 If you disable the user registry, restrict public users to a small command set:
 
@@ -629,6 +683,9 @@ send:
 
 They cannot edit config, update the model cache, rename/delete sessions, set
 API keys, or run tty-set unless the operator deliberately exposes those commands.
+With USER_REGISTRY=1, regular user-profile commands are available to each
+registered sender; USER_API_KEY_MODE controls whether api-key, api-key-session,
+or neither is accepted.
 
 Public cleanup and archive
 --------------------------
@@ -691,6 +748,26 @@ Branch from turn 6:
 Export session:
 
     /home/r94/bin/ttychatter.mailbot --config-file /home/r94/.config/ttychatter/mailbot/config --export worklog --format markdown
+
+API-key privacy notes
+---------------------
+
+The mailbot cannot make ordinary email secret.  The privacy improvement in
+api-key-session is storage lifetime: the key is not written into the per-user
+ttychatter config and is not kept as a persistent USER_SECRET_DIR file.  It is
+kept in runtime storage only until USER_API_KEY_TTL_MINUTES expires or the user
+sends forget-session-api-key.
+
+For best privacy, combine api-key-session with an encrypted mail setup and:
+
+    USER_API_KEY_MODE=session
+    USER_API_KEY_FALLBACK_TO_OPERATOR=0
+    API_KEY_COMMANDS_REQUIRE_BODY=1
+
+For compatibility with older private deployments, the default remains:
+
+    USER_API_KEY_MODE=persistent
+    USER_API_KEY_FALLBACK_TO_OPERATOR=1
 
 Troubleshooting
 ---------------

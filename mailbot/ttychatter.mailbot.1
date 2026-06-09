@@ -1,4 +1,4 @@
-.TH TTYCHATTER.MAILBOT 1 "June 2026" "ttychatter.mailbot 0.6.2-mailbot-parity" "User Commands"
+.TH TTYCHATTER.MAILBOT 1 "June 2026" "ttychatter.mailbot 0.6.3-mailbot-api-key-privacy" "User Commands"
 .SH NAME
 ttychatter.mailbot \- email transport adapter and remote control surface for ttychatter
 .SH SYNOPSIS
@@ -173,12 +173,28 @@ Bash helpers.
 Remove an allowlisted per-user ttychatter preference. Alias: unset.
 .TP
 .B api-key KEY
-Store this sender's OpenRouter API key in USER_SECRET_DIR as a chmod 600 secret
-file. The key is not written to .config. Alias: set-api-key.
+Store this sender's persistent OpenRouter API key in USER_SECRET_DIR as a chmod
+600 secret file. The key is not written to .config. Aliases include set-api-key,
+api-key-persistent, and persistent-api-key. This command is available only when
+USER_API_KEY_MODE is persistent or both and ALLOW_USER_API_KEYS=1.
+.TP
+.B api-key-session KEY
+Store this sender's temporary OpenRouter API key in USER_API_KEY_RUNTIME_DIR.
+The key expires after USER_API_KEY_TTL_MINUTES and is preferred over a
+persistent user key while valid. Aliases include temp-api-key, api-key-temp,
+temporary-api-key, and session-api-key. This command is available only when
+USER_API_KEY_MODE is session or both and ALLOW_USER_API_KEYS=1.
+.TP
+.B api-key-status
+Show this sender's API-key mode, selected API-key source, persistent-key file
+path, and temporary-key expiry status. Secret values are not printed.
 .TP
 .B forget-api-key
-Remove this sender's stored OpenRouter API key and fall back to the server
-default key file.
+Remove this sender's persistent and temporary OpenRouter API keys and then fall
+back according to USER_API_KEY_FALLBACK_TO_OPERATOR.
+.TP
+.B forget-session-api-key
+Remove only this sender's temporary runtime OpenRouter API key.
 .TP
 .B model-cache
 Return the existing MODEL_CACHE_FILE only. Never refreshes the cache.
@@ -257,6 +273,51 @@ COMMAND_OUTPUT_MODE, MODEL_CACHE_OUTPUT, MODEL_SEARCH_OUTPUT,
 MODEL_LIST_OUTPUT, SESSIONS_OUTPUT, and CONFIG_OUTPUT accept auto, body, or
 attachment. The default is auto globally, with short search/session results in
 the body and large cache/config results as attachments.
+.SH API-KEY MODES
+The mailbot can use an operator/default OpenRouter key, per-user persistent
+keys, or per-user temporary runtime keys. The mode is controlled by
+USER_API_KEY_MODE.
+.TP
+.B USER_API_KEY_MODE=operator
+Use only DEFAULT_OPENROUTER_API_KEY_FILE or API keys from the mailbot process
+environment. User key commands are refused.
+.TP
+.B USER_API_KEY_MODE=persistent
+Allow users to save persistent chmod 600 key files in USER_SECRET_DIR. This is
+the compatibility default.
+.TP
+.B USER_API_KEY_MODE=session
+Allow users to save temporary runtime keys with api-key-session. Persistent key
+files are not used.
+.TP
+.B USER_API_KEY_MODE=both
+Allow temporary and persistent user keys. Temporary runtime keys take priority,
+then persistent user key files, then the operator key if fallback is enabled.
+.TP
+.B USER_API_KEY_TTL_MINUTES=N
+Expiration time for api-key-session keys. The default is 60 minutes.
+.TP
+.B USER_API_KEY_RUNTIME_DIR=PATH
+Directory for temporary runtime key JSON files. The default is
+$XDG_RUNTIME_DIR/ttychatter/mailbot/user-api-keys when XDG_RUNTIME_DIR is set,
+otherwise /tmp/ttychatter-mailbot-UID/user-api-keys. Files are written mode
+0600 and parent directories mode 0700.
+.TP
+.B USER_API_KEY_FALLBACK_TO_OPERATOR=0|1
+When enabled, users without a usable user key fall back to the operator/default
+OpenRouter key. When disabled, USER_API_KEY_MODE=persistent/session/both require
+a user key for that sender. The default is 1 for compatibility.
+.PP
+Temporary API keys avoid long-term storage under .local/state or .config, but
+they are still present in runtime storage while valid and are still exposed to
+the mail path unless the user's email is encrypted end-to-end. They do not hide
+secrets from a trusted host administrator or root.
+.TP
+.B API_KEY_COMMANDS_REQUIRE_BODY=0|1
+When enabled, api-key, api-key-session, and tty-set API-key commands that
+include a secret operand are refused when the secret appears in the subject.
+Users should send Subject: tc:CMD and put the secret command in the message
+body. The default is 1.
 .SH CONFIGURATION KEYS
 Important keys include IMAP_HOST, IMAP_PORT, IMAP_SSL, IMAP_USER,
 IMAP_PASSWORD, IMAP_PASSWORD_GPG_FILE, SEND_METHOD, SENDMAIL_PATH,
@@ -271,7 +332,10 @@ PUBLIC_SESSION_IDLE_HOURS, PUBLIC_SESSION_MAX_COUNT, PUBLIC_SESSION_MAX_TURNS,
 USER_REGISTRY, SUBJECT_SESSIONS, USER_REGISTRY_FILE, USER_HOME_ROOT,
 USER_SECRET_DIR, DEFAULT_OPENROUTER_API_KEY_FILE,
 MIGRATE_PLAINTEXT_OPENROUTER_API_KEY, ALLOW_USER_API_KEYS,
-USER_TTYCONFIG_ALLOWED_KEYS, SPAM_PROTECTION, RATE_LIMIT_ENABLED,
+USER_API_KEY_MODE, API_KEY_MODE, USER_API_KEY_TTL_MINUTES,
+USER_API_KEY_RUNTIME_DIR, USER_API_KEY_FALLBACK_TO_OPERATOR,
+API_KEY_COMMANDS_REQUIRE_BODY, USER_TTYCONFIG_ALLOWED_KEYS, SPAM_PROTECTION,
+RATE_LIMIT_ENABLED,
 DAILY_QUOTA_ENABLED, MAX_SESSIONS_PER_SENDER, API_COST_PROTECTION,
 API_MAX_INPUT_CHARS, API_MAX_ESTIMATED_TOKENS, API_MAX_ATTACHMENT_BYTES,
 TTYCHATTER_BACKEND, TTYCHATTER_CLIENT, TTYCHATTER_COMMAND, TTYCHATTER_EXTRA_ARGS,
@@ -291,6 +355,7 @@ cache:       $XDG_CACHE_HOME/ttychatter/mailbot/
 sessions:    $XDG_DATA_HOME/ttychatter/openrouter/sessions/
 attachments: $XDG_DATA_HOME/ttychatter/openrouter/attachments/
 model cache: $XDG_CACHE_HOME/ttychatter/openrouter/models.json
+runtime user keys: $XDG_RUNTIME_DIR/ttychatter/mailbot/user-api-keys/
 .fi
 .RE
 .PP
@@ -303,14 +368,21 @@ models-cache.json and older favorites file model-favorites.txt.
 .SH SECURITY
 Public mode is for demos. It should use a separate mailbox, conservative limits,
 per-sender registry homes, subject sessions, and a small PUBLIC_ALLOWED_COMMANDS
-set. Do not expose config mutation, model refresh, session deletion, api-key,
+set. Do not expose config mutation, model refresh, session deletion, api-key, api-key-session,
 tty-set, or tty-unset to non-ALLOWED_FROM senders unless the deployment is
 intentionally disposable.
 .PP
-OpenRouter keys are loaded from DEFAULT_OPENROUTER_API_KEY_FILE or a per-user
-secret file and injected into the ttychatter subprocess environment. The mailbot
-migrates legacy plaintext API-key lines out of ttychatter config when
+OpenRouter keys are loaded according to USER_API_KEY_MODE. They may come from
+DEFAULT_OPENROUTER_API_KEY_FILE, a per-user persistent secret file, a temporary
+runtime key file, or the mailbot process environment. The selected key is
+injected into the ttychatter subprocess environment. The mailbot migrates legacy
+plaintext API-key lines out of ttychatter config when
 MIGRATE_PLAINTEXT_OPENROUTER_API_KEY=1.
+.PP
+api-key-session is intended for encrypted-mail or otherwise trusted mail paths.
+It avoids long-term storage by expiring keys from runtime storage, but ordinary
+email and the server host are not secret from the mail operator/root. Keep
+API_KEY_COMMANDS_REQUIRE_BODY=1 so keys are not copied into mail subjects.
 .PP
 SPAM_PROTECTION rejects auto-submitted/list/bulk mail and recipient floods.
 RATE_LIMIT_ENABLED enforces rolling sender/global work caps. DAILY_QUOTA_ENABLED
@@ -335,7 +407,13 @@ Per-user HOME roots.
 Default server OpenRouter key.
 .TP
 .B ~/.secrets/ttychatter/mailbot/openrouter-users/
-Per-user OpenRouter keys.
+Per-user persistent OpenRouter keys.
+.TP
+.B $XDG_RUNTIME_DIR/ttychatter/mailbot/user-api-keys/
+Per-user temporary runtime OpenRouter keys, when XDG_RUNTIME_DIR is set.
+.TP
+.B /tmp/ttychatter-mailbot-UID/user-api-keys/
+Fallback temporary runtime OpenRouter key directory when XDG_RUNTIME_DIR is not set.
 .SH EXIT STATUS
 0 indicates success. Nonzero status indicates configuration, IMAP, SMTP,
 sendmail, or ttychatter subprocess failure.

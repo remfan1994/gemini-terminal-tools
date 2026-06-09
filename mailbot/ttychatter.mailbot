@@ -52,7 +52,7 @@ from pathlib import Path
 from typing import Any, Iterable, List, Optional, Tuple
 
 PROGRAM = "ttychatter.mailbot"
-VERSION = "0.6.2-mailbot-parity"
+VERSION = "0.6.3-mailbot-api-key-privacy"
 AUTOMATED_MAILBOT_NOTICE = "I strongly encourage everyone to get cruelty-free vegetarian food and fear the AVENGER OF DEATH.  --BLOODGUILTCURSE.NET"
 
 
@@ -92,6 +92,17 @@ DEFAULT_OPENROUTER_API_KEY_FILE = DEFAULT_SECRET_DIR / "openrouter-default.key"
 DEFAULT_LEGACY_OPENROUTER_CONFIG_FILE = xdg_config_root() / "ttychatter" / "openrouter" / "config"
 DEFAULT_RATE_LIMIT_DB = DEFAULT_STATE_DIR / "rate-limits.json"
 DEFAULT_DAILY_QUOTA_DB = DEFAULT_STATE_DIR / "daily-quotas.json"
+
+
+def default_user_api_key_runtime_dir() -> Path:
+    runtime = os.environ.get("XDG_RUNTIME_DIR", "").strip()
+    if runtime:
+        return Path(os.path.expandvars(os.path.expanduser(runtime))).resolve() / "ttychatter" / "mailbot" / "user-api-keys"
+    uid = os.getuid() if hasattr(os, "getuid") else os.getpid()
+    return Path(tempfile.gettempdir()) / f"ttychatter-mailbot-{uid}" / "user-api-keys"
+
+
+DEFAULT_USER_API_KEY_RUNTIME_DIR = default_user_api_key_runtime_dir()
 CONFIG_ENV_VAR = "TTYCHATTER_MAILBOT_CONFIG"
 
 
@@ -222,6 +233,11 @@ class Config:
     legacy_openrouter_config_file: Path = DEFAULT_LEGACY_OPENROUTER_CONFIG_FILE
     migrate_plaintext_openrouter_api_key: bool = True
     allow_user_api_keys: bool = True
+    user_api_key_mode: str = "persistent"  # operator, persistent, session, or both
+    user_api_key_ttl_minutes: int = 60
+    user_api_key_runtime_dir: Path = DEFAULT_USER_API_KEY_RUNTIME_DIR
+    user_api_key_fallback_to_operator: bool = True
+    api_key_commands_require_body: bool = True
     user_ttyconfig_allowed_keys: List[str] = field(default_factory=lambda: [
         "MODEL", "CONTEXT_TURNS", "HISTORY_LIMIT", "MODEL_TEST_PROMPT",
         "DEMO_MODE", "STARTUP_NOTICE", "MODEL_FILTER_GENERATE_CONTENT",
@@ -292,6 +308,7 @@ class SubjectRequest:
     legacy: bool = False
     body_override: Optional[str] = None
     public_resume: bool = False
+    command_from_body: bool = False
 
 
 @dataclass
@@ -347,7 +364,10 @@ KNOWN_CONFIG_KEYS = {
     "USER_HOME_ROOT", "USER_SECRET_DIR", "DEFAULT_OPENROUTER_API_KEY_FILE",
     "SERVER_OPENROUTER_API_KEY_FILE", "OPENROUTER_API_KEY_FILE",
     "LEGACY_OPENROUTER_CONFIG_FILE", "MIGRATE_PLAINTEXT_OPENROUTER_API_KEY",
-    "ALLOW_USER_API_KEYS", "USER_TTYCONFIG_ALLOWED_KEYS",
+    "ALLOW_USER_API_KEYS", "USER_API_KEY_MODE", "API_KEY_MODE",
+    "USER_API_KEY_TTL_MINUTES", "USER_API_KEY_RUNTIME_DIR",
+    "USER_API_KEY_FALLBACK_TO_OPERATOR", "API_KEY_COMMANDS_REQUIRE_BODY",
+    "USER_TTYCONFIG_ALLOWED_KEYS",
     "SPAM_PROTECTION", "SPAM_REJECT_AUTO_SUBMITTED", "SPAM_REJECT_LIST_MAIL",
     "SPAM_MAX_RECIPIENTS", "RATE_LIMIT_ENABLED", "RATE_LIMIT_DB",
     "RATE_LIMIT_WINDOW_SECONDS", "RATE_LIMIT_SENDER_MESSAGES",
@@ -650,6 +670,11 @@ def load_config(path: Path = DEFAULT_CONFIG_FILE) -> Config:
         elif key == "LEGACY_OPENROUTER_CONFIG_FILE": cfg.legacy_openrouter_config_file = expand_path(value)
         elif key == "MIGRATE_PLAINTEXT_OPENROUTER_API_KEY": cfg.migrate_plaintext_openrouter_api_key = parse_bool(value, cfg.migrate_plaintext_openrouter_api_key)
         elif key == "ALLOW_USER_API_KEYS": cfg.allow_user_api_keys = parse_bool(value, cfg.allow_user_api_keys)
+        elif key in {"USER_API_KEY_MODE", "API_KEY_MODE"}: cfg.user_api_key_mode = canonical_user_api_key_mode(value)
+        elif key == "USER_API_KEY_TTL_MINUTES": cfg.user_api_key_ttl_minutes = max(1, parse_int(value, cfg.user_api_key_ttl_minutes))
+        elif key == "USER_API_KEY_RUNTIME_DIR": cfg.user_api_key_runtime_dir = expand_path(value)
+        elif key == "USER_API_KEY_FALLBACK_TO_OPERATOR": cfg.user_api_key_fallback_to_operator = parse_bool(value, cfg.user_api_key_fallback_to_operator)
+        elif key == "API_KEY_COMMANDS_REQUIRE_BODY": cfg.api_key_commands_require_body = parse_bool(value, cfg.api_key_commands_require_body)
         elif key == "USER_TTYCONFIG_ALLOWED_KEYS": cfg.user_ttyconfig_allowed_keys = [x.upper() for x in split_config_words(value)]
 
         elif key == "SPAM_PROTECTION": cfg.spam_protection = parse_bool(value, cfg.spam_protection)
@@ -1026,6 +1051,152 @@ def migrate_plaintext_openrouter_api_key(cfg: Config) -> None:
         )
 
 
+def canonical_user_api_key_mode(value: str) -> str:
+    mode = normalize_keyword(value or "persistent")
+    aliases = {
+        "default": "operator",
+        "server": "operator",
+        "server-default": "operator",
+        "operator-only": "operator",
+        "none": "operator",
+        "off": "operator",
+        "user": "persistent",
+        "stored": "persistent",
+        "store": "persistent",
+        "secret": "persistent",
+        "file": "persistent",
+        "persistent-file": "persistent",
+        "user-persistent": "persistent",
+        "temp": "session",
+        "temporary": "session",
+        "runtime": "session",
+        "runtime-file": "session",
+        "session-only": "session",
+        "user-session": "session",
+        "any": "both",
+        "all": "both",
+        "user-any": "both",
+        "user-both": "both",
+    }
+    mode = aliases.get(mode, mode)
+    return mode if mode in {"operator", "persistent", "session", "both"} else "persistent"
+
+
+def persistent_api_keys_enabled(cfg: Config) -> bool:
+    return bool(cfg.allow_user_api_keys and canonical_user_api_key_mode(cfg.user_api_key_mode) in {"persistent", "both"})
+
+
+def session_api_keys_enabled(cfg: Config) -> bool:
+    return bool(cfg.allow_user_api_keys and canonical_user_api_key_mode(cfg.user_api_key_mode) in {"session", "both"})
+
+
+def operator_api_key_allowed(cfg: Config, profile: Optional["UserProfile"]) -> bool:
+    mode = canonical_user_api_key_mode(cfg.user_api_key_mode)
+    return profile is None or mode == "operator" or bool(cfg.user_api_key_fallback_to_operator)
+
+
+def format_utc(ts: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+
+def user_session_api_key_file(cfg: Config, user_id: str) -> Path:
+    safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", user_id or "unknown")
+    return cfg.user_api_key_runtime_dir / f"{safe_id}.openrouter.session-key.json"
+
+
+def read_runtime_user_session_api_key(cfg: Config, user_id: str) -> Tuple[str, str]:
+    if not user_id:
+        return "", "missing user id"
+    path = user_session_api_key_file(cfg, user_id)
+    data = read_json_file(path, {})
+    if not isinstance(data, dict):
+        return "", "missing"
+    key = str(data.get("api_key", "")).strip()
+    try:
+        expires_at = float(data.get("expires_at", 0))
+    except (TypeError, ValueError):
+        expires_at = 0.0
+    now = time.time()
+    if not key:
+        return "", "missing"
+    if expires_at and expires_at <= now:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+        return "", f"temporary user API key expired at {format_utc(expires_at)}"
+    if expires_at:
+        return key, f"temporary user API key {path} expires {format_utc(expires_at)}"
+    return key, f"temporary user API key {path}"
+
+
+def runtime_user_session_api_key_status(cfg: Config, user_id: str) -> str:
+    if not user_id:
+        return "not mapped"
+    path = user_session_api_key_file(cfg, user_id)
+    data = read_json_file(path, {})
+    if not isinstance(data, dict) or not str(data.get("api_key", "")).strip():
+        return "not set"
+    try:
+        expires_at = float(data.get("expires_at", 0))
+    except (TypeError, ValueError):
+        expires_at = 0.0
+    if expires_at and expires_at <= time.time():
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return f"expired at {format_utc(expires_at)}"
+    if expires_at:
+        return f"set; expires {format_utc(expires_at)}; file={path}"
+    return f"set; no expiry recorded; file={path}"
+
+
+def save_runtime_user_session_api_key(cfg: Config, secret: str) -> str:
+    if not session_api_keys_enabled(cfg):
+        return (
+            "temporary per-user API keys are disabled. "
+            "Set USER_API_KEY_MODE=session or USER_API_KEY_MODE=both and ALLOW_USER_API_KEYS=1.\n"
+        )
+    if not cfg.runtime_user_id:
+        return "temporary per-user API-key storage requires USER_REGISTRY=1\n"
+    secret = (secret or "").strip()
+    if not secret:
+        raise ValueError("empty OpenRouter API key refused")
+    if "\r" in secret or "\n" in secret:
+        raise ValueError("OpenRouter API key must be a single line")
+    now = time.time()
+    expires_at = now + max(1, cfg.user_api_key_ttl_minutes) * 60
+    path = user_session_api_key_file(cfg, cfg.runtime_user_id)
+    write_json_file(path, {
+        "version": 1,
+        "user_id": cfg.runtime_user_id,
+        "sender_sha256": hashlib.sha256((cfg.runtime_user_email or "").encode("utf-8")).hexdigest(),
+        "created_at": now,
+        "expires_at": expires_at,
+        "api_key": secret,
+    })
+    return (
+        "saved temporary per-user OpenRouter API key in runtime storage\n"
+        f"expires: {format_utc(expires_at)}\n"
+        f"runtime_file: {path}\n"
+        "ordinary email is not confidential unless your mail path is encrypted end-to-end\n"
+    )
+
+
+def forget_runtime_user_session_api_key(cfg: Config) -> str:
+    if not cfg.runtime_user_id:
+        return "temporary per-user API-key storage requires USER_REGISTRY=1\n"
+    path = user_session_api_key_file(cfg, cfg.runtime_user_id)
+    try:
+        path.unlink()
+        return f"removed temporary per-user OpenRouter API key: {path}\n"
+    except FileNotFoundError:
+        return "no temporary per-user OpenRouter API key was stored\n"
+
+
 def user_id_for_sender(sender: str) -> str:
     email_addr = sender_address(sender)
     digest = hashlib.sha256(email_addr.encode("utf-8")).hexdigest()[:16]
@@ -1068,7 +1239,7 @@ def initial_user_config_text(profile: UserProfile) -> str:
     return textwrap.dedent(f"""\
         # ttychatter.mailbot per-user ttychatter config
         # This file stores non-secret ttychatter preferences only.
-        # API keys are stored as chmod 600 files outside .config and injected by mailbot.
+        # API keys are injected by mailbot; persistent keys use chmod 600 secret files and temporary keys use runtime storage.
         CONTEXT_TURNS=12
         MODEL=openrouter/auto
         SESSION_DIR={profile.session_dir}
@@ -1143,19 +1314,26 @@ def lookup_or_create_user_profile(cfg: Config, sender: str) -> UserProfile:
 
 
 def resolve_openrouter_api_key(cfg: Config, profile: Optional[UserProfile]) -> Tuple[str, str]:
-    if profile is not None:
+    if profile is not None and session_api_keys_enabled(cfg):
+        session_key, session_source = read_runtime_user_session_api_key(cfg, profile.user_id)
+        if session_key:
+            return session_key, session_source
+    if profile is not None and persistent_api_keys_enabled(cfg):
         user_key = read_secret_file(profile.api_key_file)
         if user_key:
             return user_key, f"user secret file {profile.api_key_file}"
-    default_key = read_secret_file(cfg.default_openrouter_api_key_file)
-    if default_key:
-        return default_key, f"default secret file {cfg.default_openrouter_api_key_file}"
-    env_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
-    if env_key:
-        return env_key, "environment OPENROUTER_API_KEY"
-    env_key = os.environ.get("TTYCHATTER_API_KEY", "").strip()
-    if env_key:
-        return env_key, "environment TTYCHATTER_API_KEY"
+    if operator_api_key_allowed(cfg, profile):
+        default_key = read_secret_file(cfg.default_openrouter_api_key_file)
+        if default_key:
+            return default_key, f"default secret file {cfg.default_openrouter_api_key_file}"
+        env_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+        if env_key:
+            return env_key, "environment OPENROUTER_API_KEY"
+        env_key = os.environ.get("TTYCHATTER_API_KEY", "").strip()
+        if env_key:
+            return env_key, "environment TTYCHATTER_API_KEY"
+    if profile is not None and not operator_api_key_allowed(cfg, profile):
+        return "", "missing user API key; operator fallback disabled"
     return "", "missing"
 
 
@@ -1222,8 +1400,11 @@ def ttychatter_environment(cfg: Config) -> dict:
 
 
 def save_runtime_user_api_key(cfg: Config, secret: str) -> str:
-    if not cfg.allow_user_api_keys:
-        return "per-user API keys are disabled by ALLOW_USER_API_KEYS=0\n"
+    if not persistent_api_keys_enabled(cfg):
+        return (
+            "persistent per-user API keys are disabled. "
+            "Set USER_API_KEY_MODE=persistent or USER_API_KEY_MODE=both and ALLOW_USER_API_KEYS=1.\n"
+        )
     if cfg.runtime_user_api_key_file is None:
         return "per-user API-key storage requires USER_REGISTRY=1\n"
     write_secret_file(cfg.runtime_user_api_key_file, secret)
@@ -1231,24 +1412,33 @@ def save_runtime_user_api_key(cfg: Config, secret: str) -> str:
         unset_config_value(cfg.runtime_ttychatter_config_file, "OPENROUTER_API_KEY")
         unset_config_value(cfg.runtime_ttychatter_config_file, "API_KEY")
         unset_config_value(cfg.runtime_ttychatter_config_file, "TTYCHATTER_API_KEY")
-    return f"saved per-user OpenRouter API key to secret file: {cfg.runtime_user_api_key_file}\nplaintext API-key config entries removed if present\n"
+    return f"saved persistent per-user OpenRouter API key to secret file: {cfg.runtime_user_api_key_file}\nplaintext API-key config entries removed if present\n"
 
 
 def forget_runtime_user_api_key(cfg: Config) -> str:
-    if cfg.runtime_user_api_key_file is None:
+    if cfg.runtime_user_api_key_file is None and not cfg.runtime_user_id:
         return "per-user API-key storage requires USER_REGISTRY=1\n"
-    try:
-        cfg.runtime_user_api_key_file.unlink()
-        removed = True
-    except FileNotFoundError:
-        removed = False
+    removed_persistent = False
+    if cfg.runtime_user_api_key_file is not None:
+        try:
+            cfg.runtime_user_api_key_file.unlink()
+            removed_persistent = True
+        except FileNotFoundError:
+            removed_persistent = False
+    session_note = forget_runtime_user_session_api_key(cfg) if cfg.runtime_user_id else ""
     if cfg.runtime_ttychatter_config_file is not None:
         unset_config_value(cfg.runtime_ttychatter_config_file, "OPENROUTER_API_KEY")
         unset_config_value(cfg.runtime_ttychatter_config_file, "API_KEY")
         unset_config_value(cfg.runtime_ttychatter_config_file, "TTYCHATTER_API_KEY")
-    if removed:
-        return "removed per-user OpenRouter API key; this user now falls back to the server default key if available\n"
-    return "no per-user OpenRouter API key was stored; this user already falls back to the server default key if available\n"
+    lines = []
+    if removed_persistent:
+        lines.append("removed persistent per-user OpenRouter API key")
+    else:
+        lines.append("no persistent per-user OpenRouter API key was stored")
+    if session_note:
+        lines.append(session_note.strip())
+    lines.append("this user now falls back according to USER_API_KEY_FALLBACK_TO_OPERATOR")
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def runtime_user_status(cfg: Config) -> str:
@@ -1264,7 +1454,12 @@ def runtime_user_status(cfg: Config) -> str:
         f"ttychatter_config={cfg.runtime_ttychatter_config_file or '(not mapped)'}",
         f"session_dir={cfg.session_dir}",
         f"model_cache_file={cfg.model_cache_file}",
-        f"user_api_key_file={cfg.runtime_user_api_key_file or '(not mapped)'}",
+        f"user_api_key_mode={canonical_user_api_key_mode(cfg.user_api_key_mode)}",
+        f"user_api_key_ttl_minutes={cfg.user_api_key_ttl_minutes}",
+        f"user_api_key_runtime_dir={cfg.user_api_key_runtime_dir}",
+        f"operator_fallback={int(cfg.user_api_key_fallback_to_operator)}",
+        f"persistent_user_api_key_file={cfg.runtime_user_api_key_file or '(not mapped)'}",
+        f"temporary_user_api_key={runtime_user_session_api_key_status(cfg, cfg.runtime_user_id)}",
         f"api_key_source={cfg.runtime_api_key_source or 'missing'}",
     ])
     return "\n".join(lines) + "\n"
@@ -1643,8 +1838,21 @@ def canonical_mailbot_command_word(word: str) -> str:
         "profile": "user",
         "registry": "user",
         "set-api-key": "api-key",
+        "save-api-key": "api-key",
+        "api-key-persistent": "api-key",
+        "persistent-api-key": "api-key",
+        "api-key-temp": "api-key-session",
+        "temp-api-key": "api-key-session",
+        "temporary-api-key": "api-key-session",
+        "session-api-key": "api-key-session",
+        "set-session-api-key": "api-key-session",
+        "key-status": "api-key-status",
         "forget-api-key": "forget-api-key",
+        "api-key-forget": "forget-api-key",
         "remove-api-key": "forget-api-key",
+        "forget-session-api-key": "forget-session-api-key",
+        "remove-session-api-key": "forget-session-api-key",
+        "api-key-session-forget": "forget-session-api-key",
         "archive-public-session": "archive-session",
         "archive-on-expire": "archive-session",
         "public-archive": "archive-session",
@@ -1686,7 +1894,10 @@ def known_mailbot_command_words() -> set[str]:
         "credits",
         "user",
         "api-key",
+        "api-key-session",
+        "api-key-status",
         "forget-api-key",
+        "forget-session-api-key",
         "tty-set",
         "tty-unset",
     }
@@ -1803,13 +2014,13 @@ def body_subject_request(subject: str, cfg: Config, body: str) -> Optional[Subje
         if models_token and parts[0] == models_token:
             rest = first_line[len(parts[0]):].strip()
             if rest:
-                return SubjectRequest("command", "model-search " + shlex.quote(rest), raw=first_line)
-            return SubjectRequest("command", "model-cache", raw=first_line)
+                return SubjectRequest("command", "model-search " + shlex.quote(rest), raw=first_line, command_from_body=True)
+            return SubjectRequest("command", "model-cache", raw=first_line, command_from_body=True)
     if looks_like_mailbot_command_line(first_line, cfg):
         # For Subject: MAILBOT / CMD, the first body line is already the
         # complete command line. Do not append it to itself for commands that
         # accept arguments, such as models or api-key.
-        return SubjectRequest("command", first_line, raw=first_line)
+        return SubjectRequest("command", first_line, raw=first_line, command_from_body=True)
     return SubjectRequest("session", "new", raw=first_line, body_override=body)
 
 
@@ -1939,7 +2150,7 @@ def parse_subject_request(subject: str, cfg: Config, body: str = "") -> Optional
 
             stripped = strip_command_envelope(command_text, cfg)
             if stripped != command_text:
-                return SubjectRequest("command", maybe_append_body_arguments(stripped, body) if stripped else (first_command_line_from_body(body) or "help"), raw=command_text)
+                return SubjectRequest("command", maybe_append_body_arguments(stripped, body) if stripped else (first_command_line_from_body(body) or "help"), raw=command_text, command_from_body=not bool(stripped))
 
             models_token = (cfg.models_subject_token or "MODELS").strip()
             # MODELS is an exact uppercase control token so tc:MODELS remains a
@@ -2941,8 +3152,21 @@ def public_command_allowed(cfg: Config, command_line: str) -> bool:
         "profile": "user",
         "registry": "user",
         "set-api-key": "api-key",
+        "save-api-key": "api-key",
+        "api-key-persistent": "api-key",
+        "persistent-api-key": "api-key",
+        "api-key-temp": "api-key-session",
+        "temp-api-key": "api-key-session",
+        "temporary-api-key": "api-key-session",
+        "session-api-key": "api-key-session",
+        "set-session-api-key": "api-key-session",
+        "key-status": "api-key-status",
         "forget-api-key": "forget-api-key",
+        "api-key-forget": "forget-api-key",
         "remove-api-key": "forget-api-key",
+        "forget-session-api-key": "forget-session-api-key",
+        "remove-session-api-key": "forget-session-api-key",
+        "api-key-session-forget": "forget-session-api-key",
         "archive-public-session": "archive-session",
         "archive-on-expire": "archive-session",
         "public-archive": "archive-session",
@@ -3529,7 +3753,7 @@ def redact_command_for_reply(command: str) -> str:
     if not tokens:
         return "help"
     head = normalize_keyword(tokens[0])
-    if head in {"api-key", "set-api-key"}:
+    if head in {"api-key", "set-api-key", "save-api-key", "api-key-persistent", "persistent-api-key", "api-key-session", "api-key-temp", "temp-api-key", "temporary-api-key", "session-api-key", "set-session-api-key"}:
         return f"{tokens[0]} REDACTED"
     if head in {"tty-set", "set"} and len(tokens) >= 2 and tokens[1].upper() in {"OPENROUTER_API_KEY", "API_KEY", "TTYCHATTER_API_KEY"}:
         return f"{tokens[0]} {tokens[1]} REDACTED"
@@ -3590,8 +3814,10 @@ def mailbot_reply_footer(cfg: Config, status: str, session: str = "", command: s
         "favorites             List favorite models.",
         "ttyconfig | prefs     Show this sender's ttychatter configuration.",
         "ttydoctor             Run ttychatter diagnostics.",
-        "api-key KEY           Save this sender's OpenRouter API key.",
-        "forget-api-key        Remove this sender's saved OpenRouter API key.",
+        "api-key KEY           Save this sender's persistent OpenRouter API key.",
+        "api-key-session KEY   Save a temporary runtime OpenRouter API key.",
+        "api-key-status        Show this sender's API-key source/status.",
+        "forget-api-key        Remove persistent and temporary user API keys.",
         "",
         f"For user help, send Subject: {command_subject} with Message body: help.",
     ])
@@ -3644,6 +3870,7 @@ BODY_ARG_COMMANDS = {
     "turns", "branch", "export", "favorite-model",
     "unfavorite-model", "test-model", "show-memory", "clear-memory",
     "tty-set", "tty-unset", "set", "unset", "api-key", "set-api-key",
+    "api-key-session", "temp-api-key", "session-api-key",
 }
 
 
@@ -3733,8 +3960,12 @@ tty-set KEY VALUE   Set an allowed ttychatter preference.
 set KEY VALUE       Same as tty-set.
 tty-unset KEY       Remove an allowed ttychatter preference.
 unset KEY           Same as tty-unset.
-api-key KEY         Save your OpenRouter API key for your mailbot user.
-forget-api-key      Remove your saved OpenRouter API key.
+api-key KEY         Save your persistent OpenRouter API key for your mailbot user.
+api-key-session KEY Save a temporary runtime OpenRouter API key for this sender.
+api-key-status      Show API-key mode, source, and temporary-key expiry.
+forget-api-key      Remove persistent and temporary user API keys.
+forget-session-api-key
+                    Remove only the temporary runtime API key.
 
 New user profiles are initialized with:
 
@@ -3868,6 +4099,8 @@ ADMIN NOTES
 - Use help for the regular-user command list.
 - Use manpage for the full plain-text manual.
 - Use ttydoctor for runtime diagnostics.
+- USER_API_KEY_MODE controls operator, persistent, session, or both key modes.
+- API_KEY_COMMANDS_REQUIRE_BODY=1 prevents secret-bearing key commands in subjects.
 - Non-ALLOWED_FROM users cannot export or apply the global mailbot config.
 - Without USER_REGISTRY=1, public command mail falls back to PUBLIC_ALLOWED_COMMANDS:
   {', '.join(cfg.public_allowed_commands)}
@@ -3960,8 +4193,10 @@ ttychatter.mailbot \- email transport adapter and remote control surface for tty
 ttychatter.mailbot bridges IMAP mail to a selected ttychatter subprocess and replies by sendmail or SMTP. The selected backend may be ttychatter.python, the C ttychatter binary, or ttychatter.bash. Install ttychatter.mailbot.1 beside the program or in man1 for the full manual.
 .SH BACKENDS
 TTYCHATTER_BACKEND accepts python, c, bash, auto, or command. TTYCHATTER_CLIENT is accepted as a legacy alias. TTYCHATTER_COMMAND overrides the backend map. Chat calls use --loopback --input - --session PATH for compatibility with current C, Python, and Bash clients.
+.SH API-KEY MODES
+USER_API_KEY_MODE accepts operator, persistent, session, or both. api-key stores a persistent per-user key when persistent mode is enabled. api-key-session stores a temporary runtime key that expires after USER_API_KEY_TTL_MINUTES. Temporary keys avoid long-term .config/.local/state storage but ordinary email is not confidential unless encrypted end-to-end.
 .SH FILES
-Default config follows XDG_CONFIG_HOME/ttychatter/mailbot/config. Sessions follow XDG_DATA_HOME/ttychatter/openrouter/sessions. Model cache follows XDG_CACHE_HOME/ttychatter/openrouter/models.json.
+Default config follows XDG_CONFIG_HOME/ttychatter/mailbot/config. Sessions follow XDG_DATA_HOME/ttychatter/openrouter/sessions. Model cache follows XDG_CACHE_HOME/ttychatter/openrouter/models.json. Temporary user API keys default to XDG_RUNTIME_DIR/ttychatter/mailbot/user-api-keys or /tmp/ttychatter-mailbot-UID/user-api-keys.
 """
 
 
@@ -4165,6 +4400,21 @@ def api_key_config_key(key: str) -> bool:
     return key.strip().upper() in {"OPENROUTER_API_KEY", "API_KEY", "TTYCHATTER_API_KEY"}
 
 
+def command_line_contains_api_key_secret_operand(command_line: str) -> bool:
+    try:
+        tokens = shlex.split(command_line or "")
+    except ValueError:
+        tokens = (command_line or "").split()
+    if not tokens:
+        return False
+    head = canonical_mailbot_command_word(tokens[0])
+    if head in {"api-key", "api-key-session"}:
+        return len(tokens) >= 2
+    if head == "tty-set" and len(tokens) >= 3 and api_key_config_key(tokens[1]):
+        return True
+    return False
+
+
 def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = False, sender: str = "") -> Tuple[bool, str, List[ReplyAttachment]]:
     braced_delete = parse_braced_delete_command(command_line or "")
     if braced_delete is not None:
@@ -4233,8 +4483,21 @@ def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = Fal
         "profile": "user",
         "registry": "user",
         "set-api-key": "api-key",
+        "save-api-key": "api-key",
+        "api-key-persistent": "api-key",
+        "persistent-api-key": "api-key",
+        "api-key-temp": "api-key-session",
+        "temp-api-key": "api-key-session",
+        "temporary-api-key": "api-key-session",
+        "session-api-key": "api-key-session",
+        "set-session-api-key": "api-key-session",
+        "key-status": "api-key-status",
         "forget-api-key": "forget-api-key",
+        "api-key-forget": "forget-api-key",
         "remove-api-key": "forget-api-key",
+        "forget-session-api-key": "forget-session-api-key",
+        "remove-session-api-key": "forget-session-api-key",
+        "api-key-session-forget": "forget-session-api-key",
         "archive-public-session": "archive-session",
         "archive-on-expire": "archive-session",
         "public-archive": "archive-session",
@@ -4293,17 +4556,42 @@ def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = Fal
         if len(args) != 1:
             return False, "usage: api-key OPENROUTER_API_KEY\n", []
         if dry_run:
-            return True, "[dry-run] would save per-user OpenRouter API key to a secret file\n", []
+            return True, "[dry-run] would save persistent per-user OpenRouter API key to a secret file\n", []
         try:
             return True, save_runtime_user_api_key(cfg, args[0]), []
         except Exception as exc:
             return False, f"api-key save failed: {exc}\n", []
 
+    if command == "api-key-session":
+        if len(args) != 1:
+            return False, "usage: api-key-session OPENROUTER_API_KEY\n", []
+        if dry_run:
+            return True, f"[dry-run] would save temporary per-user OpenRouter API key for {cfg.user_api_key_ttl_minutes} minutes\n", []
+        try:
+            return True, save_runtime_user_session_api_key(cfg, args[0]), []
+        except Exception as exc:
+            return False, f"api-key-session save failed: {exc}\n", []
+
+    if command == "api-key-status":
+        if args:
+            return False, "usage: api-key-status\n", []
+        return True, runtime_user_status(cfg), []
+
+    if command == "forget-session-api-key":
+        if args:
+            return False, "usage: forget-session-api-key\n", []
+        if dry_run:
+            return True, "[dry-run] would remove this user's temporary runtime OpenRouter API key\n", []
+        try:
+            return True, forget_runtime_user_session_api_key(cfg), []
+        except Exception as exc:
+            return False, f"forget-session-api-key failed: {exc}\n", []
+
     if command == "forget-api-key":
         if args:
             return False, "usage: forget-api-key\n", []
         if dry_run:
-            return True, "[dry-run] would remove this user's per-user OpenRouter API key\n", []
+            return True, "[dry-run] would remove this user's persistent and temporary OpenRouter API keys\n", []
         try:
             return True, forget_runtime_user_api_key(cfg), []
         except Exception as exc:
@@ -4510,7 +4798,7 @@ def dispatch_mailbot_command(cfg: Config, command_line: str, dry_run: bool = Fal
         value = " ".join(args[1:])
         if api_key_config_key(key):
             if dry_run:
-                return True, "[dry-run] would save per-user OpenRouter API key to a secret file\n", []
+                return True, "[dry-run] would save persistent per-user OpenRouter API key to a secret file\n", []
             try:
                 return True, save_runtime_user_api_key(cfg, value), []
             except Exception as exc:
@@ -4647,7 +4935,7 @@ def process_config_message(cfg: Config, conn: imaplib.IMAP4, uid: bytes, msg: Me
     return True
 
 
-def process_mailbot_command_message(cfg: Config, conn: imaplib.IMAP4, uid: bytes, msg: Message, command_line: str, dry_run: bool = False) -> bool:
+def process_mailbot_command_message(cfg: Config, conn: imaplib.IMAP4, uid: bytes, msg: Message, command_line: str, dry_run: bool = False, command_from_body: bool = False) -> bool:
     msgid = msg.get("Message-ID", f"imap-uid-{uid.decode(errors='replace')}")
     processed = load_processed(cfg.processed_db)
     if msgid in processed:
@@ -4655,17 +4943,29 @@ def process_mailbot_command_message(cfg: Config, conn: imaplib.IMAP4, uid: bytes
 
     body = extract_body(msg, cfg.max_body_bytes)
     body_first_line = first_command_line_from_body(body)
-    if command_line:
-        if body_first_line and command_line.strip() == body_first_line.strip():
-            # Body-command subjects already supplied the command as the first
-            # body line. Avoid converting Body: models into "models models".
-            command_line = command_line.strip()
-        else:
-            command_line = maybe_append_body_arguments(command_line, body)
+    original_command_line = (command_line or "").strip()
+    if cfg.api_key_commands_require_body and not command_from_body and command_line_contains_api_key_secret_operand(original_command_line):
+        ok = False
+        output = (
+            "API-key commands containing a secret must be placed in the message body, not the subject.\n\n"
+            "Use:\n\n"
+            f"  Subject: {subject_marker(cfg)}{cfg.command_subject_token}\n"
+            "  Body: api-key-session OPENROUTER_API_KEY\n\n"
+            "or Body: api-key OPENROUTER_API_KEY for persistent key storage.\n"
+        )
+        reply = build_control_reply(cfg, msg, redact_command_for_reply(original_command_line), output, ok, [])
     else:
-        command_line = body_first_line or "help"
-    ok, output, attachments = dispatch_mailbot_command(cfg, command_line, dry_run=dry_run, sender=message_sender(msg))
-    reply = build_control_reply(cfg, msg, command_line, output, ok, attachments)
+        if command_line:
+            if body_first_line and command_line.strip() == body_first_line.strip():
+                # Body-command subjects already supplied the command as the first
+                # body line. Avoid converting Body: models into "models models".
+                command_line = command_line.strip()
+            else:
+                command_line = maybe_append_body_arguments(command_line, body)
+        else:
+            command_line = body_first_line or "help"
+        ok, output, attachments = dispatch_mailbot_command(cfg, command_line, dry_run=dry_run, sender=message_sender(msg))
+        reply = build_control_reply(cfg, msg, command_line, output, ok, attachments)
 
     if dry_run:
         print(reply.as_string())
@@ -4746,7 +5046,7 @@ def process_message(cfg: Config, conn: imaplib.IMAP4, uid: bytes, dry_run: bool 
                 "public mode without USER_REGISTRY allows only: " + ", ".join(cfg.public_allowed_commands),
                 dry_run=dry_run,
             )
-        return process_mailbot_command_message(runtime_cfg, conn, uid, msg, request.value, dry_run=dry_run)
+        return process_mailbot_command_message(runtime_cfg, conn, uid, msg, request.value, dry_run=dry_run, command_from_body=request.command_from_body)
 
     session = request.value
     if public_unprivileged:
@@ -5088,6 +5388,11 @@ def print_config(cfg: Config) -> None:
     print(f"LEGACY_OPENROUTER_CONFIG_FILE={cfg.legacy_openrouter_config_file}")
     print(f"MIGRATE_PLAINTEXT_OPENROUTER_API_KEY={int(cfg.migrate_plaintext_openrouter_api_key)}")
     print(f"ALLOW_USER_API_KEYS={int(cfg.allow_user_api_keys)}")
+    print(f"USER_API_KEY_MODE={canonical_user_api_key_mode(cfg.user_api_key_mode)}")
+    print(f"USER_API_KEY_TTL_MINUTES={cfg.user_api_key_ttl_minutes}")
+    print(f"USER_API_KEY_RUNTIME_DIR={cfg.user_api_key_runtime_dir}")
+    print(f"USER_API_KEY_FALLBACK_TO_OPERATOR={int(cfg.user_api_key_fallback_to_operator)}")
+    print(f"API_KEY_COMMANDS_REQUIRE_BODY={int(cfg.api_key_commands_require_body)}")
     print(f"USER_TTYCONFIG_ALLOWED_KEYS={','.join(cfg.user_ttyconfig_allowed_keys)}")
     print(f"SPAM_PROTECTION={int(cfg.spam_protection)}")
     print(f"SPAM_REJECT_AUTO_SUBMITTED={int(cfg.spam_reject_auto_submitted)}")
@@ -5195,16 +5500,31 @@ MAIL SUBJECTS
 USER REGISTRY AND PREFERENCES
     USER_REGISTRY=1 creates a private ttychatter HOME per sender. The registry
     stores user metadata, while each user's ttychatter config stores allowed
-    non-secret preferences. API keys are stored outside .config as chmod 600
-    secret files and injected into ttychatter through the subprocess environment.
+    non-secret preferences. Persistent API keys are stored outside .config as
+    chmod 600 secret files; temporary API keys use USER_API_KEY_RUNTIME_DIR and
+    expire after USER_API_KEY_TTL_MINUTES. Keys are injected into ttychatter
+    through the subprocess environment.
+
+    API-key modes:
+      USER_API_KEY_MODE=operator     Use only the operator/default key
+      USER_API_KEY_MODE=persistent   Allow saved per-user secret files
+      USER_API_KEY_MODE=session      Allow temporary runtime per-user keys
+      USER_API_KEY_MODE=both         Allow temporary keys, then persistent keys
+      API_KEY_COMMANDS_REQUIRE_BODY=1 refuses subject-line secrets
 
     Email commands:
       tc:user                    Show this sender's registry status
       tc:prefs                   Show this sender's ttychatter config
       tc:set MODEL openrouter/free
       tc:set CONTEXT_TURNS 12
-      tc:api-key KEY             Save this sender's OpenRouter key to a secret file
-      tc:forget-api-key          Remove this sender's key and use the server default
+      tc:api-key-status          Show key mode/source/expiry
+      tc:forget-api-key          Remove persistent and temporary user keys
+      tc:forget-session-api-key  Remove only the temporary runtime key
+
+    Put API-key secrets in the body, not the subject:
+      Subject: tc:CMD
+      Body: api-key-session OPENROUTER_API_KEY
+      Body: api-key OPENROUTER_API_KEY
 
 PUBLIC MODE
     --open-to-public accepts non-control subjects as prompts from any sender.
@@ -5247,7 +5567,10 @@ SECURITY
     enabled for ALLOWED_FROM=*. DENY_FROM blocks listed senders before
     allowlist or public-mode checks. Spam protection rejects auto-submitted and
     list/bulk mail, and rate limits work by sender and globally. Email is not
-    a confidential transport; use api-key only when you accept that risk.
+    a confidential transport; api-key and api-key-session avoid long-term
+    plaintext config storage but cannot hide secrets from ordinary mail-server
+    storage or a trusted host administrator. Use encrypted mail if the key must
+    remain private in transit.
 """
 
 
