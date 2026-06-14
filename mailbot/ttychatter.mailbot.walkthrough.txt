@@ -488,6 +488,46 @@ Attachment support still depends on the selected model and backend behavior.
 The mailbot should be treated as the transport layer, not the multimodal model
 compatibility checker.
 
+AI-returned file attachments
+----------------------------
+
+The ttychatter backends now understand provider-returned file metadata when an
+AI/provider response contains downloadable files, data URLs, or base64 payloads.
+The mailbot should not silently download arbitrary returned files by default.
+
+Operator defaults:
+
+    AI_FILE_DOWNLOAD_MODE=metadata
+    MAILBOT_SEND_AI_FILES=1
+
+Supported modes:
+
+    AI_FILE_DOWNLOAD_MODE=ask       noninteractive mailbot use records metadata only
+    AI_FILE_DOWNLOAD_MODE=metadata  list returned files without saving them
+    AI_FILE_DOWNLOAD_MODE=auto      save all returned files under ATTACHMENT_DIR/received
+    AI_FILE_DOWNLOAD_MODE=off       ignore returned file metadata
+
+If MAILBOT_SEND_AI_FILES=1 and auto mode saves returned files under the shared
+ATTACHMENT_DIR, the mailbot attaches those saved files to the outgoing reply,
+subject to MAX_OUTGOING_ATTACHMENT_BYTES.
+
+For per-sender registry users, allow AI_FILE_DOWNLOAD_MODE in
+USER_TTYCONFIG_ALLOWED_KEYS, then the user can opt in by email:
+
+    Subject: tc:CMD
+
+    tty-set AI_FILE_DOWNLOAD_MODE auto
+
+They can return to metadata-only behavior with:
+
+    Subject: tc:CMD
+
+    tty-set AI_FILE_DOWNLOAD_MODE metadata
+
+This feature is separate from local user-to-AI attachments and from code-block
+extraction. It only applies to provider-returned file objects or file-like
+content in model responses.
+
 Model cache commands
 --------------------
 

@@ -1,4 +1,4 @@
-.TH TTYCHATTER.MAILBOT 1 "June 2026" "ttychatter.mailbot 0.6.3-mailbot-api-key-privacy" "User Commands"
+.TH TTYCHATTER.MAILBOT 1 "June 2026" "ttychatter.mailbot 0.6.4-ai-file-receipt" "User Commands"
 .SH NAME
 ttychatter.mailbot \- email transport adapter and remote control surface for ttychatter
 .SH SYNOPSIS
@@ -339,11 +339,36 @@ RATE_LIMIT_ENABLED,
 DAILY_QUOTA_ENABLED, MAX_SESSIONS_PER_SENDER, API_COST_PROTECTION,
 API_MAX_INPUT_CHARS, API_MAX_ESTIMATED_TOKENS, API_MAX_ATTACHMENT_BYTES,
 TTYCHATTER_BACKEND, TTYCHATTER_CLIENT, TTYCHATTER_COMMAND, TTYCHATTER_EXTRA_ARGS,
-TTYCHATTER_CONTROL_TIMEOUT, MODEL_CACHE_FILE, SESSION_DIR, ATTACHMENT_DIR,
+AI_FILE_DOWNLOAD_MODE, MAILBOT_SEND_AI_FILES, TTYCHATTER_CONTROL_TIMEOUT, MODEL_CACHE_FILE, SESSION_DIR, ATTACHMENT_DIR,
 WORK_DIR, PROCESSED_DB, COMMAND_OUTPUT_MODE, MODEL_CACHE_OUTPUT,
 MODEL_SEARCH_OUTPUT, MODEL_LIST_OUTPUT, SESSIONS_OUTPUT, CONFIG_OUTPUT,
 OUTPUT_INLINE_MAX_BYTES, MAX_COMMAND_OUTPUT_BYTES, and
 MAX_OUTGOING_ATTACHMENT_BYTES.
+
+.SH AI-RETURNED FILE ATTACHMENTS
+Current ttychatter backends can record provider-returned file attachments when a
+provider exposes downloadable file metadata, data URLs, or base64 payloads in the
+chat response. The mailbot is noninteractive, so the safest default is metadata
+only unless the operator or user explicitly enables downloading.
+.PP
+Set AI_FILE_DOWNLOAD_MODE to ask, metadata, auto, or off. In mailbot use, ask
+degrades to metadata because there is no terminal prompt. metadata lists returned
+files in the reply body without saving them. auto passes --ai-download auto to
+the selected ttychatter backend and saves returned files under
+ATTACHMENT_DIR/received when possible. off ignores returned file metadata.
+.PP
+When MAILBOT_SEND_AI_FILES=1, saved returned files located under ATTACHMENT_DIR
+are attached to the outgoing email reply, subject to MAX_OUTGOING_ATTACHMENT_BYTES.
+Users in registry mode may request downloads with a tty-set command when
+USER_TTYCONFIG_ALLOWED_KEYS allows AI_FILE_DOWNLOAD_MODE:
+.PP
+.RS
+.nf
+Subject: tc:CMD
+tty-set AI_FILE_DOWNLOAD_MODE auto
+.fi
+.RE
+
 .SH XDG PATHS
 Without overrides, ttychatter.mailbot follows the XDG base-directory layout:
 .PP

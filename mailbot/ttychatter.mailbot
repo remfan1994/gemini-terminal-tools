@@ -52,7 +52,7 @@ from pathlib import Path
 from typing import Any, Iterable, List, Optional, Tuple
 
 PROGRAM = "ttychatter.mailbot"
-VERSION = "0.6.3-mailbot-api-key-privacy"
+VERSION = "0.6.4-ai-file-receipt"
 AUTOMATED_MAILBOT_NOTICE = "I strongly encourage everyone to get cruelty-free vegetarian food and fear the AVENGER OF DEATH.  --BLOODGUILTCURSE.NET"
 
 
@@ -193,6 +193,9 @@ class Config:
     ttychatter_command: str = "ttychatter.python"
     ttychatter_command_configured: bool = False
     ttychatter_extra_args: str = ""
+    ai_file_download_mode: str = "metadata"
+    ai_file_download_mode_configured: bool = False
+    mailbot_send_ai_files: bool = True
     ttychatter_control_timeout: int = 180
     session_dir: Path = DEFAULT_SESSION_DIR
     attachment_dir: Path = DEFAULT_ATTACHMENT_DIR
@@ -247,6 +250,7 @@ class Config:
         "CODE_ATTACHMENT_MIN_LINES", "MAX_ATTACHMENT_BYTES", "EDITOR",
         "STREAM", "STATUS_UPDATES", "SESSION_AUTO_TITLE",
         "SESSION_TITLE_MODEL", "SESSION_TITLE_MAX_WORDS",
+        "AI_FILE_DOWNLOAD_MODE",
     ])
 
     # Anti-abuse defaults are conservative and cheap: reject common mail-loop
@@ -653,6 +657,12 @@ def load_config(path: Path = DEFAULT_CONFIG_FILE) -> Config:
             cfg.ttychatter_command = value
             cfg.ttychatter_command_configured = True
         elif key == "TTYCHATTER_EXTRA_ARGS": cfg.ttychatter_extra_args = value
+        elif key in {"AI_FILE_DOWNLOAD_MODE", "AI_DOWNLOAD"}:
+            val = normalize_keyword(value)
+            if val in {"ask", "auto", "metadata", "off"}:
+                cfg.ai_file_download_mode = val
+                cfg.ai_file_download_mode_configured = True
+        elif key == "MAILBOT_SEND_AI_FILES": cfg.mailbot_send_ai_files = parse_bool(value, cfg.mailbot_send_ai_files)
         elif key == "SESSION_DIR": cfg.session_dir = expand_path(value)
         elif key == "ATTACHMENT_DIR": cfg.attachment_dir = expand_path(value)
         elif key == "WORK_DIR": cfg.work_dir = expand_path(value)
@@ -3367,6 +3377,8 @@ def run_ttychatter(cfg: Config, session: str, body: str, attachments: List[Path]
 
     target_path = mailbot_session_target_path(cfg, session)
     cmd.extend(extra_args)
+    if cfg.ai_file_download_mode_configured and cfg.ai_file_download_mode:
+        cmd.extend(["--ai-download", cfg.ai_file_download_mode])
     cmd.extend(["--loopback", "--input", "-"])
     for path in attachments:
         cmd.extend(["--attach", str(path)])
@@ -3489,6 +3501,48 @@ def read_file_attachment(path: Path, cfg: Config, filename: Optional[str] = None
     if path.suffix.lower() == ".json":
         maintype, subtype = "application", "json"
     return ReplyAttachment(filename or safe_filename(path.name), data, maintype, subtype), f"attached: {filename or path.name} ({len(data)} bytes)"
+
+
+
+def ai_saved_file_paths_from_text(text: str) -> List[Path]:
+    paths: List[Path] = []
+    seen: set[str] = set()
+    for raw in (text or "").splitlines():
+        m = re.search(r"^saved\s+\d+\s*:\s+.*?\s+->\s+(.+)$", raw.strip())
+        if not m:
+            continue
+        candidate = Path(m.group(1).strip())
+        key = str(candidate)
+        if key not in seen:
+            seen.add(key)
+            paths.append(candidate)
+    return paths
+
+
+def ai_reply_attachments(cfg: Config, body: str) -> List[ReplyAttachment]:
+    if not cfg.mailbot_send_ai_files:
+        return []
+    out: List[ReplyAttachment] = []
+    try:
+        allowed_root = cfg.attachment_dir.resolve()
+    except OSError:
+        allowed_root = cfg.attachment_dir
+    for path in ai_saved_file_paths_from_text(body):
+        try:
+            resolved = path.expanduser().resolve()
+        except OSError:
+            continue
+        # Do not turn arbitrary text paths into outbound mail attachments. Only
+        # backend-saved files under ATTACHMENT_DIR are eligible.
+        try:
+            if allowed_root not in [resolved, *resolved.parents]:
+                continue
+        except Exception:
+            continue
+        attachment, _note = read_file_attachment(resolved, cfg, resolved.name)
+        if attachment:
+            out.append(attachment)
+    return out
 
 
 def model_cache_candidates(cfg: Config) -> List[Path]:
@@ -3734,6 +3788,13 @@ def build_reply(cfg: Config, original: Message, session: str, body: str, stderr_
     if cfg.include_ttychatter_stderr and stderr_text:
         text.extend(["", "--- ttychatter stderr ---", stderr_text])
     msg.set_content(mailbot_reply_body(cfg, "\n".join(text), status, session=session))
+    for attachment in ai_reply_attachments(cfg, body if ok else ""):
+        msg.add_attachment(
+            attachment.data,
+            maintype=attachment.maintype,
+            subtype=attachment.subtype,
+            filename=attachment.filename,
+        )
     return msg
 
 
@@ -5356,6 +5417,8 @@ def print_config(cfg: Config) -> None:
     print(f"TTYCHATTER_COMMAND={cfg.ttychatter_command}")
     print(f"TTYCHATTER_RESOLVED_COMMAND={resolved_ttychatter_command(cfg)}")
     print(f"TTYCHATTER_EXTRA_ARGS={cfg.ttychatter_extra_args}")
+    print(f"AI_FILE_DOWNLOAD_MODE={cfg.ai_file_download_mode}{' (configured)' if cfg.ai_file_download_mode_configured else ' (backend default/noninteractive metadata)'}")
+    print(f"MAILBOT_SEND_AI_FILES={int(cfg.mailbot_send_ai_files)}")
     print(f"TTYCHATTER_CONTROL_TIMEOUT={cfg.ttychatter_control_timeout}")
     print(f"SESSION_DIR={cfg.session_dir}")
     print(f"ATTACHMENT_DIR={cfg.attachment_dir}")
@@ -5547,6 +5610,15 @@ OUTPUT MODES
     MODEL_SEARCH_OUTPUT, MODEL_LIST_OUTPUT, SESSIONS_OUTPUT, and CONFIG_OUTPUT
     accept auto, body, or attachment.
 
+AI-RETURNED FILES
+    AI_FILE_DOWNLOAD_MODE controls provider-returned files from the ttychatter
+    backend: ask, metadata, auto, or off. In mailbot use, ask records metadata
+    because there is no terminal prompt. auto saves returned files under
+    ATTACHMENT_DIR/received when possible. MAILBOT_SEND_AI_FILES=1 attaches
+    saved returned files from ATTACHMENT_DIR to the outgoing reply, subject to
+    MAX_OUTGOING_ATTACHMENT_BYTES. Registry users may opt in with:
+      tc:CMD
+      tty-set AI_FILE_DOWNLOAD_MODE auto
 
 TTYCHATTER BACKEND
     TTYCHATTER_BACKEND selects the subprocess client: python, c, bash, auto,
