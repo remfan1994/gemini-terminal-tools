@@ -113,6 +113,9 @@ OPTIONS
         --no-stream
             Disable streaming for this run even when STREAM=1 is configured.
 
+        --ai-download MODE
+            Control provider-returned file attachments. MODE is ask, auto, metadata, or off. ask prompts in interactive terminal use and records metadata in noninteractive use. auto downloads all returned files under ATTACHMENT_DIR/received.
+
         --status
             Print local ttychatter progress notes to standard error.  These are
             client-side status updates, not hidden model chain-of-thought.
@@ -533,6 +536,8 @@ RUNTIME COMMANDS
         :edit N
         :edit-turn N
         :stream on|off
+
+        :ai-download ask|auto|metadata|off
         :status on|off
         :progress on|off
         :voice FILE
@@ -684,6 +689,8 @@ CONFIGURATION
     compatibility keys.
 
 STREAMING AND STATUS
+    AI_FILE_DOWNLOAD_MODE controls provider-returned file attachments.  The supported values are ask, auto, metadata, and off.  The default ask mode prompts before saving when a terminal can answer and records metadata only in batch contexts.  This concerns provider-returned files, not local --attach input files or code-fence extraction.
+
     Streaming is real-time assistant-content output.  Use --stream or STREAM=1
     to print content as it arrives while still saving the final complete
     assistant response to the log.  Press ESC during an active stream to stop it

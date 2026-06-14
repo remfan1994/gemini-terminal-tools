@@ -87,6 +87,7 @@ General and chat/session options:
     -m, --model MODEL
     -a, --attach FILE
     --stream / --no-stream
+    --ai-download ask|auto|metadata|off
     --status / --no-status
     --progress / --no-progress
     --voice-input FILE
@@ -285,6 +286,8 @@ session log. During an active stream, press ESC to stop the response; ttychatter
 saves the partial assistant text with an interruption marker and leaves the
 session open.
 
+Provider-returned file attachments are conservative by default.  AI_FILE_DOWNLOAD_MODE=ask asks before saving files when a terminal is available; in noninteractive use it records metadata only.  Use --ai-download auto to save all returned files under ATTACHMENT_DIR/received, metadata to list without downloading, or off to ignore them.
+
 Local status updates are separate from streaming.  They report client-side work
 such as preparing a request, loading context, waiting for a response, and saving
 the log:
@@ -405,6 +408,7 @@ can choose the control plane that fits the terminal workflow:
     :branch N, :fork N     --branch SESSION N
     :edit N, :edit-turn N  --edit-turn SESSION N
     :stream on|off         --stream / --no-stream, STREAM=1/0
+    :ai-download MODE      --ai-download MODE, AI_FILE_DOWNLOAD_MODE=MODE
     :status on|off         --status / --no-status, STATUS_UPDATES=1/0
     :progress on|off       alias for :status
     :voice FILE            --voice-input FILE

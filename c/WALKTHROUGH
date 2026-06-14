@@ -178,6 +178,7 @@ stop it and save the partial assistant reply with an interruption marker:
 
     ./ttychatter --stream --prompt 'Explain what a Unix pipeline is.'
     ./ttychatter --stream --interactive notes
+    ./ttychatter --ai-download metadata --prompt 'Generate a file if supported.'
 
 Status/progress updates are local ttychatter messages on stderr.  They describe
 client work such as loading context and saving logs.  They are not hidden model
@@ -223,7 +224,8 @@ The command may contain %f for the input file path; otherwise ttychatter appends
 the path:
 
     ./ttychatter --set 'VOICE_INPUT_CMD=whisper-cli -f %f'
-    ./ttychatter --voice-input question.wav --session voice-notes
+    ./ttychatter --voice-input question.wav
+    ./ttychatter --ai-download ask --prompt 'Return a downloadable file if your provider supports it.' --session voice-notes
 
 The --transcribe flag is an alias for --voice-input.
 
@@ -279,6 +281,7 @@ Useful non-walkthrough flags are listed here so this file stays aligned with
     ./ttychatter --stream --prompt 'hello'
     ./ttychatter --status --prompt 'hello'
     ./ttychatter --voice-input question.wav
+    ./ttychatter --ai-download ask --prompt 'Return a downloadable file if your provider supports it.'
     ./ttychatter --speak --prompt 'hello'
     ./ttychatter --no-stream --prompt 'hello'
     ./ttychatter --no-status --prompt 'hello'
@@ -337,6 +340,8 @@ Inside the prompt, use colon commands for local control:
     :edit-turn 1
     :stream on
     :stream off
+    :ai-download ask
+    :ai-download metadata
     :status on
     :status off
     :progress on
@@ -358,3 +363,8 @@ Inside the prompt, use colon commands for local control:
 
 These commands are handled by ttychatter itself and are not sent to the AI.
 Use ./ttychatter --help or man ttychatter for the full command-line option list.
+
+AI file receipt
+---------------
+
+If a provider returns file artifacts, ttychatter does not silently download them by default.  Configure AI_FILE_DOWNLOAD_MODE=ask, auto, metadata, or off, or use --ai-download MODE.  Interactive ask mode prompts per file; noninteractive ask mode records metadata only.  Saved files go under ATTACHMENT_DIR/received.
