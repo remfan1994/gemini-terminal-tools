@@ -54,7 +54,7 @@
 #include <unistd.h>
 
 #define TC_PROGRAM "ttychatter"
-#define TC_VERSION "0.6.1-c-cli"
+#define TC_VERSION "0.6.2-c-cli"
 #define TC_OPENROUTER_CHAT_URL "https://openrouter.ai/api/v1/chat/completions"
 #define TC_OPENROUTER_MODELS_URL "https://openrouter.ai/api/v1/models"
 
@@ -92,6 +92,7 @@ typedef struct TCConfig {
     char *model_favorites_file;
     char *session_dir;
     char *attachment_dir;
+    char *ai_file_download_mode;
     long context_turns;
     long session_title_max_words;
     long code_attachment_min_lines;
@@ -193,6 +194,7 @@ typedef struct TCArgs {
     char *input_path;
     char *output_path;
     char *voice_input_path;
+    char *ai_file_download_mode;
     char **attachments;
     size_t attachment_count;
 } TCArgs;
@@ -748,6 +750,7 @@ static void config_init_defaults(TCConfig *cfg) {
     cfg->model_favorites_file = xdg_config_provider_file("model-favorites");
     cfg->session_dir = xdg_data_dir("sessions");
     cfg->attachment_dir = xdg_data_dir("attachments");
+    cfg->ai_file_download_mode = xstrdup("ask");
     cfg->context_turns = 12;
     cfg->session_title_max_words = 8;
     cfg->code_attachment_min_lines = 5;
@@ -800,6 +803,9 @@ static void config_set(TCConfig *cfg, const char *key, const char *value) {
     } else if (strcmp(key, "ATTACHMENT_DIR") == 0) {
         free(cfg->attachment_dir);
         cfg->attachment_dir = expand_tilde(value);
+    } else if (strcmp(key, "AI_FILE_DOWNLOAD_MODE") == 0 || strcmp(key, "AI_DOWNLOAD") == 0) {
+        free(cfg->ai_file_download_mode);
+        cfg->ai_file_download_mode = xstrdup(value);
     } else if (strcmp(key, "CONTEXT_TURNS") == 0 || strcmp(key, "HISTORY_LIMIT") == 0) {
         cfg->context_turns = atol(value) > 0 ? atol(value) : cfg->context_turns;
     } else if (strcmp(key, "SESSION_TITLE_MAX_WORDS") == 0) {
@@ -973,6 +979,12 @@ static bool effective_stream(const TCConfig *cfg, const TCArgs *args) {
     return cfg && cfg->stream;
 }
 
+static const char *effective_ai_file_download_mode(const TCConfig *cfg, const TCArgs *args) {
+    if (args && args->ai_file_download_mode && *args->ai_file_download_mode) return args->ai_file_download_mode;
+    if (cfg && cfg->ai_file_download_mode && *cfg->ai_file_download_mode) return cfg->ai_file_download_mode;
+    return "ask";
+}
+
 static bool effective_status_updates(const TCConfig *cfg, const TCArgs *args) {
     if (args && args->status_set) return args->status_updates;
     return cfg && cfg->status_updates;
@@ -1023,7 +1035,7 @@ static TCHttpResponse http_request(const char *url, const char *method, const ch
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &b);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "ttychatter-c-cli/0.6.1");
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "ttychatter-c-cli/0.6.2");
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
     if (strcmp(method, "POST") == 0) {
         curl_easy_setopt(curl, CURLOPT_POST, 1L);
@@ -1242,7 +1254,7 @@ static TCHttpResponse http_request_stream(const char *url, const char *api_key, 
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_sse_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &st);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "ttychatter-c-cli/0.6.1");
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "ttychatter-c-cli/0.6.2");
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 0L);
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, curl_sse_xferinfo_cb);
@@ -2058,6 +2070,427 @@ static char *extract_code_blocks(const TCConfig *cfg, const char *session_base, 
     return buffer_take(&out);
 }
 
+
+/* ------------------------------------------------------------------------- */
+/* Assistant-returned file attachment receipt                                */
+/* ------------------------------------------------------------------------- */
+
+typedef struct TCAIFile {
+    char *name;
+    char *mime;
+    char *url;
+    char *data;
+    char *file_id;
+    char *source;
+} TCAIFile;
+
+typedef struct TCAIFileList {
+    TCAIFile *items;
+    size_t count;
+    size_t cap;
+} TCAIFileList;
+
+static void ai_files_init(TCAIFileList *list) {
+    memset(list, 0, sizeof(*list));
+}
+
+static void ai_file_free(TCAIFile *f) {
+    if (!f) return;
+    free(f->name); free(f->mime); free(f->url); free(f->data); free(f->file_id); free(f->source);
+    memset(f, 0, sizeof(*f));
+}
+
+static void ai_files_free(TCAIFileList *list) {
+    if (!list) return;
+    for (size_t i = 0; i < list->count; i++) ai_file_free(&list->items[i]);
+    free(list->items);
+    memset(list, 0, sizeof(*list));
+}
+
+static const char *json_string_member(json_object *obj, const char *key) {
+    json_object *v = NULL;
+    if (!obj || !json_object_is_type(obj, json_type_object)) return NULL;
+    if (!json_object_object_get_ex(obj, key, &v) || !v || json_object_is_type(v, json_type_null)) return NULL;
+    if (json_object_is_type(v, json_type_string)) return json_object_get_string(v);
+    return NULL;
+}
+
+static char *json_dup_first_string(json_object *obj, const char **keys) {
+    for (size_t i = 0; keys[i]; i++) {
+        const char *s = json_string_member(obj, keys[i]);
+        if (s && *s) return xstrdup(s);
+    }
+    return NULL;
+}
+
+static bool is_ai_file_type(const char *type) {
+    if (!type) return false;
+    return strcasecmp(type, "file") == 0 || strcasecmp(type, "output_file") == 0 ||
+           strcasecmp(type, "attachment") == 0 || strcasecmp(type, "artifact") == 0 ||
+           strcasecmp(type, "image_url") == 0 || strcasecmp(type, "image") == 0 ||
+           strcasecmp(type, "audio") == 0 || strcasecmp(type, "video") == 0;
+}
+
+static bool ai_file_seen(TCAIFileList *list, const char *url, const char *data, const char *file_id) {
+    for (size_t i = 0; i < list->count; i++) {
+        TCAIFile *f = &list->items[i];
+        if (url && f->url && strcmp(url, f->url) == 0) return true;
+        if (data && f->data && strcmp(data, f->data) == 0) return true;
+        if (file_id && f->file_id && strcmp(file_id, f->file_id) == 0) return true;
+    }
+    return false;
+}
+
+static void ai_files_add(TCAIFileList *list, char *name, char *mime, char *url, char *data, char *file_id, const char *source) {
+    if ((!url || !*url) && (!data || !*data) && (!file_id || !*file_id)) {
+        free(name); free(mime); free(url); free(data); free(file_id);
+        return;
+    }
+    if (ai_file_seen(list, url, data, file_id)) {
+        free(name); free(mime); free(url); free(data); free(file_id);
+        return;
+    }
+    if (list->count == list->cap) {
+        list->cap = list->cap ? list->cap * 2 : 8;
+        TCAIFile *p = realloc(list->items, list->cap * sizeof(*list->items));
+        if (!p) die("out of memory");
+        list->items = p;
+    }
+    TCAIFile *f = &list->items[list->count++];
+    memset(f, 0, sizeof(*f));
+    f->name = (name && *name) ? name : xstrdup("assistant-file");
+    if (name && !*name) free(name);
+    f->mime = (mime && *mime) ? mime : xstrdup("application/octet-stream");
+    if (mime && !*mime) free(mime);
+    f->url = url;
+    f->data = data;
+    f->file_id = file_id;
+    f->source = xstrdup(source ? source : "provider response");
+}
+
+static void collect_ai_file_from_object(json_object *obj, TCAIFileList *files, const char *source) {
+    if (!obj || !json_object_is_type(obj, json_type_object)) return;
+    const char *type = json_string_member(obj, "type");
+
+    json_object *nested = NULL;
+    if (json_object_object_get_ex(obj, "image_url", &nested) && json_object_is_type(nested, json_type_object)) {
+        const char *url = json_string_member(nested, "url");
+        if (url && *url) ai_files_add(files, json_dup_first_string(obj, (const char *[]) {"filename", "name", NULL}), xstrdup("image/*"), xstrdup(url), NULL, NULL, "message.image_url");
+    }
+    if (json_object_object_get_ex(obj, "audio", &nested) && json_object_is_type(nested, json_type_object)) {
+        const char *data = json_string_member(nested, "data");
+        const char *fmt = json_string_member(nested, "format");
+        if (data && *data) {
+            char nm[64];
+            snprintf(nm, sizeof(nm), "assistant-audio.%s", (fmt && *fmt) ? fmt : "bin");
+            char mt[64];
+            snprintf(mt, sizeof(mt), "audio/%s", (fmt && *fmt) ? fmt : "octet-stream");
+            ai_files_add(files, xstrdup(nm), xstrdup(mt), NULL, xstrdup(data), NULL, "message.audio");
+        }
+    }
+    if (json_object_object_get_ex(obj, "file", &nested) && json_object_is_type(nested, json_type_object)) {
+        collect_ai_file_from_object(nested, files, "message.file");
+    }
+
+    const char *name_keys[] = {"filename", "file_name", "name", "title", NULL};
+    const char *mime_keys[] = {"mime_type", "mime", "content_type", "media_type", NULL};
+    const char *url_keys[] = {"download_url", "file_url", "content_url", "url", "href", NULL};
+    const char *data_keys[] = {"data", "base64", "b64_json", "bytes", NULL};
+    const char *id_keys[] = {"file_id", "id", NULL};
+    char *name = json_dup_first_string(obj, name_keys);
+    char *mime = json_dup_first_string(obj, mime_keys);
+    char *url = json_dup_first_string(obj, url_keys);
+    char *data = json_dup_first_string(obj, data_keys);
+    char *file_id = json_dup_first_string(obj, id_keys);
+    bool looks_like_file = is_ai_file_type(type) || name || url || data || (file_id && type && strstr(type, "file"));
+    if (looks_like_file) {
+        ai_files_add(files, name, mime, url, data, file_id, source);
+    } else {
+        free(name); free(mime); free(url); free(data); free(file_id);
+    }
+}
+
+static void collect_ai_files_from_member(json_object *obj, const char *key, TCAIFileList *files, const char *source) {
+    json_object *v = NULL;
+    if (!obj || !json_object_object_get_ex(obj, key, &v) || !v) return;
+    if (json_object_is_type(v, json_type_array)) {
+        size_t n = json_object_array_length(v);
+        for (size_t i = 0; i < n; i++) collect_ai_file_from_object(json_object_array_get_idx(v, i), files, source);
+    } else if (json_object_is_type(v, json_type_object)) {
+        collect_ai_file_from_object(v, files, source);
+    }
+}
+
+static void append_text_and_collect_files(json_object *content, TCBuffer *text, TCAIFileList *files) {
+    if (!content || json_object_is_type(content, json_type_null)) return;
+    if (json_object_is_type(content, json_type_string)) {
+        buffer_append(text, json_object_get_string(content));
+        return;
+    }
+    if (json_object_is_type(content, json_type_array)) {
+        size_t n = json_object_array_length(content);
+        for (size_t i = 0; i < n; i++) {
+            json_object *part = json_object_array_get_idx(content, i);
+            if (json_object_is_type(part, json_type_string)) {
+                buffer_append(text, json_object_get_string(part));
+                continue;
+            }
+            if (!json_object_is_type(part, json_type_object)) continue;
+            const char *type = json_string_member(part, "type");
+            const char *txt = json_string_member(part, "text");
+            if (!txt) txt = json_string_member(part, "content");
+            if (txt && (!type || strcasecmp(type, "text") == 0 || !is_ai_file_type(type))) {
+                if (text->len > 0) buffer_append(text, "\n");
+                buffer_append(text, txt);
+            }
+            if (is_ai_file_type(type) || json_string_member(part, "url") || json_string_member(part, "download_url") || json_string_member(part, "data")) {
+                collect_ai_file_from_object(part, files, "message.content part");
+            }
+        }
+        return;
+    }
+    if (json_object_is_type(content, json_type_object)) {
+        const char *txt = json_string_member(content, "text");
+        if (!txt) txt = json_string_member(content, "content");
+        if (txt) buffer_append(text, txt);
+        collect_ai_file_from_object(content, files, "message.content object");
+    }
+}
+
+static int b64_value(unsigned char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+static unsigned char *base64_decode_alloc(const char *input, size_t *out_len) {
+    TCBuffer clean;
+    buffer_init(&clean);
+    for (const char *p = input ? input : ""; *p; p++) {
+        if (isalnum((unsigned char)*p) || *p == '+' || *p == '/' || *p == '=') buffer_append_n(&clean, p, 1);
+    }
+    size_t len = clean.len;
+    unsigned char *out = xcalloc((len / 4) * 3 + 4, 1);
+    size_t o = 0;
+    for (size_t i = 0; i + 3 < len; i += 4) {
+        int a = b64_value((unsigned char)clean.data[i]);
+        int b = b64_value((unsigned char)clean.data[i+1]);
+        int c = clean.data[i+2] == '=' ? -2 : b64_value((unsigned char)clean.data[i+2]);
+        int d = clean.data[i+3] == '=' ? -2 : b64_value((unsigned char)clean.data[i+3]);
+        if (a < 0 || b < 0 || c < -1 || d < -1) continue;
+        out[o++] = (unsigned char)((a << 2) | (b >> 4));
+        if (c >= 0) out[o++] = (unsigned char)(((b & 15) << 4) | (c >> 2));
+        if (c >= 0 && d >= 0) out[o++] = (unsigned char)(((c & 3) << 6) | d);
+    }
+    free(clean.data);
+    if (out_len) *out_len = o;
+    return out;
+}
+
+static const char *ext_for_mime(const char *mime) {
+    if (!mime) return ".bin";
+    if (strstr(mime, "json")) return ".json";
+    if (strstr(mime, "tar")) return ".tar";
+    if (strstr(mime, "gzip") || strstr(mime, "gz")) return ".gz";
+    if (strstr(mime, "zip")) return ".zip";
+    if (starts_with(mime, "text/")) return ".txt";
+    if (strcmp(mime, "image/png") == 0) return ".png";
+    if (strcmp(mime, "image/jpeg") == 0) return ".jpg";
+    if (strcmp(mime, "image/gif") == 0) return ".gif";
+    if (strcmp(mime, "application/pdf") == 0) return ".pdf";
+    if (starts_with(mime, "audio/wav") || strcmp(mime, "audio/x-wav") == 0) return ".wav";
+    if (starts_with(mime, "audio/mpeg") || strcmp(mime, "audio/mp3") == 0) return ".mp3";
+    if (starts_with(mime, "audio/flac")) return ".flac";
+    return ".bin";
+}
+
+static char *sanitize_file_leaf(const char *name) {
+    TCBuffer b;
+    buffer_init(&b);
+    const char *base = name && *name ? name : "assistant-file";
+    const char *slash = strrchr(base, '/');
+    if (slash) base = slash + 1;
+    for (const char *p = base; *p && b.len < 96; p++) {
+        char c = *p;
+        if (isalnum((unsigned char)c) || c == '.' || c == '-' || c == '_') buffer_append_n(&b, &c, 1);
+        else if (isspace((unsigned char)c)) buffer_append(&b, "-");
+    }
+    if (b.len == 0 || strcmp(b.data, ".") == 0 || strcmp(b.data, "..") == 0) {
+        free(b.data);
+        return xstrdup("assistant-file");
+    }
+    return buffer_take(&b);
+}
+
+static char *unique_ai_file_path(const TCConfig *cfg, const TCAIFile *file) {
+    char *dir = path_join2(cfg->attachment_dir, "received");
+    mkdir_p(dir);
+    char *leaf = sanitize_file_leaf(file->name);
+    if (!strchr(leaf, '.')) {
+        char *with_ext;
+        const char *ext = ext_for_mime(file->mime);
+        TCBuffer tmp;
+        buffer_init(&tmp);
+        buffer_append(&tmp, leaf);
+        buffer_append(&tmp, ext);
+        with_ext = buffer_take(&tmp);
+        free(leaf);
+        leaf = with_ext;
+    }
+    char *path = path_join2(dir, leaf);
+    if (!file_exists(path)) { free(dir); free(leaf); return path; }
+    char *stem = xstrdup(leaf);
+    char *dot = strrchr(stem, '.');
+    char *ext = NULL;
+    if (dot && dot != stem) { ext = xstrdup(dot); *dot = '\0'; } else ext = xstrdup("");
+    free(path);
+    for (int i = 1; i < 10000; i++) {
+        TCBuffer candidate;
+        buffer_init(&candidate);
+        buffer_appendf(&candidate, "%s/%s-%03d%s", dir, stem, i, ext);
+        path = buffer_take(&candidate);
+        if (!file_exists(path)) break;
+        free(path); path = NULL;
+    }
+    free(dir); free(leaf); free(stem); free(ext);
+    return path ? path : xstrdup("assistant-file.bin");
+}
+
+static bool parse_data_url(const char *url, char **mime_out, char **b64_out) {
+    if (!url || !starts_with(url, "data:")) return false;
+    const char *comma = strchr(url, ',');
+    if (!comma) return false;
+    const char *semi = strstr(url, ";base64");
+    if (!semi || semi > comma) return false;
+    size_t mime_len = (size_t)(semi - (url + 5));
+    char *mime = xcalloc(mime_len + 1, 1);
+    memcpy(mime, url + 5, mime_len);
+    *mime_out = mime;
+    *b64_out = xstrdup(comma + 1);
+    return true;
+}
+
+static size_t curl_file_write_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
+    FILE *f = userdata;
+    return fwrite(ptr, size, nmemb, f);
+}
+
+static bool http_download_to_path(const char *url, const char *path, char **err_out) {
+    CURL *curl = curl_easy_init();
+    if (!curl) { if (err_out) *err_out = xstrdup("curl init failed"); return false; }
+    FILE *f = fopen(path, "wb");
+    if (!f) { if (err_out) *err_out = xstrdup(strerror(errno)); curl_easy_cleanup(curl); return false; }
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_file_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, f);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "ttychatter-c-cli/0.6.2");
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
+    CURLcode rc = curl_easy_perform(curl);
+    long status = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+    fclose(f);
+    curl_easy_cleanup(curl);
+    if (rc != CURLE_OK || (status && (status < 200 || status >= 300))) {
+        unlink(path);
+        if (err_out) {
+            TCBuffer e; buffer_init(&e);
+            if (rc != CURLE_OK) buffer_append(&e, curl_easy_strerror(rc));
+            else buffer_appendf(&e, "HTTP %ld", status);
+            *err_out = buffer_take(&e);
+        }
+        return false;
+    }
+    return true;
+}
+
+static bool write_ai_file_payload(const TCConfig *cfg, TCAIFile *file, char **path_out, char **err_out) {
+    char *path = unique_ai_file_path(cfg, file);
+    char *mime_from_url = NULL;
+    char *b64_from_url = NULL;
+    const char *b64 = file->data;
+    if (file->url && starts_with(file->url, "data:")) {
+        if (parse_data_url(file->url, &mime_from_url, &b64_from_url)) {
+            b64 = b64_from_url;
+            if (mime_from_url && *mime_from_url) { free(file->mime); file->mime = xstrdup(mime_from_url); }
+        }
+    }
+    if (b64 && *b64) {
+        size_t n = 0;
+        unsigned char *bytes = base64_decode_alloc(b64, &n);
+        FILE *f = fopen(path, "wb");
+        if (!f) {
+            if (err_out) *err_out = xstrdup(strerror(errno));
+            free(bytes); free(path); free(mime_from_url); free(b64_from_url);
+            return false;
+        }
+        fwrite(bytes, 1, n, f);
+        fclose(f);
+        free(bytes);
+        *path_out = path;
+        free(mime_from_url); free(b64_from_url);
+        return true;
+    }
+    if (file->url && (starts_with(file->url, "http://") || starts_with(file->url, "https://"))) {
+        bool ok = http_download_to_path(file->url, path, err_out);
+        if (ok) *path_out = path;
+        else free(path);
+        free(mime_from_url); free(b64_from_url);
+        return ok;
+    }
+    if (err_out) *err_out = xstrdup(file->file_id ? "provider returned only a file id; no download endpoint is configured" : "no downloadable URL or base64 data");
+    free(path); free(mime_from_url); free(b64_from_url);
+    return false;
+}
+
+static bool ai_file_should_download(const char *mode, size_t index, const TCAIFile *file) {
+    if (strcasecmp(mode, "auto") == 0 || strcasecmp(mode, "all") == 0) return true;
+    if (strcasecmp(mode, "ask") != 0) return false;
+    if (!isatty(STDIN_FILENO)) return false;
+    fprintf(stderr, "AI attachment %zu: %s (%s). Download? [y/N] ", index + 1, file->name ? file->name : "assistant-file", file->mime ? file->mime : "application/octet-stream");
+    fflush(stderr);
+    char line[32];
+    if (!fgets(line, sizeof(line), stdin)) return false;
+    char *t = trim_in_place(line);
+    return parse_bool_string(t, false);
+}
+
+static char *append_ai_file_receipt_notes(const TCConfig *cfg, const TCArgs *args, const char *text, TCAIFileList *files) {
+    const char *mode = effective_ai_file_download_mode(cfg, args);
+    if (!mode || !*mode) mode = "ask";
+    if (files->count == 0 || strcasecmp(mode, "off") == 0) return xstrdup(text ? text : "");
+    TCBuffer out;
+    buffer_init(&out);
+    buffer_append(&out, text ? text : "");
+    if (out.len > 0 && out.data[out.len - 1] != '\n') buffer_append(&out, "\n");
+    buffer_append(&out, "\n[AI file attachments]\n");
+    if (strcasecmp(mode, "ask") == 0 && !isatty(STDIN_FILENO)) {
+        buffer_append(&out, "download mode ask is noninteractive here; recording metadata only.\n");
+    }
+    for (size_t i = 0; i < files->count; i++) {
+        TCAIFile *f = &files->items[i];
+        bool dl = ai_file_should_download(mode, i, f);
+        if (dl) {
+            char *path = NULL;
+            char *err = NULL;
+            if (write_ai_file_payload(cfg, f, &path, &err)) {
+                buffer_appendf(&out, "saved %zu: %s (%s) -> %s\n", i + 1, f->name, f->mime, path);
+                free(path);
+            } else {
+                buffer_appendf(&out, "not saved %zu: %s (%s): %s\n", i + 1, f->name, f->mime, err ? err : "download failed");
+                free(err);
+            }
+        } else {
+            const char *loc = f->url ? f->url : (f->file_id ? f->file_id : "embedded data");
+            buffer_appendf(&out, "available %zu: %s (%s) [%s] %s\n", i + 1, f->name, f->mime, f->source ? f->source : "provider", loc);
+        }
+    }
+    return buffer_take(&out);
+}
+
 /* ------------------------------------------------------------------------- */
 /* OpenRouter chat request                                                   */
 /* ------------------------------------------------------------------------- */
@@ -2141,15 +2574,44 @@ static char *openrouter_chat(const TCConfig *cfg, const char *model, const char 
         json_object_put(resp);
         return xstrdup("[No choices returned by OpenRouter]");
     }
-    json_object *choice = json_object_array_get_idx(choices, 0);
-    json_object *msg = NULL, *content = NULL;
-    if (!json_object_object_get_ex(choice, "message", &msg) || !json_object_object_get_ex(msg, "content", &content)) {
-        json_object_put(resp);
-        return xstrdup("[No message.content returned by OpenRouter]");
+    TCBuffer text;
+    buffer_init(&text);
+    TCAIFileList ai_files;
+    ai_files_init(&ai_files);
+    size_t choice_count = json_object_array_length(choices);
+    for (size_t i = 0; i < choice_count; i++) {
+        json_object *choice = json_object_array_get_idx(choices, i);
+        json_object *msg = NULL, *content = NULL;
+        if (json_object_object_get_ex(choice, "message", &msg)) {
+            if (json_object_object_get_ex(msg, "content", &content)) {
+                if (text.len > 0) buffer_append(&text, "\n");
+                append_text_and_collect_files(content, &text, &ai_files);
+            }
+            collect_ai_files_from_member(msg, "files", &ai_files, "message.files");
+            collect_ai_files_from_member(msg, "attachments", &ai_files, "message.attachments");
+            collect_ai_files_from_member(msg, "output_files", &ai_files, "message.output_files");
+            collect_ai_files_from_member(msg, "artifacts", &ai_files, "message.artifacts");
+        }
+        collect_ai_files_from_member(choice, "files", &ai_files, "choice.files");
+        collect_ai_files_from_member(choice, "attachments", &ai_files, "choice.attachments");
+        collect_ai_files_from_member(choice, "output_files", &ai_files, "choice.output_files");
+        collect_ai_files_from_member(choice, "artifacts", &ai_files, "choice.artifacts");
+        json_object *plain_text = NULL;
+        if (json_object_object_get_ex(choice, "text", &plain_text) && json_object_is_type(plain_text, json_type_string)) {
+            if (text.len > 0) buffer_append(&text, "\n");
+            buffer_append(&text, json_object_get_string(plain_text));
+        }
     }
-    char *out = xstrdup(json_object_get_string(content));
+    collect_ai_files_from_member(resp, "files", &ai_files, "response.files");
+    collect_ai_files_from_member(resp, "attachments", &ai_files, "response.attachments");
+    collect_ai_files_from_member(resp, "output_files", &ai_files, "response.output_files");
+    collect_ai_files_from_member(resp, "artifacts", &ai_files, "response.artifacts");
+    char *out = append_ai_file_receipt_notes(cfg, args, text.data, &ai_files);
+    free(text.data);
+    ai_files_free(&ai_files);
     json_object_put(resp);
     status_update(cfg, args, "response complete");
+    if (!out || !*out) { free(out); return xstrdup("[No text response returned by OpenRouter]"); }
     return out;
 }
 
@@ -2434,6 +2896,7 @@ static void print_config_summary(const TCConfig *cfg) {
     printf("confirm_live_send=%s\n", cfg->confirm_live_send ? "1" : "0");
     printf("startup_notice=%s\n", cfg->startup_notice ? "1" : "0");
     printf("stream=%s\n", cfg->stream ? "1" : "0");
+    printf("ai_file_download_mode=%s\n", cfg->ai_file_download_mode ? cfg->ai_file_download_mode : "ask");
     printf("status_updates=%s\n", cfg->status_updates ? "1" : "0");
     printf("voice_output=%s\n", cfg->voice_output ? "1" : "0");
     printf("demo_mode=%s\n", cfg->demo_mode_default ? "1" : "0");
@@ -2610,6 +3073,7 @@ static void print_help(void) {
     printf("  -m, --model MODEL            model/router to use (default from config)\n");
     printf("  -a, --attach FILE            attach file; repeatable\n");
     printf("      --stream / --no-stream   print assistant output as it arrives\n");
+    printf("      --ai-download MODE     AI file receipt: ask, auto, metadata, off\n");
     printf("      --status / --no-status   print local progress/status updates to stderr\n");
     printf("      --progress / --no-progress alias for --status / --no-status\n");
     printf("      --voice-input FILE       transcribe FILE with VOICE_INPUT_CMD and send\n");
@@ -2680,6 +3144,7 @@ static void print_help(void) {
     printf("  SESSION values containing '/' are explicit paths. Use ./name.log for cwd.\n");
     printf("  SESSION_AUTO_TITLE=1 enables optional AI-generated titles for --list.\n");
     printf("  STREAM=1 enables streaming by default; STATUS_UPDATES=1 enables local progress notes.\n");
+    printf("  AI_FILE_DOWNLOAD_MODE=ask controls provider-returned file attachments.\n");
     printf("  VOICE_INPUT_CMD and VOICE_OUTPUT_CMD/TTS_CMD provide external audio hooks.\n");
     printf("  Default paths honor XDG_CONFIG_HOME, XDG_DATA_HOME, and XDG_CACHE_HOME.\n");
 }
@@ -2700,6 +3165,7 @@ static int doctor(const TCConfig *cfg) {
     printf("title-gen:   %s (%s)\n", cfg->session_auto_title ? "enabled" : "disabled", cfg->session_title_model);
     printf("attachments: %s\n", cfg->attachment_dir);
     printf("streaming:   %s\n", cfg->stream ? "enabled" : "disabled");
+    printf("AI files:    %s\n", cfg->ai_file_download_mode ? cfg->ai_file_download_mode : "ask");
     printf("status:      %s\n", cfg->status_updates ? "enabled" : "disabled");
     printf("voice in:    %s\n", (cfg->voice_input_cmd && *cfg->voice_input_cmd) ? cfg->voice_input_cmd : "not configured");
     printf("voice out:   %s%s\n", cfg->voice_output ? "enabled " : "disabled ", (cfg->voice_output_cmd && *cfg->voice_output_cmd) ? cfg->voice_output_cmd : "(no command)");
@@ -2810,6 +3276,7 @@ static int parse_args(int argc, char **argv, TCArgs *args) {
         {"code-attachment-min-lines", required_argument, 0, 1037},
         {"stream", no_argument, 0, 1045},
         {"no-stream", no_argument, 0, 1046},
+        {"ai-download", required_argument, 0, 1088},
         {"status", no_argument, 0, 1047},
         {"progress", no_argument, 0, 1047},
         {"no-status", no_argument, 0, 1048},
@@ -2913,6 +3380,7 @@ static int parse_args(int argc, char **argv, TCArgs *args) {
             case 1038: args->search = xstrdup(optarg); args->search_sessions_cmd = true; break;
             case 1045: args->stream_set = true; args->stream = true; break;
             case 1046: args->stream_set = true; args->stream = false; break;
+            case 1088: args->ai_file_download_mode = xstrdup(optarg); break;
             case 1047: args->status_set = true; args->status_updates = true; break;
             case 1048: args->status_set = true; args->status_updates = false; break;
             case 1049: args->voice_input_path = xstrdup(optarg); break;
@@ -3362,6 +3830,7 @@ static void runtime_command_help(void) {
     printf("  :edit N                       edit user message N, branch, and resend\n");
     printf("  :edit-turn N                  alias for :edit\n");
     printf("  :stream [on|off]              toggle streaming assistant output\n");
+    printf("  :ai-download MODE             AI file receipt: ask, auto, metadata, off\n");
     printf("  :status [on|off]              toggle local progress/status updates\n");
     printf("  :progress [on|off]            alias for :status\n");
     printf("  :voice [FILE]                 transcribe with VOICE_INPUT_CMD and send\n");
@@ -3868,6 +4337,16 @@ static int interactive_handle_command(TCConfig *cfg, TCArgs *pending_args, TCMes
         if (!rest || strcasecmp(rest, "on") == 0) { pending_args->stream_set = true; pending_args->stream = true; fprintf(stderr, "streaming enabled for this interactive session\n"); return 0; }
         if (strcasecmp(rest, "off") == 0) { pending_args->stream_set = true; pending_args->stream = false; fprintf(stderr, "streaming disabled for this interactive session\n"); return 0; }
         fprintf(stderr, "usage: :stream [on|off]\n");
+        return 0;
+    }
+    if (strcmp(cmd, "ai-download") == 0 || strcmp(cmd, "ai-files") == 0) {
+        if (rest && *rest && (strcasecmp(rest, "ask") == 0 || strcasecmp(rest, "auto") == 0 || strcasecmp(rest, "metadata") == 0 || strcasecmp(rest, "off") == 0)) {
+            free(pending_args->ai_file_download_mode);
+            pending_args->ai_file_download_mode = xstrdup(rest);
+            fprintf(stderr, "AI file download mode set to %s for this interactive session\n", rest);
+        } else {
+            fprintf(stderr, "usage: :ai-download ask|auto|metadata|off\n");
+        }
         return 0;
     }
     if (strcmp(cmd, "status") == 0 || strcmp(cmd, "progress") == 0) {
