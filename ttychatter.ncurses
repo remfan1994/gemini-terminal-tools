@@ -73,9 +73,9 @@ import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
-VERSION = "0.15.1-parity"
+VERSION = "0.15.2-ai-files"
 PROGRAM = "ttychatter.ncurses"
 FALLBACK_MODEL = "openrouter/auto"
 DEFAULT_MODEL_TEST_PROMPT = "Please reply with one short sentence confirming this model is available for text generation."
@@ -168,6 +168,7 @@ class Config:
     session_title_model: str = FALLBACK_MODEL
     session_title_max_words: int = 8
     stream: bool = False
+    ai_file_download_mode: str = "ask"
 
     @property
     # ------------------------------------------------------------
@@ -510,6 +511,9 @@ def load_config() -> Config:
                     cfg.session_title_max_words = parse_positive_int(value, cfg.session_title_max_words)
                 elif key == "STREAM":
                     cfg.stream = parse_bool(value, cfg.stream)
+                elif key in {"AI_FILE_DOWNLOAD_MODE", "AI_DOWNLOAD"}:
+                    if value.lower() in {"ask", "auto", "metadata", "off"}:
+                        cfg.ai_file_download_mode = value.lower()
 
     if env_api_key:
         cfg.api_key = env_api_key
@@ -623,6 +627,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--loopback-file", metavar="PATH", help="append each AI response to PATH while the ncurses UI remains interactive")
     parser.add_argument("--stream", action="store_true", help="stream assistant output into the transcript; press ESC to stop an active stream")
     parser.add_argument("--no-stream", action="store_true", help="disable streaming for this run")
+    parser.add_argument("--ai-download", choices=("ask", "auto", "metadata", "off"), help="AI file receipt mode for provider-returned attachments")
     parser.add_argument("--version", action="store_true", help="show version information")
     return parser.parse_args()
 
@@ -1237,29 +1242,185 @@ def build_openrouter_user_content(prompt_text: str, attachments: List[PendingAtt
     return content_parts
 
 
-def parse_openrouter_text_and_files(body: str, attachment_dir: Path, session_name: str) -> str:
-    """Extract text from an OpenRouter chat-completions response.
+def _json_one(obj: object, *keys: str) -> Optional[str]:
+    if not isinstance(obj, dict):
+        return None
+    for key in keys:
+        cur: object = obj
+        ok = True
+        for part in key.split("."):
+            if isinstance(cur, dict) and part in cur:
+                cur = cur[part]
+            else:
+                ok = False
+                break
+        if ok and isinstance(cur, str) and cur:
+            return cur
+    return None
 
-    Most OpenRouter models return choices[0].message.content as a string. Some
-    OpenAI-compatible APIs can return structured content parts. This function is
-    defensive so provider-side response changes are visible as parse errors
-    instead of crashing the whole TUI.
-    """
+
+def _looks_like_ai_file(obj: object) -> bool:
+    if not isinstance(obj, dict):
+        return False
+    typ = str(obj.get("type") or "").lower()
+    return typ in {"file", "output_file", "attachment", "artifact", "image_url", "image", "audio", "video"} or any(
+        k in obj for k in ("download_url", "file_url", "content_url", "url", "data", "base64", "b64_json", "file_id", "image_url", "audio", "file")
+    )
+
+
+def _collect_ai_file_obj(obj: object, source: str, out: List[Dict[str, str]]) -> None:
+    if not isinstance(obj, dict):
+        return
+    for nested_key in ("file", "audio", "image_url"):
+        nested = obj.get(nested_key)
+        if isinstance(nested, dict):
+            merged = dict(nested)
+            for k in ("filename", "file_name", "name", "title", "mime_type", "mime", "content_type", "type"):
+                if k in obj and k not in merged:
+                    merged[k] = obj[k]
+            _collect_ai_file_obj(merged, source + "." + nested_key, out)
+    if not _looks_like_ai_file(obj):
+        return
+    rec = {
+        "name": _json_one(obj, "filename", "file_name", "name", "title") or "assistant-file",
+        "mime": _json_one(obj, "mime_type", "mime", "content_type", "media_type") or "application/octet-stream",
+        "url": _json_one(obj, "download_url", "file_url", "content_url", "url", "href", "image_url.url") or "",
+        "data": _json_one(obj, "data", "base64", "b64_json", "audio.data") or "",
+        "file_id": _json_one(obj, "file_id", "id") or "",
+        "source": source,
+    }
+    if not (rec["url"] or rec["data"] or rec["file_id"]):
+        return
+    key = (rec["url"], rec["data"][:80], rec["file_id"])
+    if key not in {(r["url"], r["data"][:80], r["file_id"]) for r in out}:
+        out.append(rec)
+
+
+def _collect_member(obj: object, key: str, source: str, out: List[Dict[str, str]]) -> None:
+    val = obj.get(key) if isinstance(obj, dict) else None
+    if isinstance(val, list):
+        for item in val:
+            _collect_ai_file_obj(item, source, out)
+    elif isinstance(val, dict):
+        _collect_ai_file_obj(val, source, out)
+
+
+def _ai_file_leaf(name: str) -> str:
+    base = Path(name or "assistant-file").name or "assistant-file"
+    base = re.sub(r"[^A-Za-z0-9._-]+", "-", base).strip(".-_") or "assistant-file"
+    return base[:96]
+
+
+def _unique_ai_received_path(attachment_dir: Path, rec: Dict[str, str]) -> Path:
+    out_dir = attachment_dir / "received"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    leaf = _ai_file_leaf(rec.get("name", "assistant-file"))
+    if "." not in leaf:
+        leaf += mimetypes.guess_extension(rec.get("mime", "")) or ".bin"
+    path = out_dir / leaf
+    if not path.exists():
+        return path
+    stem = path.stem
+    suffix = path.suffix
+    for i in range(1, 10000):
+        candidate = out_dir / f"{stem}-{i:03d}{suffix}"
+        if not candidate.exists():
+            return candidate
+    return out_dir / leaf
+
+
+def _decode_data_url(url: str) -> Tuple[Optional[str], Optional[bytes]]:
+    if not url.startswith("data:") or "," not in url:
+        return None, None
+    meta, payload = url.split(",", 1)
+    if ";base64" not in meta:
+        return None, None
+    mime = meta[5:].split(";", 1)[0] or "application/octet-stream"
+    return mime, base64.b64decode(payload)
+
+
+def _save_ai_file(attachment_dir: Path, rec: Dict[str, str]) -> Path:
+    path = _unique_ai_received_path(attachment_dir, rec)
+    url = rec.get("url", "")
+    data = rec.get("data", "")
+    if url.startswith("data:"):
+        mime, blob = _decode_data_url(url)
+        if blob is None:
+            raise RuntimeError("unsupported data URL")
+        if mime:
+            rec["mime"] = mime
+        path.write_bytes(blob)
+        return path
+    if data:
+        path.write_bytes(base64.b64decode(data))
+        return path
+    if url.startswith(("http://", "https://")):
+        with urllib.request.urlopen(url, timeout=120) as response:
+            path.write_bytes(response.read())
+        return path
+    raise RuntimeError("no downloadable URL or base64 payload")
+
+
+def parse_openrouter_text_and_files(
+    body: str,
+    attachment_dir: Path,
+    session_name: str,
+    mode: str = "ask",
+    ask_download: Optional[Callable[[Dict[str, str], int], bool]] = None,
+) -> str:
+    """Extract assistant text and handle provider-returned files conservatively."""
     parsed = json.loads(body)
     chunks: List[str] = []
-    for choice in parsed.get("choices", []):
+    files: List[Dict[str, str]] = []
+    for choice in parsed.get("choices", []) or []:
+        if not isinstance(choice, dict):
+            continue
         message = choice.get("message", {})
-        content = message.get("content", "")
+        content = message.get("content", "") if isinstance(message, dict) else ""
         if isinstance(content, str):
             chunks.append(content)
         elif isinstance(content, list):
             for part in content:
-                if isinstance(part, dict):
-                    if isinstance(part.get("text"), str):
-                        chunks.append(part["text"])
-                    elif isinstance(part.get("content"), str):
-                        chunks.append(part["content"])
-    return "\n".join(c for c in chunks if c)
+                if isinstance(part, str):
+                    chunks.append(part)
+                elif isinstance(part, dict):
+                    typ = str(part.get("type") or "").lower()
+                    val = part.get("text") if isinstance(part.get("text"), str) else part.get("content")
+                    if isinstance(val, str) and (typ in {"", "text"} or not _looks_like_ai_file(part)):
+                        chunks.append(val)
+                    _collect_ai_file_obj(part, "message.content", files)
+        elif isinstance(content, dict):
+            val = content.get("text") or content.get("content")
+            if isinstance(val, str):
+                chunks.append(val)
+            _collect_ai_file_obj(content, "message.content", files)
+        for key in ("files", "attachments", "output_files", "artifacts"):
+            _collect_member(message, key, "message." + key, files)
+            _collect_member(choice, key, "choice." + key, files)
+        if isinstance(choice.get("text"), str):
+            chunks.append(choice["text"])
+    for key in ("files", "attachments", "output_files", "artifacts"):
+        _collect_member(parsed, key, "response." + key, files)
+
+    text = "\n".join(c for c in chunks if c)
+    mode = (mode or "ask").lower()
+    if files and mode != "off":
+        notes = ["", "[AI file attachments]"]
+        for idx, rec in enumerate(files, start=1):
+            should = mode in {"auto", "all"}
+            if mode == "ask" and ask_download is not None:
+                should = ask_download(rec, idx)
+            if should:
+                try:
+                    path = _save_ai_file(attachment_dir, rec)
+                    notes.append(f"saved {idx}: {rec['name']} ({rec['mime']}) -> {path}")
+                except Exception as exc:
+                    notes.append(f"not saved {idx}: {rec['name']} ({rec['mime']}): {exc}")
+            else:
+                loc = rec.get("url") or rec.get("file_id") or "embedded data"
+                notes.append(f"available {idx}: {rec['name']} ({rec['mime']}) [{rec['source']}] {loc}")
+        text = (text.rstrip() + "\n" + "\n".join(notes)).strip()
+    return text
 
 
 
@@ -1276,6 +1437,7 @@ def generate_with_model(
     attachment_dir: Path,
     attachments: Optional[List[PendingAttachment]] = None,
     timeout: int = 120,
+    ask_download: Optional[Callable[[Dict[str, str], int], bool]] = None,
 ) -> Tuple[bool, str]:
     """Send one OpenRouter chat-completions request.
 
@@ -1319,7 +1481,7 @@ def generate_with_model(
         return False, f"OpenRouter request error: {exc}"
 
     try:
-        text = parse_openrouter_text_and_files(body, attachment_dir, session_name)
+        text = parse_openrouter_text_and_files(body, attachment_dir, session_name, cfg.ai_file_download_mode, ask_download)
     except Exception as exc:
         return False, f"OpenRouter response parse error: {exc}; raw response: {body[:1000]}"
     if not text.strip():
@@ -1454,8 +1616,8 @@ def generate_with_model_stream(
 # program. When changing it, check callers, documentation, config compatibility, session-log
 # compatibility, and the parallel Bash/C implementation plans.
 # ------------------------------------------------------------
-def call_ai(cfg: Config, prompt_text: str, session_name: str, attachment_dir: Path, attachments: List[PendingAttachment]) -> str:
-    ok, text = generate_with_model(cfg, cfg.effective_model, prompt_text, session_name, attachment_dir, attachments, timeout=120)
+def call_ai(cfg: Config, prompt_text: str, session_name: str, attachment_dir: Path, attachments: List[PendingAttachment], ask_download: Optional[Callable[[Dict[str, str], int], bool]] = None) -> str:
+    ok, text = generate_with_model(cfg, cfg.effective_model, prompt_text, session_name, attachment_dir, attachments, timeout=120, ask_download=ask_download)
     if ok:
         return text
     return f"({text})"
@@ -4410,6 +4572,7 @@ class AICursesApp:
                 {"key": "INPUT_PLACEHOLDER", "label": "Input placeholder", "kind": "text", "value": self.cfg.input_placeholder},
                 {"key": "SEND_INPUT", "label": "Send key", "kind": "choice", "value": self.cfg.send_input, "choices": ["enter", "ctrl_g", "ctrl_enter"]},
                 {"key": "STREAM", "label": "Stream assistant output", "kind": "bool", "value": self.cfg.stream},
+                {"key": "AI_FILE_DOWNLOAD_MODE", "label": "AI returned files", "kind": "choice", "value": self.cfg.ai_file_download_mode, "choices": ["ask", "auto", "metadata", "off"]},
                 {"key": "LOOPBACK_FILE", "label": "Loopback output file", "kind": "path", "value": str(self.cfg.loopback_file or "")},
                 {"key": "PROMPT_SESSION_NAME", "label": "Prompt for session name", "kind": "bool", "value": self.cfg.prompt_session_name},
                 {"key": "CODE_ATTACHMENT_MIN_LINES", "label": "Code block attachment min lines", "kind": "int", "value": str(self.cfg.code_attachment_min_lines)},
@@ -4505,6 +4668,11 @@ class AICursesApp:
             elif key == "STREAM":
                 self.cfg.stream = bool(value)
                 set_config_value(self.cfg, key, "1" if self.cfg.stream else "0")
+            elif key == "AI_FILE_DOWNLOAD_MODE":
+                text = str(value).lower()
+                if text in {"ask", "auto", "metadata", "off"}:
+                    self.cfg.ai_file_download_mode = text
+                    set_config_value(self.cfg, key, text)
             elif key == "LOOPBACK_FILE":
                 text = str(value).strip()
                 self.cfg.loopback_file = expand_path(text) if text else None
@@ -5168,6 +5336,9 @@ class AICursesApp:
     # Message send path. This is where UI text becomes session log entries, memory context,
     # AI request parts, and visible transcript output.
     # ------------------------------------------------------------
+    def ask_ai_file_download(self, rec: Dict[str, str], idx: int) -> bool:
+        return self.ask_yes_no("AI FILE ATTACHMENT", f"Download AI attachment {idx}: {rec.get('name','assistant-file')} ({rec.get('mime','application/octet-stream')})?", default=False)
+
     def send_current_message(self) -> None:
         message = self.current_input()
         if not message.strip() and not self.pending_attachments:
@@ -5251,7 +5422,7 @@ class AICursesApp:
             if cancelled:
                 self.status = "stream stopped; partial response saved"
         else:
-            raw_output = call_ai(self.cfg, prompt_text, self.session_name, self.attachment_dir, attachments_to_send)
+            raw_output = call_ai(self.cfg, prompt_text, self.session_name, self.attachment_dir, attachments_to_send, self.ask_ai_file_download)
             openrouter_time = now_time()
 
         self.pending_attachments = []
@@ -5488,6 +5659,8 @@ def main() -> int:
         cfg.stream = True
     if args.no_stream:
         cfg.stream = False
+    if getattr(args, "ai_download", None):
+        cfg.ai_file_download_mode = args.ai_download
     cfg.session_dir.mkdir(parents=True, exist_ok=True)
     cfg.effective_attachment_dir.mkdir(parents=True, exist_ok=True)
 

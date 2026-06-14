@@ -201,6 +201,9 @@ Minimum fenced-code lines before generated code is saved as an attachment.
 .BR --stream , " --no-stream"
 Enable or disable real-time streamed assistant output. Press ESC during an active stream to stop it; the partial reply is saved with an interruption marker.
 .TP
+.BR --ai-download " ask|auto|metadata|off"
+Control provider-returned file attachments. ask prompts before saving when possible and records metadata in batch use. auto saves all returned files under ATTACHMENT_DIR/received, metadata lists them without saving, and off ignores them. The Bash-only edition requires jq for structured returned-file detection.
+.TP
 .BR --status , " --progress"
 Print local progress/status notes to stderr.
 .TP
@@ -251,7 +254,7 @@ All implementations use these shared paths and still read the old
 file as a compatibility fallback when the provider-specific config is absent.
 Relevant parity keys include MODEL, CONTEXT_TURNS, SESSION_DIR, ATTACHMENT_DIR,
 STARTUP_NOTICE, SESSION_AUTO_TITLE, SESSION_TITLE_MODEL,
-SESSION_TITLE_MAX_WORDS, STREAM, STATUS_UPDATES, VOICE_INPUT_CMD,
+SESSION_TITLE_MAX_WORDS, STREAM, AI_FILE_DOWNLOAD_MODE, STATUS_UPDATES, VOICE_INPUT_CMD,
 VOICE_OUTPUT_CMD, TTS_CMD, VOICE_OUTPUT, MODEL_CACHE_FILE,
 MODEL_FAVORITES_FILE, SEND_INPUT, and CODE_ATTACHMENT_MIN_LINES.
 .PP
@@ -260,7 +263,7 @@ SESSION_TITLE_MODEL as a secondary model only for session-title metadata.
 .SH RUNTIME COMMANDS
 Interactive commands begin with a colon. Supported commands include :help,
 :rename TITLE, :turns, :branch N, :search TEXT, :search-all TEXT, :stream on|off,
-:status on|off, :voice FILE, :speak on|off|last, :models, :favorites,
+:ai-download MODE, :status on|off, :voice FILE, :speak on|off|last, :models, :favorites,
 :select-model, :config, :memory, :attach FILE, :editor, and :credits.
 .SH SEE ALSO
 ttychatter.python(1), ttychatter.ncurses(1)

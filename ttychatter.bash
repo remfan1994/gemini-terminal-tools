@@ -62,7 +62,7 @@
 set -o pipefail
 
 PROGRAM="ttychatter.bash"
-VERSION="0.14.1-bash-only-parity"
+VERSION="0.14.2-bash-only-ai-files"
 XDG_CONFIG_ROOT="${XDG_CONFIG_HOME:-$HOME/.config}"
 XDG_DATA_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}"
 XDG_CACHE_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}"
@@ -124,6 +124,7 @@ STATUS_UPDATES=0
 VOICE_INPUT_CMD=""
 VOICE_OUTPUT_CMD=""
 VOICE_OUTPUT=0
+AI_FILE_DOWNLOAD_MODE="ask"
 PROMPT_TEXT=""
 INPUT_FILE=""
 OUTPUT_PATH=""
@@ -265,6 +266,7 @@ load_config() {
       API_KEY_GPG_FILE|OPENROUTER_API_KEY_GPG_FILE) API_KEY_GPG_FILE="$value" ;;
       SESSION_DIR) SESSION_DIR="${value/#\~/$HOME}" ;;
       ATTACHMENT_DIR) ATTACHMENT_DIR="${value/#\~/$HOME}"; ATTACHMENT_DIR_CONFIGURED=1 ;;
+      AI_FILE_DOWNLOAD_MODE|AI_DOWNLOAD) AI_FILE_DOWNLOAD_MODE="$value" ;;
       MODEL_TEST_PROMPT) [ -n "$value" ] && MODEL_TEST_PROMPT="$value" ;;
       MODEL_TYPE_FILTER) MODEL_TYPE_FILTER="$value" ;;
       MODEL_SORT_ORDER) MODEL_SORT_ORDER="$value" ;;
@@ -467,7 +469,9 @@ USAGE
     $PROGRAM --forget-api-key
     $PROGRAM --attach FILE [session]
     $PROGRAM --stream | --no-stream
+    $PROGRAM --ai-download ask|auto|metadata|off
     ESC during streaming stops the active streamed response and saves the partial reply.
+    --ai-download controls provider-returned files: ask, auto, metadata, or off.
     $PROGRAM --status | --no-status
     $PROGRAM --voice-input FILE | --transcribe FILE
     $PROGRAM --speak | --no-speak
@@ -540,6 +544,7 @@ COMPATIBILITY / TESTING
     --new                            Force a fresh timestamped session
     --progress | --no-progress       Aliases for --status/--no-status
     ESC during streaming              Stop the active streamed response and save the partial reply
+    :ai-download MODE                 AI file receipt: ask, auto, metadata, off
     --edit-turn SESSION TURN         Not implemented in bash-only; use C or python helper
 
 NOTES
@@ -817,11 +822,181 @@ build_openrouter_payload() {
 # ----------------------------------------------------------
 extract_openrouter_text() {
   if command -v jq >/dev/null 2>&1; then
-    jq -r 'if .error then (.error.message // .error | tostring) else ([.choices[]?.message.content] | map(if type=="string" then . else tostring end) | join("\n")) end'
+    jq -r '
+      def content_text($x):
+        if ($x|type) == "string" then $x
+        elif ($x|type) == "array" then
+          [$x[]? | if type == "string" then . elif type == "object" then ((.text? // .content? // empty) | select(type == "string")) else empty end] | join("\n")
+        elif ($x|type) == "object" then ((($x.text? // $x.content? // empty) | select(type == "string")))
+        else empty end;
+      if .error then (.error.message // .error | tostring)
+      else ([.choices[]? | content_text(.message.content?), (.text? // empty | select(type == "string"))] | map(select(type == "string" and length > 0)) | join("\n"))
+      end'
   else
     tr '\n' ' ' | sed -n 's/^.*"content"[[:space:]]*:[[:space:]]*"\(.*\)"[[:space:]]*[,}].*$/\1/p' | json_unescape_basic
   fi
 }
+
+ai_file_leaf() {
+  local name="${1:-assistant-file}"
+  name="$(basename "$name" 2>/dev/null || printf 'assistant-file')"
+  name="$(printf '%s' "$name" | sed -E 's/[^A-Za-z0-9._-]+/-/g; s/^[._-]+//; s/[._-]+$//')"
+  [ -n "$name" ] || name="assistant-file"
+  printf '%s
+' "$(printf '%.96s' "$name")"
+}
+
+ai_ext_for_mime() {
+  case "$1" in
+    application/pdf) printf '.pdf' ;;
+    application/json|*json*) printf '.json' ;;
+    application/zip|*zip*) printf '.zip' ;;
+    *tar*) printf '.tar' ;;
+    *gzip*|*gz*) printf '.gz' ;;
+    image/png) printf '.png' ;;
+    image/jpeg) printf '.jpg' ;;
+    image/gif) printf '.gif' ;;
+    audio/wav|audio/x-wav) printf '.wav' ;;
+    audio/mpeg|audio/mp3) printf '.mp3' ;;
+    text/*) printf '.txt' ;;
+    *) printf '.bin' ;;
+  esac
+}
+
+ai_unique_received_path() {
+  local name="$1" mime="$2" dir leaf stem ext n path
+  dir="$ATTACHMENT_DIR/received"
+  mkdir -p "$dir"
+  leaf="$(ai_file_leaf "$name")"
+  case "$leaf" in *.*) ;; *) leaf="$leaf$(ai_ext_for_mime "$mime")" ;; esac
+  path="$dir/$leaf"
+  [ ! -e "$path" ] && { printf '%s
+' "$path"; return 0; }
+  stem="${leaf%.*}"; ext=".${leaf##*.}"
+  [ "$stem" = "$leaf" ] && ext=""
+  n=1
+  while :; do
+    path="$(printf '%s/%s-%03d%s' "$dir" "$stem" "$n" "$ext")"
+    [ ! -e "$path" ] && { printf '%s
+' "$path"; return 0; }
+    n=$((n+1))
+  done
+}
+
+ai_should_download_record() {
+  local idx="$1" name="$2" mime="$3" ans
+  case "$AI_FILE_DOWNLOAD_MODE" in
+    auto|all) return 0 ;;
+    ask)
+      [ -r /dev/tty ] || return 1
+      printf 'AI attachment %s: %s (%s). Download? [y/N] ' "$idx" "$name" "$mime" >/dev/tty
+      IFS= read -r ans </dev/tty || return 1
+      case "$(printf '%s' "$ans" | tr '[:upper:]' '[:lower:]')" in y|yes|1|true|on) return 0 ;; *) return 1 ;; esac
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+ai_save_record() {
+  local name="$1" mime="$2" url="$3" data="$4" path meta b64
+  path="$(ai_unique_received_path "$name" "$mime")"
+  if [ -n "$url" ] && printf '%s' "$url" | grep -q '^data:'; then
+    meta="${url%%,*}"; b64="${url#*,}"
+    printf '%s' "$b64" | base64 -d > "$path" 2>/dev/null || { rm -f "$path"; return 1; }
+    printf '%s
+' "$path"; return 0
+  fi
+  if [ -n "$data" ]; then
+    printf '%s' "$data" | base64 -d > "$path" 2>/dev/null || { rm -f "$path"; return 1; }
+    printf '%s
+' "$path"; return 0
+  fi
+  if printf '%s' "$url" | grep -Eq '^https?://'; then
+    curl -fsSL --max-time 120 "$url" -o "$path" || { rm -f "$path"; return 1; }
+    printf '%s
+' "$path"; return 0
+  fi
+  return 1
+}
+
+extract_openrouter_text_and_ai_files() {
+  local tmp text records idx name mime url data file_id source loc saved
+  tmp="$(mktemp "${TMPDIR:-/tmp}/ttychatter.response.XXXXXX")" || return 1
+  cat > "$tmp"
+  text="$(cat "$tmp" | extract_openrouter_text)"
+  printf '%s
+' "$text"
+  if [ "$AI_FILE_DOWNLOAD_MODE" = "off" ] || ! command -v jq >/dev/null 2>&1; then
+    rm -f "$tmp"; return 0
+  fi
+  records="$(jq -c '
+    def one($o; $paths): reduce $paths[] as $p (null; . // ($o | getpath($p)? | select(type == "string" and length > 0)));
+    def looks:
+      ((.type? // "") | tostring | ascii_downcase) as $t |
+      ($t | test("^(file|output_file|attachment|artifact|image_url|image|audio|video)$"))
+      or has("download_url") or has("file_url") or has("content_url") or has("url")
+      or has("data") or has("base64") or has("b64_json") or has("file_id")
+      or has("image_url") or has("audio") or has("file");
+    def rec($src): select(type == "object") | . as $o |
+      ((if (.file | type) == "object" then [$o + .file] else [] end)
+       + (if (.audio | type) == "object" then [$o + .audio] else [] end)
+       + (if (.image_url | type) == "object" then [$o + .image_url] else [] end)
+       + [$o])[] |
+      select(looks) |
+      {name:(one(.; [["filename"],["file_name"],["name"],["title"]]) // "assistant-file"),
+       mime:(one(.; [["mime_type"],["mime"],["content_type"],["media_type"]]) // "application/octet-stream"),
+       url:(one(.; [["download_url"],["file_url"],["content_url"],["url"],["href"],["image_url","url"]]) // ""),
+       data:(one(.; [["data"],["base64"],["b64_json"],["audio","data"]]) // ""),
+       file_id:(one(.; [["file_id"],["id"]]) // ""),
+       source:$src}
+      | select((.url|length) > 0 or (.data|length) > 0 or (.file_id|length) > 0);
+    [
+      (.choices[]? as $c |
+        ($c.message.content[]? | rec("message.content")),
+        ($c.message.files[]? | rec("message.files")),
+        ($c.message.attachments[]? | rec("message.attachments")),
+        ($c.message.output_files[]? | rec("message.output_files")),
+        ($c.message.artifacts[]? | rec("message.artifacts")),
+        ($c.files[]? | rec("choice.files")),
+        ($c.attachments[]? | rec("choice.attachments")),
+        ($c.output_files[]? | rec("choice.output_files")),
+        ($c.artifacts[]? | rec("choice.artifacts"))
+      ),
+      (.files[]? | rec("response.files")),
+      (.attachments[]? | rec("response.attachments")),
+      (.output_files[]? | rec("response.output_files")),
+      (.artifacts[]? | rec("response.artifacts"))
+    ] | unique | .[]' "$tmp" 2>/dev/null || true)"
+  [ -n "$records" ] || { rm -f "$tmp"; return 0; }
+  printf '\n[AI file attachments]\n'
+  [ "$AI_FILE_DOWNLOAD_MODE" = "ask" ] && [ ! -r /dev/tty ] && printf 'download mode ask is noninteractive here; recording metadata only.\n'
+  idx=0
+  while IFS= read -r record_json; do
+    [ -n "$record_json" ] || continue
+    name="$(printf '%s' "$record_json" | jq -r '.name // "assistant-file"')"
+    mime="$(printf '%s' "$record_json" | jq -r '.mime // "application/octet-stream"')"
+    url="$(printf '%s' "$record_json" | jq -r '.url // ""')"
+    data="$(printf '%s' "$record_json" | jq -r '.data // ""')"
+    file_id="$(printf '%s' "$record_json" | jq -r '.file_id // ""')"
+    source="$(printf '%s' "$record_json" | jq -r '.source // ""')"
+    [ -n "$name$url$data$file_id" ] || continue
+    idx=$((idx+1))
+    if ai_should_download_record "$idx" "$name" "$mime"; then
+      if saved="$(ai_save_record "$name" "$mime" "$url" "$data")"; then
+        printf 'saved %s: %s (%s) -> %s\n' "$idx" "$name" "$mime" "$saved"
+      else
+        printf 'not saved %s: %s (%s): download failed\n' "$idx" "$name" "$mime"
+      fi
+    else
+      loc="${url:-${file_id:-embedded data}}"
+      printf 'available %s: %s (%s) [%s] %s\n' "$idx" "$name" "$mime" "$source" "$loc"
+    fi
+  done <<EOF_AI_FILES
+$records
+EOF_AI_FILES
+  rm -f "$tmp"
+}
+
 extract_openrouter_stream_piece() {
   if command -v jq >/dev/null 2>&1; then
     jq -r '[.choices[]? | (.delta.content // .message.content // .text // empty)] | map(select(type=="string")) | join("")' 2>/dev/null
@@ -930,7 +1105,7 @@ call_model() {
   response="$(printf '%s' "$payload" | curl -sS --max-time 120 -H 'Content-Type: application/json' -H "Authorization: Bearer $OPENROUTER_API_KEY" -H 'HTTP-Referer: https://github.com/remfan1994/ttychatter' -H 'X-Title: ttychatter' -d @- 'https://openrouter.ai/api/v1/chat/completions' 2>&1)"
   status=$?; [ "$status" -eq 0 ] || { printf 'curl error: %s
 ' "$response"; return 1; }
-  text="$(printf '%s' "$response" | extract_openrouter_text)"
+  text="$(printf '%s' "$response" | extract_openrouter_text_and_ai_files)"
   [ -n "$text" ] || text="(could not extract text response; raw response follows)
 $response"
   printf '%s
@@ -1231,6 +1406,7 @@ Files and editor:
   :search TEXT            Search current session
   :search-all TEXT        Search all saved sessions
   :stream on|off          Toggle requested streaming mode
+  :ai-download MODE       AI file receipt: ask, auto, metadata, off
   :status on|off          Toggle local status updates
   :voice FILE             Transcribe FILE with VOICE_INPUT_CMD and send
   :speak on|off|last      Toggle/speak with VOICE_OUTPUT_CMD
@@ -1256,6 +1432,7 @@ print_config_summary() {
   printf 'VOICE_INPUT_CMD=%s\n' "$VOICE_INPUT_CMD"
   printf 'VOICE_OUTPUT_CMD=%s\n' "$VOICE_OUTPUT_CMD"
   printf 'VOICE_OUTPUT=%s\n' "$VOICE_OUTPUT"
+  printf 'AI_FILE_DOWNLOAD_MODE=%s\n' "$AI_FILE_DOWNLOAD_MODE"
   printf 'THEME=%s\n' "$THEME"
   printf 'SEND_INPUT=%s\n' "$SEND_INPUT"
   printf 'CODE_ATTACHMENT_MIN_LINES=%s\n' "$CODE_ATTACHMENT_MIN_LINES"
@@ -1332,6 +1509,7 @@ ACTIVE_MODEL="$(effective_model)" ;;
     CONTEXT_TURNS|HISTORY_LIMIT) CONTEXT_TURNS="$value" ;;
     SESSION_DIR) SESSION_DIR="${value/#\~/$HOME}"; mkdir -p "$SESSION_DIR" ;;
     ATTACHMENT_DIR) ATTACHMENT_DIR="${value/#\~/$HOME}"; mkdir -p "$ATTACHMENT_DIR" ;;
+    AI_FILE_DOWNLOAD_MODE|AI_DOWNLOAD) AI_FILE_DOWNLOAD_MODE="$value" ;;
     MODEL_TEST_PROMPT) MODEL_TEST_PROMPT="$value" ;;
     STARTUP_NOTICE) STARTUP_NOTICE="$value" ;;
     THEME) THEME="$value" ;;
@@ -1510,6 +1688,9 @@ handle_runtime_command() {
 ' "streaming requested" ;; off|0|no|false) STREAM=0; printf '%s
 ' "streaming disabled" ;; *) printf '%s
 ' "usage: :stream on|off" ;; esac ;;
+    ai-download|ai-files) case "$rest" in ask|auto|metadata|off) AI_FILE_DOWNLOAD_MODE="$rest"; printf 'AI file download mode: %s
+' "$AI_FILE_DOWNLOAD_MODE" ;; *) printf '%s
+' "usage: :ai-download ask|auto|metadata|off" ;; esac ;;
     status|progress) case "$rest" in on|1|yes|true) STATUS_UPDATES=1; printf '%s
 ' "status updates enabled" ;; off|0|no|false) STATUS_UPDATES=0; printf '%s
 ' "status updates disabled" ;; *) printf '%s
@@ -1570,6 +1751,7 @@ while [ "$#" -gt 0 ]; do
     -o|--output) shift; OUTPUT_PATH="${1:-}";;
     -s|--session) shift; SESSION_NAME="${1:-}";;
     --stream) STREAM=1;; --no-stream) STREAM=0;;
+    --ai-download) shift; AI_FILE_DOWNLOAD_MODE="${1:-ask}";;
     --status|--progress) STATUS_UPDATES=1;; --no-status|--no-progress) STATUS_UPDATES=0;;
     --voice-input|--transcribe) shift; VOICE_INPUT_PATH="${1:-}";;
     --speak) VOICE_OUTPUT=1;; --no-speak) VOICE_OUTPUT=0;;

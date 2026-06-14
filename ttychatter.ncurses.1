@@ -1,4 +1,4 @@
-.TH TTYCHATTER.NCURSES 1 "June 2026" "ttychatter.ncurses 0.15.1-parity" "User Commands"
+.TH TTYCHATTER.NCURSES 1 "June 2026" "ttychatter.ncurses 0.15.2-ai-files" "User Commands"
 .SH NAME
 ttychatter.ncurses \- full-screen ncurses OpenRouter chat interface
 .SH SYNOPSIS
@@ -113,6 +113,9 @@ saves the partial reply with an interruption marker.
 .TP
 .B --no-stream
 Disable streaming for this run even when STREAM=1 is configured.
+.TP
+.BR --ai-download " ask|auto|metadata|off"
+Control provider-returned file attachments. In ask mode the TUI prompts before saving each returned file. auto saves all returned files under ATTACHMENT_DIR/received, metadata lists them without saving, and off ignores them.
 .SH CONFIGURATION
 The shared config file is
 .IR $XDG_CONFIG_HOME/ttychatter/openrouter/config
@@ -135,7 +138,7 @@ MODEL_FILTER_REQUIRE_TOKENS, MODEL_FILTER_HIDE_PREVIEW,
 MODEL_MIN_INPUT_TOKENS, MODEL_MIN_OUTPUT_TOKENS, MODEL_SORT_ORDER,
 MODEL_TYPE_FILTER, THEME, SEND_INPUT, PROMPT_SESSION_NAME,
 CODE_ATTACHMENT_MIN_LINES, MAX_ATTACHMENT_BYTES, GITHUB_URL, STARTUP_NOTICE, SESSION_AUTO_TITLE,
-SESSION_TITLE_MODEL, SESSION_TITLE_MAX_WORDS, STREAM, DEMO_MODE,
+SESSION_TITLE_MODEL, SESSION_TITLE_MAX_WORDS, STREAM, AI_FILE_DOWNLOAD_MODE, DEMO_MODE,
 CONFIRM_LIVE_SEND, API_KEY_GPG_FILE, and LOOPBACK_FILE.
 .PP
 SESSION_AUTO_TITLE defaults to 0. When enabled, SESSION_TITLE_MODEL is a
@@ -143,7 +146,7 @@ secondary model used only to write session-title metadata after a response. The
 chat model remains MODEL.
 .SH UI NOTES
 F4 opens the session browser. The rename actions now retitle metadata instead of
-renaming log files. F5 opens options, including streaming mode, loopback output, attachment
+renaming log files. F5 opens options, including streaming mode, AI returned-file download mode, loopback output, attachment
 limits, model favorites/cache paths, and the AI session-title metadata settings.
 F2 opens model selection and F7 opens file/attachment tools.
 .SH SEE ALSO

@@ -1,4 +1,4 @@
-.TH TTYCHATTER.PYTHON 1 "June 2026" "ttychatter.python 3.15-parity" "User Commands"
+.TH TTYCHATTER.PYTHON 1 "June 2026" "ttychatter.python 3.17-ai-files" "User Commands"
 .SH NAME
 ttychatter.python \- Bash plus Python helper OpenRouter terminal chat client
 .SH SYNOPSIS
@@ -169,6 +169,9 @@ Attach FILE to the next request.
 .BR --stream , " --no-stream"
 Stream provider token deltas while still saving the final complete response. Press ESC during an active stream to stop it; the partial reply is saved with an interruption marker.
 .TP
+.BR --ai-download " ask|auto|metadata|off"
+Control provider-returned file attachments. The default ask mode prompts before saving when a terminal can answer and records metadata only in noninteractive use. auto saves all returned files under ATTACHMENT_DIR/received, metadata lists them without saving, and off ignores them.
+.TP
 .BR --status , " --progress"
 Show local progress/status notes. These are not hidden model thoughts.
 .TP
@@ -213,7 +216,7 @@ All implementations use these shared paths and still read the old
 file as a compatibility fallback when the provider-specific config is absent.
 Important keys include MODEL, CONTEXT_TURNS, SESSION_DIR, ATTACHMENT_DIR,
 MODEL_TEST_PROMPT, STARTUP_NOTICE, SESSION_AUTO_TITLE, SESSION_TITLE_MODEL,
-SESSION_TITLE_MAX_WORDS, STREAM, STATUS_UPDATES, VOICE_INPUT_CMD,
+SESSION_TITLE_MAX_WORDS, STREAM, AI_FILE_DOWNLOAD_MODE, STATUS_UPDATES, VOICE_INPUT_CMD,
 VOICE_OUTPUT_CMD, TTS_CMD, VOICE_OUTPUT, MODEL_CACHE_FILE,
 MODEL_FAVORITES_FILE, SEND_INPUT, THEME, CODE_ATTACHMENT_MIN_LINES,
 MAX_ATTACHMENT_BYTES, and API_KEY_GPG_FILE.
@@ -222,7 +225,7 @@ SESSION_AUTO_TITLE defaults to 0. When enabled, SESSION_TITLE_MODEL is a
 secondary model used only for title metadata. The normal chat model remains MODEL.
 .SH RUNTIME COMMANDS
 Interactive colon commands include :help, :rename TITLE, :turns, :branch N,
-:stream on|off, :status on|off, :voice FILE, :speak on|off|last, :models,
+:stream on|off, :ai-download MODE, :status on|off, :voice FILE, :speak on|off|last, :models,
 :update-models, :select-model, :test-model MODEL, :config, :set KEY VALUE,
 :memory, :edit-memory, :search TEXT, :search-all TEXT, :attach FILE, :editor,
 and :credits.

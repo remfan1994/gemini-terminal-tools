@@ -83,7 +83,7 @@
 set -o pipefail
 
 PROGRAM="ttychatter.python"
-VERSION="3.16-parity"
+VERSION="3.17-ai-files"
 
 XDG_CONFIG_ROOT="${XDG_CONFIG_HOME:-$HOME/.config}"
 XDG_DATA_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}"
@@ -136,6 +136,7 @@ SESSION_TITLE_MAX_WORDS=8
 VOICE_INPUT_CMD=""
 VOICE_OUTPUT_CMD=""
 VOICE_OUTPUT=0
+AI_FILE_DOWNLOAD_MODE="ask"
 
 MAX_ATTACHMENT_BYTES=1048576
 EDITOR_CMD=""
@@ -447,6 +448,7 @@ if [ -f "$CONFIG_READ_FILE" ]; then
       API_KEY_GPG_FILE|OPENROUTER_API_KEY_GPG_FILE) API_KEY_GPG_FILE="$value" ;;
       SESSION_DIR) SESSION_DIR="$(expand_path "$value")" ;;
       ATTACHMENT_DIR) ATTACHMENT_DIR="$(expand_path "$value")"; ATTACHMENT_DIR_CONFIGURED=1 ;;
+      AI_FILE_DOWNLOAD_MODE|AI_DOWNLOAD) AI_FILE_DOWNLOAD_MODE="$value" ;;
       MODEL_TEST_PROMPT) [ -n "$value" ] && MODEL_TEST_PROMPT="$value" ;;
       DEMO_MODE) DEMO_MODE="$value" ;;
       STARTUP_NOTICE) STARTUP_NOTICE="$value" ;;
@@ -570,6 +572,7 @@ Core:
   VOICE_INPUT_CMD=$VOICE_INPUT_CMD
   VOICE_OUTPUT_CMD=${VOICE_OUTPUT_CMD:-$TTS_CMD}
   VOICE_OUTPUT=$VOICE_OUTPUT
+  AI_FILE_DOWNLOAD_MODE=$AI_FILE_DOWNLOAD_MODE
   EDITOR=$(editor_command)
   MAX_ATTACHMENT_BYTES=$MAX_ATTACHMENT_BYTES
   THEME=$THEME
@@ -902,6 +905,7 @@ USAGE
     $PROGRAM --editor-prompt [session]
     $PROGRAM --attach FILE [session]
     $PROGRAM --stream | --no-stream
+    $PROGRAM --ai-download ask|auto|metadata|off
     $PROGRAM --status | --no-status
     $PROGRAM --voice-input FILE | --transcribe FILE
     $PROGRAM --speak | --no-speak
@@ -938,6 +942,7 @@ RUNTIME COMMAND MODE
         :turns
         :branch 4
         :stream on
+        :ai-download ask
         :status on
         :speak last
         :models
@@ -964,6 +969,7 @@ SESSION TITLES
 
 STREAMING / STATUS / VOICE
     --stream shows provider token deltas while preserving the complete saved reply; press ESC to stop an active stream and save the partial reply.
+    --ai-download controls provider-returned files: ask, auto, metadata, or off.
     --status/--progress prints local progress notes, not hidden model reasoning.
     Voice input/output are external command hooks via VOICE_INPUT_CMD and VOICE_OUTPUT_CMD/TTS_CMD.
 
@@ -996,6 +1002,7 @@ COMPATIBILITY / TESTING
     --interactive                    Alias for -i
     --progress | --no-progress       Aliases for --status/--no-status
     ESC during streaming              Stop the active streamed response and save the partial reply
+    :ai-download MODE                 Set AI file receipt mode for this chat
     --autoscan-model                 Removed compatibility option; exits with guidance
 
 LOOPBACK OUTPUT
@@ -1430,11 +1437,22 @@ print(json.dumps(payload, ensure_ascii=False))
 # when behavior changes.
 # ----------------------------------------------------------
 parse_openrouter_response() {
-  python3 -c '''
-import json, sys
+  local response_file status
+  response_file="$(mktemp "${TMPDIR:-/tmp}/ttychatter.response.XXXXXX")" || return 1
+  cat > "$response_file"
+  python3 - "$ATTACHMENT_DIR" "$SESSION_NAME" "$AI_FILE_DOWNLOAD_MODE" "$response_file" <<'PY_PARSE_OPENROUTER_RESPONSE'
+import base64, json, mimetypes, os, re, sys, urllib.request
+from pathlib import Path
+
 attachment_dir = sys.argv[1]
 session_name = sys.argv[2] or "model-test"
-raw = sys.stdin.read()
+mode = (sys.argv[3] or "ask").lower()
+response_file = sys.argv[4]
+try:
+    raw = Path(response_file).read_text(encoding="utf-8", errors="replace")
+except Exception as exc:
+    print(f"invalid JSON response: cannot read response file: {exc}")
+    sys.exit(1)
 
 if not raw.strip():
     print("invalid JSON response: empty response body")
@@ -1456,26 +1474,197 @@ if "error" in data:
         print(f"OpenRouter API error: {err}")
     sys.exit(1)
 
+VALID_MODES = {"ask", "auto", "metadata", "off"}
+if mode not in VALID_MODES:
+    mode = "ask"
+
+def one(obj, *keys):
+    if not isinstance(obj, dict):
+        return None
+    for key in keys:
+        cur = obj
+        ok = True
+        for part in key.split('.'):
+            if isinstance(cur, dict) and part in cur:
+                cur = cur[part]
+            else:
+                ok = False
+                break
+        if ok and isinstance(cur, str) and cur:
+            return cur
+    return None
+
+def looks_file(obj):
+    if not isinstance(obj, dict):
+        return False
+    typ = str(obj.get("type") or "").lower()
+    file_types = {"file", "output_file", "attachment", "artifact", "image_url", "image", "audio", "video"}
+    file_keys = {"download_url", "file_url", "content_url", "url", "data", "base64", "b64_json", "file_id"}
+    return typ in file_types or any(k in obj for k in file_keys) or isinstance(obj.get("file"), dict) or isinstance(obj.get("audio"), dict) or isinstance(obj.get("image_url"), dict)
+
+def add_unique(out, rec):
+    key = (rec.get("url", ""), rec.get("data", "")[:80], rec.get("file_id", ""), rec.get("name", ""))
+    for old in out:
+        if key == (old.get("url", ""), old.get("data", "")[:80], old.get("file_id", ""), old.get("name", "")):
+            return
+    out.append(rec)
+
+def collect_obj(obj, source, out):
+    if not isinstance(obj, dict):
+        return
+    for nested_key in ("file", "audio", "image_url"):
+        nested = obj.get(nested_key)
+        if isinstance(nested, dict):
+            merged = dict(nested)
+            for k in ("filename", "file_name", "name", "title", "mime_type", "mime", "content_type", "media_type", "type"):
+                if k in obj and k not in merged:
+                    merged[k] = obj[k]
+            collect_obj(merged, source + "." + nested_key, out)
+    if not looks_file(obj):
+        return
+    rec = {
+        "name": one(obj, "filename", "file_name", "name", "title") or "assistant-file",
+        "mime": one(obj, "mime_type", "mime", "content_type", "media_type") or "application/octet-stream",
+        "url": one(obj, "download_url", "file_url", "content_url", "url", "href", "image_url.url") or "",
+        "data": one(obj, "data", "base64", "b64_json", "audio.data") or "",
+        "file_id": one(obj, "file_id", "id") or "",
+        "source": source,
+    }
+    if rec["url"] or rec["data"] or rec["file_id"]:
+        add_unique(out, rec)
+
+def collect_member(obj, key, source, out):
+    val = obj.get(key) if isinstance(obj, dict) else None
+    if isinstance(val, list):
+        for item in val:
+            collect_obj(item, source, out)
+    elif isinstance(val, dict):
+        collect_obj(val, source, out)
+
 texts = []
-for choice in data.get("choices", []):
-    msg = choice.get("message", {}) if isinstance(choice, dict) else {}
-    content = msg.get("content", "")
+files = []
+for choice in data.get("choices", []) or []:
+    if not isinstance(choice, dict):
+        continue
+    msg = choice.get("message") or {}
+    content = msg.get("content", "") if isinstance(msg, dict) else ""
     if isinstance(content, str):
         texts.append(content)
     elif isinstance(content, list):
         for part in content:
-            if isinstance(part, dict):
-                if isinstance(part.get("text"), str):
-                    texts.append(part["text"])
-                elif isinstance(part.get("content"), str):
-                    texts.append(part["content"])
+            if isinstance(part, str):
+                texts.append(part)
+            elif isinstance(part, dict):
+                typ = str(part.get("type") or "").lower()
+                val = part.get("text") if isinstance(part.get("text"), str) else part.get("content")
+                if isinstance(val, str) and (typ in ("", "text") or not looks_file(part)):
+                    texts.append(val)
+                collect_obj(part, "message.content", files)
+    elif isinstance(content, dict):
+        val = content.get("text") or content.get("content")
+        if isinstance(val, str):
+            texts.append(val)
+        collect_obj(content, "message.content", files)
+    for key in ("files", "attachments", "output_files", "artifacts"):
+        collect_member(msg, key, "message." + key, files)
+        collect_member(choice, key, "choice." + key, files)
+    if isinstance(choice.get("text"), str):
+        texts.append(choice["text"])
+for key in ("files", "attachments", "output_files", "artifacts"):
+    collect_member(data, key, "response." + key, files)
 
-output = "\n".join(t for t in texts if t is not None)
-if not output.strip():
+text = "\n".join(t for t in texts if t is not None)
+
+def leaf(name):
+    base = os.path.basename(name or "assistant-file") or "assistant-file"
+    base = re.sub(r"[^A-Za-z0-9._-]+", "-", base).strip(".-_") or "assistant-file"
+    return base[:96]
+
+def ext_for_mime(mime):
+    return mimetypes.guess_extension(mime or "") or ".bin"
+
+def unique_path(rec):
+    d = os.path.join(attachment_dir, "received")
+    os.makedirs(d, exist_ok=True)
+    name = leaf(rec["name"])
+    if "." not in name:
+        name += ext_for_mime(rec["mime"])
+    path = os.path.join(d, name)
+    if not os.path.exists(path):
+        return path
+    stem, ext = os.path.splitext(name)
+    for i in range(1, 10000):
+        p = os.path.join(d, f"{stem}-{i:03d}{ext}")
+        if not os.path.exists(p):
+            return p
+    return os.path.join(d, name)
+
+def decode_data_url(url):
+    if not url.startswith("data:") or "," not in url or ";base64" not in url.split(",", 1)[0]:
+        return None, None
+    meta, b64 = url.split(",", 1)
+    mime = meta[5:].split(";", 1)[0] or "application/octet-stream"
+    return mime, base64.b64decode(b64)
+
+def save_file(rec):
+    path = unique_path(rec)
+    if rec["url"].startswith("data:"):
+        mime, blob = decode_data_url(rec["url"])
+        if blob is None:
+            raise RuntimeError("unsupported data URL")
+        rec["mime"] = mime or rec["mime"]
+        Path(path).write_bytes(blob)
+        return path
+    if rec["data"]:
+        Path(path).write_bytes(base64.b64decode(rec["data"]))
+        return path
+    if rec["url"].startswith(("http://", "https://")):
+        with urllib.request.urlopen(rec["url"], timeout=120) as response:
+            Path(path).write_bytes(response.read())
+        return path
+    raise RuntimeError("no downloadable URL or base64 payload")
+
+def ask_download(rec, idx):
+    if mode == "auto":
+        return True
+    if mode != "ask":
+        return False
+    try:
+        tty = open("/dev/tty", "r+", encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    try:
+        tty.write(f"AI attachment {idx + 1}: {rec['name']} ({rec['mime']}). Download? [y/N] ")
+        tty.flush()
+        ans = tty.readline().strip().lower()
+        return ans in ("y", "yes", "1", "true", "on")
+    finally:
+        tty.close()
+
+if files and mode != "off":
+    notes = ["", "[AI file attachments]"]
+    if mode == "ask" and not os.path.exists("/dev/tty"):
+        notes.append("download mode ask is noninteractive here; recording metadata only.")
+    for idx, rec in enumerate(files):
+        if ask_download(rec, idx):
+            try:
+                path = save_file(rec)
+                notes.append(f"saved {idx + 1}: {rec['name']} ({rec['mime']}) -> {path}")
+            except Exception as exc:
+                notes.append(f"not saved {idx + 1}: {rec['name']} ({rec['mime']}): {exc}")
+        else:
+            loc = rec["url"] or rec["file_id"] or "embedded data"
+            notes.append(f"available {idx + 1}: {rec['name']} ({rec['mime']}) [{rec['source']}] {loc}")
+    text = (text.rstrip() + "\n" + "\n".join(notes)).strip()
+
+if not text.strip():
     print("OpenRouter returned an empty text response")
     sys.exit(1)
-print(output)
-''' "$ATTACHMENT_DIR" "$SESSION_NAME"
+print(text)
+PY_PARSE_OPENROUTER_RESPONSE
+  status=$?
+  rm -f "$response_file"
+  return "$status"
 }
 # ----------------------------------------------------------
 # MAINTAINER COMMENTARY: function call_openrouter_model
@@ -1798,6 +1987,7 @@ Files and editor:
   :turns                        List message numbers in the current session
   :branch N                     Create a branch after message N
   :stream on|off                Toggle streaming token display
+  :ai-download MODE             AI file receipt: ask, auto, metadata, off
   :status on|off                Toggle local status/progress output
   :voice FILE                   Transcribe FILE with VOICE_INPUT_CMD and send
   :speak on|off|last            Toggle or replay voice output hook
@@ -1910,6 +2100,9 @@ ACTIVE_MODEL="$(effective_model)"
     ATTACHMENT_DIR)
       ATTACHMENT_DIR="$(expand_path "$value")"
       mkdir -p "$ATTACHMENT_DIR"
+      ;;
+    AI_FILE_DOWNLOAD_MODE|AI_DOWNLOAD)
+      AI_FILE_DOWNLOAD_MODE="$value"
       ;;
     MODEL_TEST_PROMPT)
       MODEL_TEST_PROMPT="$value"
@@ -2501,6 +2694,9 @@ handle_runtime_command() {
 ' "streaming enabled" ;; off|0|no|false) STREAM=0; printf '%s
 ' "streaming disabled" ;; *) printf '%s
 ' "usage: :stream on|off" ;; esac ;;
+    ai-download|ai-files) case "$rest" in ask|auto|metadata|off) AI_FILE_DOWNLOAD_MODE="$rest"; printf 'AI file download mode: %s
+' "$AI_FILE_DOWNLOAD_MODE" ;; *) printf '%s
+' "usage: :ai-download ask|auto|metadata|off" ;; esac ;;
     status|progress) case "$rest" in on|1|yes|true) STATUS_UPDATES=1; printf '%s
 ' "status updates enabled" ;; off|0|no|false) STATUS_UPDATES=0; printf '%s
 ' "status updates disabled" ;; *) printf '%s
@@ -2610,6 +2806,7 @@ while [ "$#" -gt 0 ]; do
     -s|--session) shift; SESSION_NAME="${1:-}" ;;
     --stream) STREAM=1 ;;
     --no-stream) STREAM=0 ;;
+    --ai-download) shift; AI_FILE_DOWNLOAD_MODE="${1:-ask}" ;;
     --status|--progress) STATUS_UPDATES=1 ;;
     --no-status|--no-progress) STATUS_UPDATES=0 ;;
     --voice-input) shift; VOICE_INPUT_PATH="${1:-}" ;;
